@@ -1,0 +1,10 @@
+[package]
+name = "typeset-core"
+version = "0.1.0"
+edition = "2021"
+description = "TeX-quality line breaking and CJK typesetting engine"
+
+[dependencies]
+hypher = "0.1"
+
+[dev-dependencies]

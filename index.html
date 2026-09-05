@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Miracle Markdown</title>
+    <style>
+      :root {
+        --chrome: #f7f6f3;
+        --chrome-border: #e4e2dc;
+        --ink: #2a2a28;
+        --muted: #8a8880;
+        --accent: #2f6f4f;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        font: 13px/1.4 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: var(--ink);
+        background: #fdfdfb;
+      }
+      #app { display: flex; flex-direction: column; height: 100%; }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 0 14px;
+        height: 40px;
+        flex: 0 0 40px;
+        background: var(--chrome);
+        border-bottom: 1px solid var(--chrome-border);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      header .title { font-weight: 600; letter-spacing: 0.01em; }
+      header .spacer { flex: 1; }
+
+      .toggles { display: flex; gap: 2px; }
+      .toggle {
+        border: 1px solid transparent;
+        background: transparent;
+        border-radius: 5px;
+        padding: 4px 9px;
+        font: inherit;
+        color: var(--muted);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .toggle:hover { background: #ecebe6; }
+      .toggle[aria-pressed="true"] {
+        background: #fff;
+        border-color: var(--chrome-border);
+        color: var(--ink);
+        font-weight: 500;
+      }
+
+      .sep { width: 1px; height: 18px; background: var(--chrome-border); }
+
+      label.slider { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+      label.slider input { width: 84px; }
+
+      #stage { position: relative; flex: 1; overflow: hidden; }
+      #surface { display: block; width: 100%; height: 100%; cursor: text; }
+
+      /* The input that collects keystrokes and hosts IME composition. It has
+         to be in the layout and focusable — not display:none — or the
+         candidate window has nowhere to anchor. */
+      .hidden-input {
+        position: absolute;
+        width: 2px;
+        padding: 0;
+        border: 0;
+        outline: 0;
+        resize: none;
+        overflow: hidden;
+        opacity: 0;
+        z-index: 1;
+        background: transparent;
+        color: transparent;
+        caret-color: transparent;
+      }
+
+      footer {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 0 14px;
+        height: 26px;
+        flex: 0 0 26px;
+        background: var(--chrome);
+        border-top: 1px solid var(--chrome-border);
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+        font-size: 11px;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      footer .spacer { flex: 1; }
+      footer b { font-weight: 600; color: var(--ink); }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <span class="title">Miracle Markdown</span>
+        <div class="toggles">
+          <button class="toggle" id="open" title="打开一个 Markdown 文件">打开</button>
+          <button class="toggle" id="save" title="保存（⌘S）">保存</button>
+        </div>
+        <span class="sep"></span>
+        <div class="toggles" id="toggles"></div>
+        <span class="spacer"></span>
+        <label class="slider">
+          字号
+          <input id="size" type="range" min="14" max="26" step="1" value="18" />
+        </label>
+        <label class="slider">
+          版心
+          <input id="column" type="range" min="420" max="1100" step="20" value="760" />
+        </label>
+      </header>
+      <div id="stage">
+        <canvas id="surface"></canvas>
+      </div>
+      <footer>
+        <span id="status">正在加载排版引擎…</span>
+        <span class="spacer"></span>
+        <span id="perf"></span>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

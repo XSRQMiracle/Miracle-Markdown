@@ -1,0 +1,572 @@
+/**
+ * Block layout: markdown blocks in, positioned glyph runs out.
+ *
+ * The handshake with the Rust core is two calls per paragraph. The core says
+ * what needs measuring, the host measures it (from cache, nearly always), and
+ * the core breaks and positions. Results are cached per block and measure, so
+ * typing re-typesets exactly one paragraph and everything else is a map hit.
+ */
+
+import init, { Engine } from "../../crates/typeset-wasm/pkg/typeset_wasm.js";
+import {
+  byteToCharIndex,
+  charToByteIndex,
+  cssFont,
+  FALLBACK_MONO,
+  FALLBACK_SANS,
+  FALLBACK_SERIF,
+  Measurer,
+  type TextStyle,
+} from "./measure.js";
+import {
+  parseBlocks,
+  renderBlock,
+  type Block,
+  type RenderedBlock,
+  type Span,
+} from "../markdown/parse.js";
+
+export interface Theme {
+  bodySize: number;
+  /** Width of the text column in pixels. Independent of `bodySize`, so that
+   *  changing the type size changes how much fits on a line rather than where
+   *  the page sits. */
+  columnWidth: number;
+  bodyFamily: string;
+  headingFamily: string;
+  monoFamily: string;
+  lineHeight: number;
+  color: string;
+  mutedColor: string;
+  accentColor: string;
+  codeBackground: string;
+  ruleColor: string;
+}
+
+export const DEFAULT_THEME: Theme = {
+  bodySize: 18,
+  columnWidth: 760,
+  bodyFamily: FALLBACK_SERIF,
+  headingFamily: FALLBACK_SANS,
+  monoFamily: FALLBACK_MONO,
+  lineHeight: 1.75,
+  color: "#1a1a1a",
+  mutedColor: "#8a8a8a",
+  accentColor: "#2f6f4f",
+  codeBackground: "#f5f4f1",
+  ruleColor: "#dcdad4",
+};
+
+export interface TypesetOptions {
+  justify: boolean;
+  cjkLatinSpacing: boolean;
+  punctSqueeze: boolean;
+  protrusion: boolean;
+  hyphenate: boolean;
+  tolerance: number;
+  maxExpand: number;
+  punctStyle: 0 | 1 | 2;
+  /** Draw the box/glue/penalty structure instead of hiding it. */
+  showBadness: boolean;
+}
+
+export const DEFAULT_OPTIONS: TypesetOptions = {
+  justify: true,
+  cjkLatinSpacing: true,
+  punctSqueeze: true,
+  protrusion: true,
+  hyphenate: true,
+  tolerance: 2.0,
+  maxExpand: 0,
+  punctStyle: 0,
+  showBadness: false,
+};
+
+export interface LaidRun {
+  x: number;
+  text: string;
+  /** Document character range, for hit testing and caret placement. */
+  docStart: number;
+  docEnd: number;
+  style: TextStyle;
+  styleKey: string;
+  scaleX: number;
+  /** Set on the hyphen the breaker inserted; it has no source of its own. */
+  synthetic: boolean;
+}
+
+export interface LaidLine {
+  /** Baseline, relative to the top of the block. */
+  baseline: number;
+  runs: LaidRun[];
+  ratio: number;
+  width: number;
+  indent: number;
+}
+
+export interface LaidBlock {
+  block: Block;
+  lines: LaidLine[];
+  /** Total height including the space above and below the block. */
+  height: number;
+  spaceBefore: number;
+  /** Vertical offset of the block within the document, filled in by the
+   *  document layout pass. */
+  y: number;
+  rendered: RenderedBlock;
+  indent: number;
+  marker: string;
+  raw: boolean;
+}
+
+/** Token class codes, mirroring `CharClass` in the Rust core. */
+const CLASS_LETTER = 4;
+
+/** Characters the engine positions one at a time: CJK ideographs, kana, and
+ *  the full-width punctuation whose empty half can be squeezed away. */
+const INDIVIDUALLY_PLACED =
+  /[\u2018\u2019\u201c\u201d\u2000-\u206f\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+
+/** True for a fragment that is safe to draw joined to its neighbour. */
+export function isLatinWordPiece(text: string): boolean {
+  return text.length > 0 && !INDIVIDUALLY_PLACED.test(text);
+}
+
+let engine: Engine | null = null;
+
+export async function initEngine(): Promise<void> {
+  await init();
+  engine = new Engine();
+}
+
+/** Style lookup for a span, cached by key so `measureText` can key on it. */
+function styleForSpan(
+  theme: Theme,
+  block: Block,
+  span: Span | null,
+): { style: TextStyle; key: string } {
+  const heading = block.type === "heading";
+  const code = block.type === "code" || span?.code;
+
+  let size = theme.bodySize;
+  if (heading) {
+    const scale = [1.9, 1.55, 1.3, 1.15, 1.05, 1.0][Math.min(block.level, 6) - 1] ?? 1;
+    size = Math.round(theme.bodySize * scale);
+  } else if (code) {
+    size = Math.round(theme.bodySize * 0.88);
+  }
+
+  const family = code
+    ? theme.monoFamily
+    : heading
+      ? theme.headingFamily
+      : theme.bodyFamily;
+  const weight = heading ? 700 : span?.strong ? 700 : 400;
+  const italic = !!span?.em;
+  const color = span?.href
+    ? theme.accentColor
+    : block.type === "quote"
+      ? theme.mutedColor
+      : theme.color;
+
+  const style: TextStyle = {
+    family,
+    size,
+    weight,
+    italic,
+    color,
+    lineHeight: heading ? 1.35 : code ? 1.55 : theme.lineHeight,
+  };
+  return { style, key: cssFont(style) };
+}
+
+/** Extra space above a block, in pixels. TeX's vertical glue. */
+function spaceAbove(block: Block, theme: Theme, previous: Block | null): number {
+  if (!previous) return 0;
+  switch (block.type) {
+    case "heading":
+      // Headings bind more tightly to what follows than to what precedes.
+      return theme.bodySize * (block.level <= 2 ? 1.6 : 1.2);
+    case "code":
+      return theme.bodySize * 0.9;
+    case "rule":
+      return theme.bodySize * 1.2;
+    case "blank":
+      return 0;
+    case "list":
+      return previous.type === "list" ? theme.bodySize * 0.25 : theme.bodySize * 0.7;
+    default:
+      return previous.type === "blank" || previous.type === "heading"
+        ? theme.bodySize * 0.7
+        : theme.bodySize * 0.7;
+  }
+}
+
+export class Typesetter {
+  private measurer = new Measurer();
+  private cache = new Map<string, LaidBlock>();
+  private version = 0;
+
+  constructor(
+    public theme: Theme = { ...DEFAULT_THEME },
+    public options: TypesetOptions = { ...DEFAULT_OPTIONS },
+  ) {}
+
+  get ready(): Promise<void> {
+    return this.measurer.ready;
+  }
+
+  /** Invalidate everything. Called when the theme or options change. */
+  invalidate(): void {
+    this.measurer.invalidate();
+    this.cache.clear();
+    this.version++;
+  }
+
+  measureText(text: string, style: TextStyle, key: string): number {
+    return this.measurer.width(text, style, key);
+  }
+
+  prefixWidth(text: string, chars: number, style: TextStyle): number {
+    return this.measurer.prefixWidth(text, chars, style);
+  }
+
+  /** Lay out a whole document, returning blocks with absolute y positions. */
+  layoutDocument(
+    doc: string,
+    width: number,
+    focusedBlock: number,
+  ): { blocks: LaidBlock[]; height: number } {
+    const parsed = parseBlocks(doc);
+    const out: LaidBlock[] = [];
+    let y = 0;
+    for (let i = 0; i < parsed.length; i++) {
+      const b = parsed[i];
+      if (b.type === "blank") continue;
+      const laid = this.layoutBlock(b, width, i === focusedBlock, out.at(-1)?.block ?? null);
+      laid.y = y + laid.spaceBefore;
+      y = laid.y + laid.height - laid.spaceBefore;
+      out.push(laid);
+    }
+    return { blocks: out, height: y };
+  }
+
+  private layoutBlock(
+    block: Block,
+    width: number,
+    raw: boolean,
+    previous: Block | null,
+  ): LaidBlock {
+    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${block.type}|${block.level}|${block.start}|${block.source}`;
+    const hit = this.cache.get(key);
+    if (hit) return hit;
+
+    const laid = this.buildBlock(block, width, raw, previous);
+    // A cache that grows without bound would outlive its usefulness on a long
+    // document; the working set is the visible screen plus a little.
+    if (this.cache.size > 4000) this.cache.clear();
+    this.cache.set(key, laid);
+    return laid;
+  }
+
+  private buildBlock(
+    block: Block,
+    width: number,
+    raw: boolean,
+    previous: Block | null,
+  ): LaidBlock {
+    const theme = this.theme;
+    const rendered = renderBlock(block, raw);
+    const spaceBefore = spaceAbove(block, theme, previous);
+
+    const indent =
+      block.type === "quote"
+        ? theme.bodySize * 1.4
+        : block.type === "list"
+          ? theme.bodySize * 1.6 * block.level
+          : 0;
+    const measure = Math.max(width - indent, theme.bodySize * 4);
+
+    if (block.type === "rule") {
+      return {
+        block,
+        lines: [],
+        height: spaceBefore + theme.bodySize * 1.2,
+        spaceBefore,
+        y: 0,
+        rendered,
+        indent,
+        marker: "",
+        raw,
+      };
+    }
+
+    // Code keeps its own line structure: breaking it optimally would be
+    // actively wrong.
+    if (block.type === "code" && !raw) {
+      return this.buildPreformatted(block, rendered, spaceBefore, indent, raw);
+    }
+
+    const lines =
+      block.type === "code"
+        ? this.buildPreformatted(block, rendered, spaceBefore, indent, raw).lines
+        : this.breakParagraph(block, rendered, measure, indent);
+
+    const first = lines[0];
+    const lh = first
+      ? first.runs[0]?.style.lineHeight ?? theme.lineHeight
+      : theme.lineHeight;
+    const height =
+      spaceBefore + (lines.length ? lines.at(-1)!.baseline + theme.bodySize * lh * 0.35 : 0);
+
+    return {
+      block,
+      lines,
+      height,
+      spaceBefore,
+      y: 0,
+      rendered,
+      indent,
+      marker: block.type === "list" ? block.marker : "",
+      raw,
+    };
+  }
+
+  /** Fenced code and the focused block: one source line per display line. */
+  private buildPreformatted(
+    block: Block,
+    rendered: RenderedBlock,
+    spaceBefore: number,
+    indent: number,
+    raw: boolean,
+  ): LaidBlock {
+    const { style, key } = styleForSpan(this.theme, block, null);
+    const lineHeight = style.size * style.lineHeight;
+    const lines: LaidLine[] = [];
+    const text = rendered.text;
+    let at = 0;
+    let n = 0;
+    // A fenced block's own ``` lines are structure, not content.
+    const hideFence = block.type === "code" && !raw;
+    const src = text.split("\n");
+    for (let li = 0; li < src.length; li++) {
+      const lineText = src[li];
+      const isFence = hideFence && (li === 0 || li === src.length - 1) && /^\s*(`{3,}|~{3,})/.test(lineText);
+      if (!isFence) {
+        lines.push({
+          baseline: n * lineHeight + style.size * 0.82,
+          ratio: 0,
+          width: this.measurer.width(lineText, style, key),
+          indent,
+          runs: lineText.length
+            ? [
+                {
+                  x: 0,
+                  text: lineText,
+                  docStart: rendered.map[at],
+                  docEnd: rendered.map[Math.min(at + lineText.length, rendered.map.length - 1)],
+                  style,
+                  styleKey: key,
+                  scaleX: 1,
+                  synthetic: false,
+                },
+              ]
+            : [],
+        });
+        n++;
+      }
+      at += lineText.length + 1;
+    }
+    const height = spaceBefore + n * lineHeight + style.size * 0.5;
+    return {
+      block,
+      lines,
+      height,
+      spaceBefore,
+      y: 0,
+      rendered,
+      indent,
+      marker: "",
+      raw,
+    };
+  }
+
+  /**
+   * Rejoin runs that are contiguous in the source, share a style and sit
+   * flush against one another — the pieces of a word that was offered a
+   * hyphenation point but not broken at it.
+   *
+   * Drawing them as one `fillText` restores the kerning across the join.
+   *
+   * Restricted to Latin script, because that is the only thing coalescing is
+   * for. A CJK glyph is positioned individually — squeezed punctuation is
+   * shifted inside its own em box — and merging those into one draw call
+   * would hand their positions back to the platform and undo the adjustment.
+   * The flush-position check below would catch most such cases, but "most" is
+   * not worth relying on when "only ever join letters" is simpler and exact.
+   */
+  private coalesce(runs: LaidRun[]): LaidRun[] {
+    if (runs.length < 2) return runs;
+    const out: LaidRun[] = [runs[0]];
+    for (let i = 1; i < runs.length; i++) {
+      const run = runs[i];
+      const prev = out[out.length - 1];
+      const joinable =
+        !run.synthetic &&
+        !prev.synthetic &&
+        isLatinWordPiece(prev.text) &&
+        isLatinWordPiece(run.text) &&
+        prev.styleKey === run.styleKey &&
+        prev.scaleX === run.scaleX &&
+        prev.docEnd === run.docStart &&
+        Math.abs(
+          prev.x + this.measureText(prev.text, prev.style, prev.styleKey) * prev.scaleX - run.x,
+        ) < 0.05;
+      if (joinable) {
+        out[out.length - 1] = { ...prev, text: prev.text + run.text, docEnd: run.docEnd };
+      } else {
+        out.push(run);
+      }
+    }
+    return out;
+  }
+
+  /** The real work: hand the paragraph to the Knuth-Plass core. */
+  private breakParagraph(
+    block: Block,
+    rendered: RenderedBlock,
+    measure: number,
+    indent: number,
+  ): LaidLine[] {
+    if (!engine) throw new Error("engine not initialised");
+    const text = rendered.text;
+    if (!text.length) return [];
+
+    const base = styleForSpan(this.theme, block, null);
+    engine.configure(
+      base.style.size,
+      this.options.justify && block.type !== "heading",
+      this.options.cjkLatinSpacing,
+      this.options.punctSqueeze,
+      this.options.protrusion,
+      this.options.hyphenate,
+      this.options.tolerance,
+      this.options.maxExpand,
+      this.options.punctStyle,
+    );
+
+    const tokens = engine.tokenize(text);
+    const count = tokens.length / 3;
+    const advances = new Float32Array(count);
+
+    // Resolve which span a byte offset falls in, so bold and code runs are
+    // measured with the face they will be drawn in.
+    const toChar = byteToCharIndex(text);
+    const toByte = charToByteIndex(text);
+    const spanStyles = rendered.spans.map((s) => ({
+      span: s,
+      ...styleForSpan(this.theme, block, s),
+    }));
+    const styleAt = (byteOffset: number) => {
+      const ch = toChar(byteOffset);
+      for (const s of spanStyles) {
+        if (ch >= s.span.start && ch < s.span.end) return s;
+      }
+      return spanStyles[0] ?? base;
+    };
+
+    // Measure. Pieces of one hyphenated word arrive as separate tokens that
+    // touch in the source; those are measured as differences between prefixes
+    // of the whole word, so the kerning between them is counted exactly once
+    // and the pieces sum to the width the word has when it is not broken.
+    for (let i = 0, t = 0; i < count; ) {
+      let n = 1;
+      if (tokens[t + 2] === CLASS_LETTER) {
+        while (
+          i + n < count &&
+          tokens[t + n * 3 + 2] === CLASS_LETTER &&
+          tokens[t + n * 3] === tokens[t + (n - 1) * 3 + 1] &&
+          styleAt(tokens[t + n * 3]).key === styleAt(tokens[t]).key
+        ) {
+          n++;
+        }
+      }
+
+      const st = styleAt(tokens[t]);
+      if (n === 1) {
+        const slice = text.slice(toChar(tokens[t]), toChar(tokens[t + 1]));
+        advances[i] = this.measurer.width(slice, st.style, st.key);
+      } else {
+        const from = toChar(tokens[t]);
+        let previous = 0;
+        for (let k = 0; k < n; k++) {
+          const upto = toChar(tokens[t + k * 3 + 1]);
+          const cumulative = this.measurer.width(text.slice(from, upto), st.style, st.key);
+          advances[i + k] = cumulative - previous;
+          previous = cumulative;
+        }
+      }
+      i += n;
+      t += n * 3;
+    }
+
+    engine.prepare(advances, this.measurer.spaceWidth(base.style, base.key));
+    const flat = engine.layout(measure);
+
+    // Decode the flat buffer the core returned.
+    const lines: LaidLine[] = [];
+    const lineCount = flat[0];
+    const lineHeight = base.style.size * base.style.lineHeight;
+    let p = 1;
+    for (let l = 0; l < lineCount; l++) {
+      const runCount = flat[p];
+      const ratio = flat[p + 1];
+      const width = flat[p + 2];
+      p += 6;
+      const runs: LaidRun[] = [];
+      for (let r = 0; r < runCount; r++) {
+        const x = flat[p];
+        const s = flat[p + 1];
+        const e = flat[p + 2];
+        const scaleX = flat[p + 3];
+        p += 4;
+        if (s < 0) {
+          const prev = runs.at(-1);
+          runs.push({
+            x,
+            text: "-",
+            docStart: prev?.docEnd ?? 0,
+            docEnd: prev?.docEnd ?? 0,
+            style: prev?.style ?? base.style,
+            styleKey: prev?.styleKey ?? base.key,
+            scaleX,
+            synthetic: true,
+          });
+          continue;
+        }
+        const cs = toChar(s);
+        const ce = toChar(e);
+        const st = styleAt(s);
+        runs.push({
+          x,
+          text: text.slice(cs, ce),
+          docStart: rendered.map[cs] ?? 0,
+          docEnd: rendered.map[ce] ?? rendered.map[rendered.map.length - 1],
+          style: st.style,
+          styleKey: st.key,
+          scaleX,
+          synthetic: false,
+        });
+      }
+      lines.push({
+        baseline: l * lineHeight + base.style.size * 0.82,
+        runs: this.coalesce(runs),
+        ratio,
+        width,
+        indent,
+      });
+    }
+    void toByte;
+    return lines;
+  }
+}
