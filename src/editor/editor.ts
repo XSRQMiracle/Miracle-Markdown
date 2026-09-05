@@ -16,7 +16,12 @@
  */
 
 import { Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
-import { parseBlocks, type Block } from "../markdown/parse.js";
+import {
+  blockIndexAtPosition,
+  parseBlocks,
+  sourceRangeOwnsPosition,
+  type Block,
+} from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
 import {
   DEFAULT_OPTIONS,
@@ -210,10 +215,7 @@ export class Editor {
     }
     const caret = this.selEnd;
     const blocks = this.parseCache.blocks;
-    for (let i = 0; i < blocks.length; i++) {
-      if (caret >= blocks[i].start && caret <= blocks[i].end) return i;
-    }
-    return -1;
+    return blockIndexAtPosition(blocks, caret);
   }
 
   private parseCache: { text: string; blocks: Block[] } | null = null;
@@ -361,8 +363,9 @@ export class Editor {
 
   /** Find the block, line and x offset for a document position. */
   private locate(offset: number): { block: LaidBlock; line: LaidLine; x: number } | null {
-    for (const b of this.blocks) {
-      if (offset < b.block.start || offset > b.block.end) continue;
+    for (let i = 0; i < this.blocks.length; i++) {
+      const b = this.blocks[i];
+      if (!sourceRangeOwnsPosition(b.block, this.blocks[i + 1]?.block, offset)) continue;
       for (const line of b.lines) {
         for (const run of line.runs) {
           if (run.synthetic) continue;

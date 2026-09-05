@@ -85,6 +85,64 @@ const QUOTE = /^\s*>\s?(.*)$/;
 const UL = /^(\s*)([-*+])\s+(.*)$/;
 const OL = /^(\s*)(\d+)([.)])\s+(.*)$/;
 
+interface BlockMathOpen {
+  opener: "$$" | "\\[";
+  closer: "$$" | "\\]";
+  openAt: number;
+  /** A closer on the opening line. A non-terminal closer disqualifies the line as a block. */
+  sameLineClose: number;
+}
+
+/** Find a delimiter that is not itself escaped by an odd run of backslashes. */
+function findUnescapedDelimiter(source: string, delimiter: string, from: number): number {
+  let at = source.indexOf(delimiter, from);
+  while (at >= 0) {
+    let slashes = 0;
+    for (let i = at - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
+    if (slashes % 2 === 0) return at;
+    // Advance one code unit so overlapping dollar runs (for example \$$$)
+    // still expose a later unescaped candidate.
+    at = source.indexOf(delimiter, at + 1);
+  }
+  return -1;
+}
+
+/**
+ * Recognise a display-math block opener without stealing a partial line.
+ *
+ * A complete one-line block may only have whitespace after its closer. When
+ * text follows, the whole line remains a paragraph and the inline scanner can
+ * preserve both the display formula and its suffix.
+ */
+function matchBlockMathOpen(line: string): BlockMathOpen | null {
+  const match = MATH_OPEN.exec(line);
+  if (!match) return null;
+  const opener = match[1] as BlockMathOpen["opener"];
+  const closer = opener === "$$" ? "$$" : "\\]";
+  const openAt = line.indexOf(opener);
+  const sameLineClose = findUnescapedDelimiter(line, closer, openAt + opener.length);
+  if (
+    sameLineClose >= 0 &&
+    line.slice(sameLineClose + closer.length).trim() !== ""
+  ) {
+    return null;
+  }
+  return { opener, closer, openAt, sameLineClose };
+}
+
+function interruptsParagraph(line: string): boolean {
+  return (
+    line.trim() === "" ||
+    HEADING.test(line) ||
+    FENCE.test(line) ||
+    matchBlockMathOpen(line) !== null ||
+    RULE.test(line) ||
+    QUOTE.test(line) ||
+    UL.test(line) ||
+    OL.test(line)
+  );
+}
+
 /**
  * Split a document into blocks.
  *
@@ -112,25 +170,45 @@ export function parseBlocks(doc: string): Block[] {
     const start = offsets[i];
 
     // Display math, opened by $$ or \[. Both may close on the same line.
-    const mathOpen = MATH_OPEN.exec(line);
+    const mathOpen = matchBlockMathOpen(line);
     if (mathOpen) {
-      const opener = mathOpen[1];
-      const closer = opener === "$$" ? "$$" : "\\]";
-      const afterOpen = start + line.indexOf(opener) + opener.length;
-      const sameLine = line.indexOf(closer, line.indexOf(opener) + opener.length);
+      const { opener, closer, openAt, sameLineClose } = mathOpen;
+      const afterOpen = start + openAt + opener.length;
       let end: number;
       let bodyEnd: number;
-      if (sameLine >= 0) {
-        bodyEnd = start + sameLine;
-        end = bodyEnd + closer.length;
+      let suffix: Block | null = null;
+      if (sameLineClose >= 0) {
+        bodyEnd = start + sameLineClose;
+        // matchBlockMathOpen guarantees that only whitespace follows. Keep it
+        // in the raw block so source ranges still cover the complete line.
+        end = start + line.length;
         i++;
       } else {
         let j = i + 1;
-        while (j < count && !lines[j].includes(closer)) j++;
+        let closeAt = -1;
+        while (j < count) {
+          closeAt = findUnescapedDelimiter(lines[j], closer, 0);
+          if (closeAt >= 0) break;
+          j++;
+        }
         if (j < count) {
-          bodyEnd = offsets[j] + lines[j].indexOf(closer);
-          end = bodyEnd + closer.length;
-          i = j + 1;
+          bodyEnd = offsets[j] + closeAt;
+          const closeEnd = bodyEnd + closer.length;
+          const tail = lines[j].slice(closeAt + closer.length);
+          if (tail.trim() === "") {
+            end = offsets[j] + lines[j].length;
+            i = j + 1;
+          } else {
+            // A block closer ends the formula, but any source following it is
+            // a paragraph rather than disposable trivia. Include ordinary
+            // continuation lines so the split does not invent a hard break.
+            end = closeEnd;
+            let k = j + 1;
+            while (k < count && !interruptsParagraph(lines[k])) k++;
+            const suffixEnd = blockEnd(doc, offsets, lines.length, k, closeEnd, tail);
+            suffix = block("paragraph", doc.slice(closeEnd, suffixEnd), closeEnd, suffixEnd);
+            i = k;
+          }
         } else {
           // Unterminated: treat the rest of the document as the formula so the
           // reader can see what they are typing rather than losing it.
@@ -144,6 +222,7 @@ export function parseBlocks(doc: string): Block[] {
           math: doc.slice(afterOpen, bodyEnd),
         }),
       );
+      if (suffix) blocks.push(suffix);
       continue;
     }
 
@@ -229,19 +308,7 @@ export function parseBlocks(doc: string): Block[] {
 
     // Paragraph: run on until a blank line or a block that interrupts.
     let j = i + 1;
-    while (
-      j < count &&
-      lines[j].trim() !== "" &&
-      !HEADING.test(lines[j]) &&
-      !FENCE.test(lines[j]) &&
-      !MATH_OPEN.test(lines[j]) &&
-      !RULE.test(lines[j]) &&
-      !QUOTE.test(lines[j]) &&
-      !UL.test(lines[j]) &&
-      !OL.test(lines[j])
-    ) {
-      j++;
-    }
+    while (j < count && !interruptsParagraph(lines[j])) j++;
     const end = blockEnd(doc, offsets, lines.length, j, start, line);
     blocks.push(block("paragraph", doc.slice(start, end), start, end));
     i = j;
@@ -251,6 +318,37 @@ export function parseBlocks(doc: string): Block[] {
     blocks.push(block("paragraph", "", 0, 0));
   }
   return blocks;
+}
+
+/**
+ * Locate a caret position in an ordered block list.
+ *
+ * Block source ranges are half-open, while a caret may also sit just after a
+ * block's last character. Usually that end position still belongs to the
+ * block. If the next block starts at the exact same position, however, the
+ * shared boundary belongs to the next block so adjacent source fragments stay
+ * editable.
+ */
+export function blockIndexAtPosition(blocks: readonly Block[], position: number): number {
+  for (let i = 0; i < blocks.length; i++) {
+    if (sourceRangeOwnsPosition(blocks[i], blocks[i + 1], position)) return i;
+  }
+  return -1;
+}
+
+export interface SourceRange {
+  start: number;
+  end: number;
+}
+
+/** The shared ownership rule used by parsing, focus and canvas hit testing. */
+export function sourceRangeOwnsPosition(
+  current: SourceRange,
+  next: SourceRange | undefined,
+  position: number,
+): boolean {
+  if (position < current.start || position > current.end) return false;
+  return position !== current.end || next?.start !== position;
 }
 
 /**
@@ -498,7 +596,7 @@ export function parseInline(
 
     if (options.texDelimiters && c === "\\" && (body[i + 1] === "(" || body[i + 1] === "[")) {
       const display = body[i + 1] === "[";
-      const close = body.indexOf(display ? "\\]" : "\\)", i + 2);
+      const close = findUnescapedDelimiter(body, display ? "\\]" : "\\)", i + 2);
       if (close > 0) {
         swaps.push({ from: i, to: close + 2 });
         formats.push({
