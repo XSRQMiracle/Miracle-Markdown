@@ -114,10 +114,11 @@ function findUnescapedDelimiter(source: string, delimiter: string, from: number)
  * text follows, the whole line remains a paragraph and the inline scanner can
  * preserve both the display formula and its suffix.
  */
-function matchBlockMathOpen(line: string): BlockMathOpen | null {
+function matchBlockMathOpen(line: string, options: InlineOptions): BlockMathOpen | null {
   const match = MATH_OPEN.exec(line);
   if (!match) return null;
   const opener = match[1] as BlockMathOpen["opener"];
+  if (opener === "$$" ? !options.inlineMath : !options.texDelimiters) return null;
   const closer = opener === "$$" ? "$$" : "\\]";
   const openAt = line.indexOf(opener);
   const sameLineClose = findUnescapedDelimiter(line, closer, openAt + opener.length);
@@ -130,12 +131,12 @@ function matchBlockMathOpen(line: string): BlockMathOpen | null {
   return { opener, closer, openAt, sameLineClose };
 }
 
-function interruptsParagraph(line: string): boolean {
+function interruptsParagraph(line: string, options: InlineOptions): boolean {
   return (
     line.trim() === "" ||
     HEADING.test(line) ||
     FENCE.test(line) ||
-    matchBlockMathOpen(line) !== null ||
+    matchBlockMathOpen(line, options) !== null ||
     RULE.test(line) ||
     QUOTE.test(line) ||
     UL.test(line) ||
@@ -150,7 +151,10 @@ function interruptsParagraph(line: string): boolean {
  * document on every keystroke is affordable at this granularity, and it
  * sidesteps a class of incremental-parser bugs that a v1 does not need.
  */
-export function parseBlocks(doc: string): Block[] {
+export function parseBlocks(
+  doc: string,
+  options: InlineOptions = DEFAULT_INLINE_OPTIONS,
+): Block[] {
   const blocks: Block[] = [];
   const lines = doc.split("\n");
   const offsets = new Int32Array(lines.length + 1);
@@ -170,7 +174,7 @@ export function parseBlocks(doc: string): Block[] {
     const start = offsets[i];
 
     // Display math, opened by $$ or \[. Both may close on the same line.
-    const mathOpen = matchBlockMathOpen(line);
+    const mathOpen = matchBlockMathOpen(line, options);
     if (mathOpen) {
       const { opener, closer, openAt, sameLineClose } = mathOpen;
       const afterOpen = start + openAt + opener.length;
@@ -204,7 +208,7 @@ export function parseBlocks(doc: string): Block[] {
             // continuation lines so the split does not invent a hard break.
             end = closeEnd;
             let k = j + 1;
-            while (k < count && !interruptsParagraph(lines[k])) k++;
+            while (k < count && !interruptsParagraph(lines[k], options)) k++;
             const suffixEnd = blockEnd(doc, offsets, lines.length, k, closeEnd, tail);
             suffix = block("paragraph", doc.slice(closeEnd, suffixEnd), closeEnd, suffixEnd);
             i = k;
@@ -308,7 +312,7 @@ export function parseBlocks(doc: string): Block[] {
 
     // Paragraph: run on until a blank line or a block that interrupts.
     let j = i + 1;
-    while (j < count && !interruptsParagraph(lines[j])) j++;
+    while (j < count && !interruptsParagraph(lines[j], options)) j++;
     const end = blockEnd(doc, offsets, lines.length, j, start, line);
     blocks.push(block("paragraph", doc.slice(start, end), start, end));
     i = j;

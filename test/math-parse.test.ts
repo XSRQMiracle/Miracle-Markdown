@@ -111,6 +111,25 @@ eq(formulas("$x = \\$5$"), ["x = \\$5"], "an escaped dollar inside math does not
   eq(m ? m.math.trim() : null, "x + y", "a one-line display block");
 }
 {
+  const doc = "$$\nx\n$$";
+  const options = { ...strict, inlineMath: false };
+  const blocks = parseBlocks(doc, options);
+  eq(blocks.map((b) => b.type), ["paragraph"], "disabling dollar math also disables dollar blocks");
+  eq(blocks[0].source, doc, "disabled dollar block syntax remains source text");
+}
+{
+  const doc = "\\[\nx\n\\]";
+  const options = { ...strict, texDelimiters: false };
+  const blocks = parseBlocks(doc, options);
+  eq(blocks.map((b) => b.type), ["paragraph"], "disabling TeX delimiters also disables TeX blocks");
+  eq(blocks[0].source, doc, "disabled TeX block syntax remains source text");
+}
+{
+  const doc = "```math\nx\n```";
+  const options = { ...strict, inlineMath: false, texDelimiters: false };
+  eq(parseBlocks(doc, options)[0].type, "math", "an explicit math fence is independent of delimiters");
+}
+{
   const doc = "$$x$$ trailing";
   const [b] = parseBlocks(doc);
   const r = renderBlock(b, false);

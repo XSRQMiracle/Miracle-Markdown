@@ -111,6 +111,10 @@ export class Editor {
 
   setOptions(patch: Partial<TypesetOptions>): void {
     Object.assign(this.typesetter.options, patch);
+    // Delimiter options affect block boundaries as well as inline rendering.
+    // A cache keyed only by source would otherwise disagree with layout about
+    // which block owns the caret after a setting changes.
+    this.parseCache = null;
     this.typesetter.invalidate();
     this.invalidate();
   }
@@ -211,7 +215,10 @@ export class Editor {
     // an unfocused editor shows the document fully typeset.
     if (!this.hasFocus || !this.interacted) return -1;
     if (!this.parseCache || this.parseCache.text !== this.text) {
-      this.parseCache = { text: this.text, blocks: parseBlocks(this.text) };
+      this.parseCache = {
+        text: this.text,
+        blocks: parseBlocks(this.text, this.options.inline),
+      };
     }
     const caret = this.selEnd;
     const blocks = this.parseCache.blocks;

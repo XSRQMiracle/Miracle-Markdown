@@ -449,7 +449,7 @@ export class Typesetter {
     width: number,
     focusedBlock: number,
   ): { blocks: LaidBlock[]; height: number } {
-    const parsed = parseBlocks(doc);
+    const parsed = parseBlocks(doc, this.options.inline);
     const numbering = numberEquations(parsed, this.options.numbering);
     const out: LaidBlock[] = [];
     let y = 0;
