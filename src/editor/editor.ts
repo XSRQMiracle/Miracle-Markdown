@@ -17,6 +17,7 @@
 
 import { Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
 import { parseBlocks, type Block } from "../markdown/parse.js";
+import { normalizeLineEndings } from "../markdown/document.js";
 import {
   DEFAULT_OPTIONS,
   DEFAULT_THEME,
@@ -128,7 +129,7 @@ export class Editor {
   }
 
   setText(text: string): void {
-    this.text = text;
+    this.text = normalizeLineEndings(text);
     this.selStart = this.selEnd = 0;
     this.undoStack = [];
     this.redoStack = [];
@@ -437,6 +438,7 @@ export class Editor {
   }
 
   private replace(from: number, to: number, insert: string, coalesce = false): void {
+    insert = normalizeLineEndings(insert);
     this.pushUndo(coalesce);
     this.onChange?.();
     this.text = this.text.slice(0, from) + insert + this.text.slice(to);
@@ -569,7 +571,7 @@ export class Editor {
 
     this.input.addEventListener("compositionupdate", (e) => {
       if (!this.composing) return;
-      const data = (e as CompositionEvent).data ?? "";
+      const data = normalizeLineEndings((e as CompositionEvent).data ?? "");
       const { start, length } = this.composing;
       this.text = this.text.slice(0, start) + data + this.text.slice(start + length);
       this.composing = { start, length: data.length };
