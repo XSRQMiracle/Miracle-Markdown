@@ -109,6 +109,12 @@ pub struct Atom {
     pub class: CharClass,
     /// Natural advance as measured by the host.
     pub width: f32,
+    /// Distance from the baseline to the top of the atom's ink. For ordinary
+    /// text this is the font's ascent; a fraction or a large operator reaches
+    /// higher, and the line it lands on has to make room.
+    pub height: f32,
+    /// Distance from the baseline down to the bottom of the atom's ink.
+    pub depth: f32,
     /// How much the glyph may be squeezed on each side (punctuation only).
     pub shrink_left: f32,
     pub shrink_right: f32,
@@ -150,6 +156,15 @@ pub struct Config {
     /// pdfTeX's `hz` font expansion, as a fraction. 0.02 means glyphs may be
     /// scaled up to ±2% horizontally to relieve the word spaces.
     pub max_expand: f32,
+    /// TeX's `\baselineskip`: the distance from one baseline to the next when
+    /// nothing on either line is unusually tall or deep.
+    pub baseline_skip: f32,
+    /// TeX's `\lineskip`: the clearance used instead, when honouring
+    /// `baseline_skip` would let two lines collide.
+    pub line_skip: f32,
+    /// TeX's `\lineskiplimit`: the clearance below which `line_skip` takes
+    /// over. TeX's default is 0, meaning "only once the boxes actually touch".
+    pub line_skip_limit: f32,
 }
 
 impl Default for Config {
@@ -168,6 +183,9 @@ impl Default for Config {
             tolerance: 2.0,
             cjk_stretch: 0.02,
             max_expand: 0.0,
+            baseline_skip: 16.0 * 1.75,
+            line_skip: 16.0 * 0.08,
+            line_skip_limit: 0.0,
         }
     }
 }

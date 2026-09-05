@@ -114,12 +114,15 @@ fn protrusion(c: char, class: CharClass, width: f32, em: f32) -> (f32, f32) {
 
 /// Build the horizontal list.
 ///
-/// `advances` must be parallel to `tokens` and hold each token's measured
-/// width in pixels.
+/// `metrics` holds three floats per token — advance, height above the
+/// baseline, depth below it — in the same order as `tokens`. The vertical
+/// pair is what lets a line make room for something taller than the text,
+/// which is the whole reason a formula can sit inline without colliding with
+/// the line above.
 pub fn prepare(
     text: &str,
     tokens: &[Token],
-    advances: &[f32],
+    metrics: &[f32],
     space_width: f32,
     config: Config,
 ) -> Paragraph {
@@ -133,7 +136,9 @@ pub fn prepare(
     let last_char = |t: &Token| text[t.start as usize..t.end as usize].chars().next_back();
 
     for (i, tok) in tokens.iter().enumerate() {
-        let width = advances.get(i).copied().unwrap_or(0.0);
+        let width = metrics.get(i * 3).copied().unwrap_or(0.0);
+        let height = metrics.get(i * 3 + 1).copied().unwrap_or(0.0);
+        let depth = metrics.get(i * 3 + 2).copied().unwrap_or(0.0);
         let c = match first_char(tok) {
             Some(c) => c,
             None => continue,
@@ -173,6 +178,8 @@ pub fn prepare(
             end: tok.end,
             class: tok.class,
             width,
+            height,
+            depth,
             shrink_left: shrink_l,
             shrink_right: shrink_r,
             protrude_left,

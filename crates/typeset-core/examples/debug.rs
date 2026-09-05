@@ -52,7 +52,7 @@ fn run(label: &str, text: &str, ems: f32) {
     let adv = measure(text, &tokens);
     let para = prepare(text, &tokens, &adv, EM / 3.0, cfg);
     let breaks = break_lines(&para, width);
-    let lines = layout_lines(&para, &breaks, width);
+    let lines = layout_lines(&para, &breaks);
 
     let kp: Vec<f32> = breaks[..breaks.len().saturating_sub(1)].iter().map(|b| b.ratio).collect();
     let gr = greedy(&para, width);

@@ -12,8 +12,7 @@
  * millisecond per frame.
  */
 
-import type { LaidBlock } from "../engine/typeset.js";
-import type { Theme } from "../engine/typeset.js";
+import type { LaidBlock, LaidRun, Theme } from "../engine/typeset.js";
 import { cssFont } from "../engine/measure.js";
 
 export interface Viewport {
@@ -113,9 +112,17 @@ export class Renderer {
         if (showBadness) this.drawBadness(b, line, y, theme);
 
         for (const run of line.runs) {
+          const x = b.indent + line.indent * 0 + run.x;
+
+          // A formula draws as outlines rather than text: MathJax laid it out,
+          // we own where it goes. One fill call, whatever its complexity.
+          if (run.math) {
+            this.drawMath(run, x, y, theme);
+            continue;
+          }
+
           this.setFont(cssFont(run.style));
           this.setFill(run.style.color);
-          const x = b.indent + line.indent * 0 + run.x;
           if (run.scaleX !== 1) {
             ctx.save();
             ctx.translate(x, y);
@@ -141,6 +148,36 @@ export class Renderer {
     }
 
     ctx.restore();
+  }
+
+  /**
+   * Draw a formula.
+   *
+   * The outlines arrive in the SVG's own units with the baseline at the
+   * origin, so placing them is a translate to the baseline and a uniform
+   * scale. When the formula did not parse we fall back to its source, which
+   * is the honest thing to show while it is still being typed.
+   */
+  private drawMath(run: LaidRun, x: number, baseline: number, theme: Theme): void {
+    const math = run.math!;
+    const ctx = this.ctx;
+
+    if (!math.geometry.path || math.geometry.error) {
+      // Show the LaTeX itself, tinted, rather than a gap or a broken glyph.
+      const text = math.source || "…";
+      this.setFont(cssFont({ ...run.style, italic: false, family: theme.monoFamily }));
+      this.setFill(math.geometry.error === "loading" ? theme.mutedColor : "#b3402f");
+      ctx.fillText(text, x, baseline);
+      return;
+    }
+
+    ctx.save();
+    ctx.translate(x, baseline);
+    ctx.scale(math.scale, math.scale);
+    ctx.fillStyle = run.style.color;
+    ctx.fill(math.geometry.path);
+    ctx.restore();
+    this.currentFill = "";
   }
 
   /** Quote bars, code panels, rules and list bullets. */

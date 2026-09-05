@@ -7,6 +7,8 @@ import { Editor, type StatusInfo } from "./editor/editor.js";
 import { initEngine, type TypesetOptions } from "./engine/typeset.js";
 import { SAMPLE } from "./sample.js";
 import { isDesktop, openDocument, saveDocument } from "./platform.js";
+import { DEFAULT_MATH_OPTIONS, initMath, type MathOptions } from "./engine/mathjax.js";
+import { buildMathPanel } from "./ui/math-panel.js";
 
 const stage = document.getElementById("stage") as HTMLElement;
 const canvas = document.getElementById("surface") as HTMLCanvasElement;
@@ -120,6 +122,24 @@ async function main() {
   if (import.meta.env.DEV) {
     (window as unknown as { editor: Editor }).editor = editor;
   }
+
+  // MathJax loads in the background. Until it arrives, formulas render as
+  // their own source, which is the right thing to show anyway while one is
+  // being typed; once it is ready the document re-typesets with real boxes.
+  const mathOptions: MathOptions = { ...DEFAULT_MATH_OPTIONS };
+  const reloadMath = async () => {
+    await initMath(mathOptions);
+    editor.invalidateMath();
+  };
+  void reloadMath();
+
+  buildMathPanel(
+    document.getElementById("math-panel") as HTMLElement,
+    document.getElementById("math-button") as HTMLElement,
+    editor,
+    mathOptions,
+    reloadMath,
+  );
 
   editor.focus();
   window.addEventListener("resize", () => editor.invalidate());

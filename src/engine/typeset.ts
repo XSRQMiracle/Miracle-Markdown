@@ -18,9 +18,13 @@ import {
   Measurer,
   type TextStyle,
 } from "./measure.js";
+import { renderMath } from "./mathjax.js";
+import type { MathGeometry } from "./math.js";
 import {
   parseBlocks,
   renderBlock,
+  DEFAULT_INLINE_OPTIONS,
+  type InlineOptions,
   type Block,
   type RenderedBlock,
   type Span,
@@ -68,6 +72,17 @@ export interface TypesetOptions {
   punctStyle: 0 | 1 | 2;
   /** Draw the box/glue/penalty structure instead of hiding it. */
   showBadness: boolean;
+  /** Which delimiters are recognised, and how strictly. */
+  inline: InlineOptions;
+  /**
+   * Which displayed equations get a number.
+   *
+   * "ams" follows LaTeX: the numbered environments are numbered and their
+   * starred forms are not, and a bare formula gets nothing. "all" numbers
+   * every display, which is what a reader cross-referencing a draft usually
+   * wants. An explicit \tag always wins, and \notag always suppresses.
+   */
+  numbering: "none" | "ams" | "all";
 }
 
 export const DEFAULT_OPTIONS: TypesetOptions = {
@@ -80,7 +95,20 @@ export const DEFAULT_OPTIONS: TypesetOptions = {
   maxExpand: 0,
   punctStyle: 0,
   showBadness: false,
+  inline: { ...DEFAULT_INLINE_OPTIONS },
+  numbering: "none",
 };
+
+/** A formula, ready to draw: outlines plus the scale that puts them in
+ *  pixels at the surrounding type size. */
+export interface MathRun {
+  geometry: MathGeometry;
+  /** Multiplier from the SVG's own units to pixels. */
+  scale: number;
+  /** LaTeX source, shown instead of the formula when it does not parse. */
+  source: string;
+  display: boolean;
+}
 
 export interface LaidRun {
   x: number;
@@ -93,11 +121,18 @@ export interface LaidRun {
   scaleX: number;
   /** Set on the hyphen the breaker inserted; it has no source of its own. */
   synthetic: boolean;
+  /** Present on a run that draws a formula rather than text. */
+  math?: MathRun;
 }
 
 export interface LaidLine {
-  /** Baseline, relative to the top of the block. */
+  /** Baseline, relative to the top of the block. Computed by the core using
+   *  TeX's interline glue, not by multiplying out a fixed line height. */
   baseline: number;
+  /** Distance from the baseline to the top of the line's tallest ink. */
+  height: number;
+  /** Distance from the baseline to the bottom of its deepest ink. */
+  depth: number;
   runs: LaidRun[];
   ratio: number;
   width: number;
@@ -121,6 +156,12 @@ export interface LaidBlock {
 
 /** Token class codes, mirroring `CharClass` in the Rust core. */
 const CLASS_LETTER = 4;
+const CLASS_OBJECT = 7;
+
+/** MathJax sizes its SVG in ex, and its fonts put the x-height at this many
+ *  of the thousand units per em. Used only as a fallback when a formula is so
+ *  degenerate that its width cannot give the scale. */
+const MATHJAX_EX_UNITS = 442;
 
 /** Characters the engine positions one at a time: CJK ideographs, kana, and
  *  the full-width punctuation whose empty half can be squeezed away. */
@@ -220,6 +261,8 @@ export class Typesetter {
   invalidate(): void {
     this.measurer.invalidate();
     this.cache.clear();
+    this.vcache.clear();
+    this.mathCache.clear();
     this.version++;
   }
 
@@ -231,6 +274,62 @@ export class Typesetter {
     return this.measurer.prefixWidth(text, chars, style);
   }
 
+  private mathCache = new Map<string, MathRun & { width: number; height: number; depth: number }>();
+
+  /**
+   * Lay out the formula whose placeholder sits at `charIndex`.
+   *
+   * Returns zero metrics while MathJax is still loading, so the first frame
+   * shows the text without the formula rather than blocking on it; the
+   * typesetter is invalidated once the engine is ready and the second pass
+   * has real numbers.
+   */
+  private mathAt(
+    rendered: RenderedBlock,
+    charIndex: number,
+    style: TextStyle,
+    key: string,
+  ): MathRun & { width: number; height: number; depth: number } {
+    const span = rendered.spans.find(
+      (s) => s.kind === "math" && charIndex >= s.start && charIndex < s.end,
+    );
+    const latex = span?.math ?? "";
+    const display = span?.display ?? false;
+    const ex = this.measurer.exHeight(style);
+    const cacheKey = `${key}|${display ? "d" : "i"}|${ex.toFixed(2)}|${latex}`;
+    const hit = this.mathCache.get(cacheKey);
+    if (hit) return hit;
+
+    const geometry = renderMath(latex, display);
+    const width = geometry.widthEx * ex;
+    const scale =
+      geometry.viewBoxWidth > 0 && width > 0 ? width / geometry.viewBoxWidth : ex / MATHJAX_EX_UNITS;
+    const built = {
+      geometry,
+      scale,
+      source: latex,
+      display,
+      width,
+      height: (geometry.heightEx - geometry.depthEx) * ex,
+      depth: geometry.depthEx * ex,
+    };
+    if (this.mathCache.size > 2000) this.mathCache.clear();
+    this.mathCache.set(cacheKey, built);
+    return built;
+  }
+
+  private vcache = new Map<string, { ascent: number; descent: number }>();
+
+  /** Ascent and descent for a style, cached — every token asks for them. */
+  vmetrics(style: TextStyle, key: string): { ascent: number; descent: number } {
+    let hit = this.vcache.get(key);
+    if (!hit) {
+      hit = this.measurer.vmetrics(style);
+      this.vcache.set(key, hit);
+    }
+    return hit;
+  }
+
   /** Lay out a whole document, returning blocks with absolute y positions. */
   layoutDocument(
     doc: string,
@@ -240,10 +339,27 @@ export class Typesetter {
     const parsed = parseBlocks(doc);
     const out: LaidBlock[] = [];
     let y = 0;
+    // Equation numbers are assigned here, in document order, because this is
+    // the only place that knows it. Doing it in the parser would mean a
+    // formula's number depended on nothing it can see, and doing it in
+    // MathJax would mean holding global counter state across renders that are
+    // otherwise independent and cacheable.
+    let equation = 0;
     for (let i = 0; i < parsed.length; i++) {
       const b = parsed[i];
       if (b.type === "blank") continue;
-      const laid = this.layoutBlock(b, width, i === focusedBlock, out.at(-1)?.block ?? null);
+      let tag: string | null = null;
+      if (b.type === "math") {
+        tag = this.equationTag(b.math, ++equation);
+        if (tag === null) equation--;
+      }
+      const laid = this.layoutBlock(
+        b,
+        width,
+        i === focusedBlock,
+        out.at(-1)?.block ?? null,
+        tag,
+      );
       laid.y = y + laid.spaceBefore;
       y = laid.y + laid.height - laid.spaceBefore;
       out.push(laid);
@@ -256,12 +372,13 @@ export class Typesetter {
     width: number,
     raw: boolean,
     previous: Block | null,
+    tag: string | null = null,
   ): LaidBlock {
-    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${block.type}|${block.level}|${block.start}|${block.source}`;
+    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${block.source}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
 
-    const laid = this.buildBlock(block, width, raw, previous);
+    const laid = this.buildBlock(block, width, raw, previous, tag);
     // A cache that grows without bound would outlive its usefulness on a long
     // document; the working set is the visible screen plus a little.
     if (this.cache.size > 4000) this.cache.clear();
@@ -274,9 +391,10 @@ export class Typesetter {
     width: number,
     raw: boolean,
     previous: Block | null,
+    tag: string | null = null,
   ): LaidBlock {
     const theme = this.theme;
-    const rendered = renderBlock(block, raw);
+    const rendered = renderBlock(block, raw, this.options.inline);
     const spaceBefore = spaceAbove(block, theme, previous);
 
     const indent =
@@ -286,6 +404,10 @@ export class Typesetter {
           ? theme.bodySize * 1.6 * block.level
           : 0;
     const measure = Math.max(width - indent, theme.bodySize * 4);
+
+    if (block.type === "math") {
+      return this.buildDisplayMath(block, rendered, spaceBefore, measure, indent, raw, tag);
+    }
 
     if (block.type === "rule") {
       return {
@@ -332,6 +454,115 @@ export class Typesetter {
     };
   }
 
+  /**
+   * A display formula: its own block, centred on the measure.
+   *
+   * LaTeX sets displayed equations on their own line with generous space above
+   * and below — `\abovedisplayskip` and `\belowdisplayskip` — because the
+   * formula is a unit of the argument rather than part of a sentence. The
+   * numbers here follow that shape at 1.1 and 1.1 em, close to LaTeX's own
+   * 10pt-on-12pt defaults once scaled.
+   */
+  /**
+   * The number a display formula should carry, or null for none.
+   *
+   * An explicit \tag is honoured whatever the setting; \notag and
+   * \nonumber suppress. Otherwise the setting decides, and under "ams" only
+   * the environments LaTeX itself numbers qualify — the starred forms exist
+   * precisely to opt out.
+   */
+  private equationTag(latex: string, next: number): string | null {
+    const explicit = /\\tag\s*\*?\s*\{([^}]*)\}/.exec(latex);
+    if (explicit) return explicit[1];
+    if (/\\(notag|nonumber)\b/.test(latex)) return null;
+    if (this.options.numbering === "none") return null;
+    if (this.options.numbering === "all") return String(next);
+
+    const env = /\\begin\s*\{([a-zA-Z]+\*?)\}/.exec(latex);
+    if (!env) return null;
+    const NUMBERED = ["equation", "align", "alignat", "gather", "multline", "flalign", "eqnarray"];
+    return NUMBERED.includes(env[1]) ? String(next) : null;
+  }
+
+  private buildDisplayMath(
+    block: Block,
+    rendered: RenderedBlock,
+    spaceBefore: number,
+    measure: number,
+    indent: number,
+    raw: boolean,
+    tag: string | null,
+  ): LaidBlock {
+    const { style, key } = styleForSpan(this.theme, block, null);
+    const ex = this.measurer.exHeight(style);
+    const geometry = renderMath(block.math.trim(), true);
+
+    const width = geometry.widthEx * ex;
+    const scale =
+      geometry.viewBoxWidth > 0 && width > 0 ? width / geometry.viewBoxWidth : ex / MATHJAX_EX_UNITS;
+    const height = (geometry.heightEx - geometry.depthEx) * ex;
+    const depth = geometry.depthEx * ex;
+
+    // Centre it, but never push it off the left edge: an equation wider than
+    // the measure overflows to the right, as LaTeX's does.
+    const x = Math.max(0, (measure - width) / 2);
+
+    const runs: LaidRun[] = [
+      {
+        x,
+        text: "",
+        docStart: block.start,
+        docEnd: block.end,
+        style,
+        styleKey: key,
+        scaleX: 1,
+        synthetic: false,
+        math: { geometry, scale, source: block.math, display: true },
+      },
+    ];
+
+    // The number sits flush to the right margin, as LaTeX's does — not beside
+    // the formula, which would move as the formula's width changed.
+    if (tag !== null) {
+      const label = `(${tag})`;
+      const labelWidth = this.measurer.width(label, style, key);
+      runs.push({
+        x: Math.max(x + width + this.theme.bodySize, measure - labelWidth),
+        text: label,
+        docStart: block.start,
+        docEnd: block.start,
+        style,
+        styleKey: key,
+        scaleX: 1,
+        synthetic: true,
+      });
+    }
+
+    const above = this.theme.bodySize * 1.1;
+    const below = this.theme.bodySize * 1.1;
+    return {
+      block,
+      lines: [
+        {
+          baseline: above + height,
+          height,
+          depth,
+          runs,
+          ratio: 0,
+          width,
+          indent,
+        },
+      ],
+      height: spaceBefore + above + height + depth + below,
+      spaceBefore,
+      y: 0,
+      rendered,
+      indent,
+      marker: "",
+      raw,
+    };
+  }
+
   /** Fenced code and the focused block: one source line per display line. */
   private buildPreformatted(
     block: Block,
@@ -342,6 +573,7 @@ export class Typesetter {
   ): LaidBlock {
     const { style, key } = styleForSpan(this.theme, block, null);
     const lineHeight = style.size * style.lineHeight;
+    const v = this.vmetrics(style, key);
     const lines: LaidLine[] = [];
     const text = rendered.text;
     let at = 0;
@@ -354,7 +586,9 @@ export class Typesetter {
       const isFence = hideFence && (li === 0 || li === src.length - 1) && /^\s*(`{3,}|~{3,})/.test(lineText);
       if (!isFence) {
         lines.push({
-          baseline: n * lineHeight + style.size * 0.82,
+          baseline: n * lineHeight + v.ascent,
+          height: v.ascent,
+          depth: v.descent,
           ratio: 0,
           width: this.measurer.width(lineText, style, key),
           indent,
@@ -414,6 +648,8 @@ export class Typesetter {
       const joinable =
         !run.synthetic &&
         !prev.synthetic &&
+        !run.math &&
+        !prev.math &&
         isLatinWordPiece(prev.text) &&
         isLatinWordPiece(run.text) &&
         prev.styleKey === run.styleKey &&
@@ -453,11 +689,14 @@ export class Typesetter {
       this.options.tolerance,
       this.options.maxExpand,
       this.options.punctStyle,
+      base.style.size * base.style.lineHeight,
+      base.style.size * 0.08,
     );
 
     const tokens = engine.tokenize(text);
     const count = tokens.length / 3;
-    const advances = new Float32Array(count);
+    // Three floats per token: advance, height above the baseline, depth below.
+    const metrics = new Float32Array(count * 3);
 
     // Resolve which span a byte offset falls in, so bold and code runs are
     // measured with the face they will be drawn in.
@@ -493,36 +732,57 @@ export class Typesetter {
       }
 
       const st = styleAt(tokens[t]);
+      const v = this.vmetrics(st.style, st.key);
+
+      // A formula arrives as U+FFFC. Its box is whatever MathJax laid out,
+      // measured in ex against this style so it sits at the right optical
+      // size, and it brings a height and a depth that the line must respect.
+      if (tokens[t + 2] === CLASS_OBJECT) {
+        const m = this.mathAt(rendered, toChar(tokens[t]), st.style, st.key);
+        metrics[i * 3] = m.width;
+        metrics[i * 3 + 1] = Math.max(m.height, v.ascent * 0.2);
+        metrics[i * 3 + 2] = m.depth;
+        i += 1;
+        t += 3;
+        continue;
+      }
+
       if (n === 1) {
         const slice = text.slice(toChar(tokens[t]), toChar(tokens[t + 1]));
-        advances[i] = this.measurer.width(slice, st.style, st.key);
+        metrics[i * 3] = this.measurer.width(slice, st.style, st.key);
       } else {
         const from = toChar(tokens[t]);
         let previous = 0;
         for (let k = 0; k < n; k++) {
           const upto = toChar(tokens[t + k * 3 + 1]);
           const cumulative = this.measurer.width(text.slice(from, upto), st.style, st.key);
-          advances[i + k] = cumulative - previous;
+          metrics[(i + k) * 3] = cumulative - previous;
           previous = cumulative;
         }
+      }
+      for (let k = 0; k < n; k++) {
+        metrics[(i + k) * 3 + 1] = v.ascent;
+        metrics[(i + k) * 3 + 2] = v.descent;
       }
       i += n;
       t += n * 3;
     }
 
-    engine.prepare(advances, this.measurer.spaceWidth(base.style, base.key));
+    engine.prepare(metrics, this.measurer.spaceWidth(base.style, base.key));
     const flat = engine.layout(measure);
 
     // Decode the flat buffer the core returned.
     const lines: LaidLine[] = [];
     const lineCount = flat[0];
-    const lineHeight = base.style.size * base.style.lineHeight;
     let p = 1;
     for (let l = 0; l < lineCount; l++) {
       const runCount = flat[p];
       const ratio = flat[p + 1];
       const width = flat[p + 2];
-      p += 6;
+      const baseline = flat[p + 6];
+      const height = flat[p + 7];
+      const depth = flat[p + 8];
+      p += 9;
       const runs: LaidRun[] = [];
       for (let r = 0; r < runCount; r++) {
         const x = flat[p];
@@ -547,19 +807,23 @@ export class Typesetter {
         const cs = toChar(s);
         const ce = toChar(e);
         const st = styleAt(s);
+        const slice = text.slice(cs, ce);
         runs.push({
           x,
-          text: text.slice(cs, ce),
+          text: slice,
           docStart: rendered.map[cs] ?? 0,
           docEnd: rendered.map[ce] ?? rendered.map[rendered.map.length - 1],
           style: st.style,
           styleKey: st.key,
           scaleX,
           synthetic: false,
+          math: slice === "\uFFFC" ? this.mathAt(rendered, cs, st.style, st.key) : undefined,
         });
       }
       lines.push({
-        baseline: l * lineHeight + base.style.size * 0.82,
+        baseline,
+        height,
+        depth,
         runs: this.coalesce(runs),
         ratio,
         width,

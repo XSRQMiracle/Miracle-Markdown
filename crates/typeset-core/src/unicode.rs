@@ -34,6 +34,11 @@ pub enum CharClass {
     Letter,
     /// Space.
     Space,
+    /// U+FFFC OBJECT REPLACEMENT CHARACTER: something the text stream cannot
+    /// represent, standing in for content laid out elsewhere — for us, an
+    /// inline formula. It behaves like a western word for spacing purposes,
+    /// which is what CLReq asks for when non-Han content meets Han.
+    Object,
     /// Anything else (western punctuation, symbols).
     Other,
 }
@@ -51,7 +56,7 @@ impl CharClass {
 
     /// Whether this participates in CJK-Latin auto spacing on the Latin side.
     pub fn is_letter_or_number(self) -> bool {
-        matches!(self, Self::Letter)
+        matches!(self, Self::Letter | Self::Object)
     }
 }
 
@@ -117,6 +122,9 @@ pub fn is_center_aligned_punct(c: char, style: PunctStyle) -> bool {
 pub fn classify(c: char, style: PunctStyle, full_width: bool) -> CharClass {
     if c == ' ' || c == '\t' || c == '\u{00A0}' {
         return CharClass::Space;
+    }
+    if c == '\u{FFFC}' {
+        return CharClass::Object;
     }
     if is_left_aligned_punct(c, style, full_width) {
         return CharClass::PunctLeft;
