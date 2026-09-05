@@ -60,6 +60,21 @@ export function buildMathPanel(
       ],
     },
     {
+      title: "断行",
+      checks: [
+        {
+          label: "公式内可断行",
+          hint:
+            "TeX 允许行内公式在顶层二元运算符后（\\binoppenalty = 700）与关系符后" +
+            "（\\relpenalty = 500）断行，且只在顶层 —— 分数、上下标、成对定界符内部不断。" +
+            "关闭相当于把这两个惩罚设为无穷大：公式保持完整，代价是行末的长公式会被整个" +
+            "挪到下一行，留下 TeX 当初正是为了避免的空洞。",
+          get: () => editor.options.breakInsideMath,
+          set: (on) => editor.setOptions({ breakInsideMath: on }),
+        },
+      ],
+    },
+    {
       title: "可用的 LaTeX",
       checks: [
         {

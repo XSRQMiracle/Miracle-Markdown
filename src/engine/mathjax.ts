@@ -11,7 +11,13 @@
  * whose formula did not change costs a map lookup.
  */
 
-import { EMPTY_GEOMETRY, geometryFromSvg, type MathGeometry } from "./math.js";
+import {
+  EMPTY_GEOMETRY,
+  geometryFromSvg,
+  segmentInlineMath,
+  type MathGeometry,
+  type MathSegment,
+} from "./math.js";
 
 export interface MathOptions {
   /** The LaTeX `physics` package. Off by default, and deliberately so: it
@@ -80,6 +86,7 @@ export async function initMath(options: MathOptions): Promise<void> {
   loading = build(options).then(() => {
     configured = wanted;
     cache.clear();
+    segmentCache.clear();
     version++;
   });
   try {
@@ -208,8 +215,46 @@ export function renderMath(latex: string, display: boolean): MathGeometry {
   return geometry;
 }
 
+const segmentCache = new Map<string, { geometry: MathGeometry; segments: MathSegment[] }>();
+
+/**
+ * Lay out a formula and, for inline math, split it where TeX would allow a
+ * line break: after an outer-level binary operator or relation.
+ *
+ * Display math is never split — TeX only does this in text style, since a
+ * displayed equation has a line to itself by definition.
+ */
+export function renderMathSegments(
+  latex: string,
+  display: boolean,
+): { geometry: MathGeometry; segments: MathSegment[] } {
+  const geometry = renderMath(latex, display);
+  if (display || geometry.error || !geometry.path) return { geometry, segments: [] };
+
+  const key = `${version}|${latex}`;
+  const hit = segmentCache.get(key);
+  if (hit) return hit;
+
+  let segments: MathSegment[] = [];
+  try {
+    const node = mj!.tex2svg(latex, { display: false });
+    const svg = node.querySelector("svg");
+    if (svg) {
+      segments = segmentInlineMath(svg as unknown as SVGSVGElement, geometry.viewBoxWidth);
+    }
+  } catch {
+    segments = [];
+  }
+
+  const built = { geometry, segments };
+  if (segmentCache.size > 2000) segmentCache.clear();
+  segmentCache.set(key, built);
+  return built;
+}
+
 /** Drop every cached formula. Called when the math options change. */
 export function invalidateMath(): void {
   cache.clear();
+  segmentCache.clear();
   version++;
 }

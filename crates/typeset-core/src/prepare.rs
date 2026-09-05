@@ -114,11 +114,15 @@ fn protrusion(c: char, class: CharClass, width: f32, em: f32) -> (f32, f32) {
 
 /// Build the horizontal list.
 ///
-/// `metrics` holds three floats per token — advance, height above the
-/// baseline, depth below it — in the same order as `tokens`. The vertical
-/// pair is what lets a line make room for something taller than the text,
-/// which is the whole reason a formula can sit inline without colliding with
-/// the line above.
+/// `metrics` holds four floats per token, in the same order as `tokens`:
+/// advance, height above the baseline, depth below it, and the penalty for
+/// breaking immediately after it (NaN for "no explicit penalty").
+///
+/// The vertical pair is what lets a line make room for something taller than
+/// the text. The penalty is what lets an inline formula be handed over as
+/// several boxes with TeX's `\binoppenalty` and `\relpenalty` between them,
+/// so the optimiser can split a formula across lines rather than shunting the
+/// whole thing down and leaving a hole.
 pub fn prepare(
     text: &str,
     tokens: &[Token],
@@ -136,9 +140,10 @@ pub fn prepare(
     let last_char = |t: &Token| text[t.start as usize..t.end as usize].chars().next_back();
 
     for (i, tok) in tokens.iter().enumerate() {
-        let width = metrics.get(i * 3).copied().unwrap_or(0.0);
-        let height = metrics.get(i * 3 + 1).copied().unwrap_or(0.0);
-        let depth = metrics.get(i * 3 + 2).copied().unwrap_or(0.0);
+        let width = metrics.get(i * 4).copied().unwrap_or(0.0);
+        let height = metrics.get(i * 4 + 1).copied().unwrap_or(0.0);
+        let depth = metrics.get(i * 4 + 2).copied().unwrap_or(0.0);
+        let break_after = metrics.get(i * 4 + 3).copied().unwrap_or(f32::NAN);
         let c = match first_char(tok) {
             Some(c) => c,
             None => continue,
@@ -191,6 +196,15 @@ pub fn prepare(
 
         // ---- what goes between this token and the next -------------------
         let Some(next) = tokens.get(i + 1) else { continue };
+
+        // An explicit penalty overrides the adjacency rules entirely. This is
+        // how the pieces of a split formula are joined: TeX's cost for
+        // breaking after a binary operator or a relation, and nothing else
+        // between them.
+        if !break_after.is_nan() {
+            items.push(Item::penalty(0.0, break_after, false));
+            continue;
+        }
         if next.class == CharClass::Space {
             continue; // the space itself becomes glue on the next iteration
         }

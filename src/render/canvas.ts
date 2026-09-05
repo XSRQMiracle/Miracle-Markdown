@@ -162,8 +162,15 @@ export class Renderer {
     const math = run.math!;
     const ctx = this.ctx;
 
-    if (!math.geometry.path || math.geometry.error) {
+    // A split formula draws its own piece; each carries outlines already
+    // shifted so its left edge is the origin.
+    const path = math.segment ? math.segment.path : math.geometry.path;
+
+    if (!path || math.geometry.error) {
       // Show the LaTeX itself, tinted, rather than a gap or a broken glyph.
+      // A piece of a split formula has no sensible source of its own, so only
+      // the first one speaks for the whole.
+      if (math.segment && math.segment.path === null) return;
       const text = math.source || "…";
       this.setFont(cssFont({ ...run.style, italic: false, family: theme.monoFamily }));
       this.setFill(math.geometry.error === "loading" ? theme.mutedColor : "#b3402f");
@@ -175,7 +182,7 @@ export class Renderer {
     ctx.translate(x, baseline);
     ctx.scale(math.scale, math.scale);
     ctx.fillStyle = run.style.color;
-    ctx.fill(math.geometry.path);
+    ctx.fill(path);
     ctx.restore();
     this.currentFill = "";
   }

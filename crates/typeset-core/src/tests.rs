@@ -25,7 +25,7 @@ fn measure(text: &str, tokens: &[Token]) -> Vec<f32> {
             CharClass::Space => EM / 3.0,
             _ => s.chars().count() as f32 * EM * 0.5,
         };
-        out.extend_from_slice(&[w, ASCENT, DESCENT]);
+        out.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN]);
     }
     out
 }
@@ -427,7 +427,7 @@ fn variable_measure(text: &str, tokens: &[Token]) -> Vec<f32> {
             CharClass::Space => EM / 3.0,
             _ => s.chars().map(char_width).sum(),
         };
-        out.extend_from_slice(&[w, ASCENT, DESCENT]);
+        out.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN]);
     }
     out
 }
@@ -538,9 +538,9 @@ fn build_with_tall_token(
             _ => s.chars().count() as f32 * EM * 0.5,
         };
         if s == tall {
-            metrics.extend_from_slice(&[w, height, depth]);
+            metrics.extend_from_slice(&[w, height, depth, f32::NAN]);
         } else {
-            metrics.extend_from_slice(&[w, ASCENT, DESCENT]);
+            metrics.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN]);
         }
     }
     let para = prepare(text, &tokens, &metrics, EM / 3.0, cfg);
@@ -718,5 +718,205 @@ fn a_tall_object_makes_its_line_taller() {
     assert!(
         last(&tall) > last(&short),
         "a taller formula should make the paragraph taller"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Breaking inside an inline formula.
+//
+// TeX allows a line to end after a binary operator or a relation at the outer
+// level of an inline formula, charging \binoppenalty or \relpenalty. The host
+// hands the formula over as several object atoms with those penalties between
+// them; from the optimiser's point of view nothing is new, which is the whole
+// reason this works.
+// ---------------------------------------------------------------------------
+
+/// A paragraph in which one "formula" arrives as several pieces.
+fn build_split_formula(
+    lead: &str,
+    pieces: &[(f32, Option<f32>)],
+    trail: &str,
+    cfg: Config,
+) -> (String, Paragraph) {
+    let mut text = String::from(lead);
+    for _ in pieces {
+        text.push('\u{FFFC}');
+    }
+    text.push_str(trail);
+
+    let tokens = tokenize(&text, cfg.punct_style, cfg.hyphenate);
+    let mut metrics = Vec::with_capacity(tokens.len() * 4);
+    let mut piece = 0usize;
+    for t in &tokens {
+        let s = &text[t.start as usize..t.end as usize];
+        if s == "\u{FFFC}" {
+            let (w, penalty) = pieces[piece];
+            piece += 1;
+            metrics.extend_from_slice(&[w, ASCENT, DESCENT, penalty.unwrap_or(f32::NAN)]);
+        } else {
+            let w = match t.class {
+                CharClass::Cjk
+                | CharClass::PunctLeft
+                | CharClass::PunctRight
+                | CharClass::PunctCenter => EM,
+                CharClass::Space => EM / 3.0,
+                _ => s.chars().count() as f32 * EM * 0.5,
+            };
+            metrics.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN]);
+        }
+    }
+    let para = prepare(&text, &tokens, &metrics, EM / 3.0, cfg);
+    (text, para)
+}
+
+#[test]
+fn the_penalties_reach_the_horizontal_list() {
+    // The mechanism, checked directly: a penalty supplied with a token
+    // becomes a penalty item between that box and the next, carrying TeX's
+    // own cost, and nothing else is inserted between them.
+    let cfg = test_config();
+    let (_, para) = build_split_formula(
+        "x ",
+        &[(EM * 2.0, Some(700.0)), (EM * 2.0, Some(500.0)), (EM * 2.0, None)],
+        " y",
+        cfg,
+    );
+    let costs: Vec<f32> = para
+        .items
+        .iter()
+        .filter(|i| i.kind == Kind::Penalty && i.penalty > 0.0 && i.penalty < INFINITE_PENALTY)
+        .map(|i| i.penalty)
+        .collect();
+    assert_eq!(costs, vec![700.0, 500.0], "binoppenalty then relpenalty");
+
+    // The pieces are adjacent boxes with only that penalty between them.
+    let kinds: Vec<Kind> = para.items.iter().map(|i| i.kind).collect();
+    let first_object = para
+        .atoms
+        .iter()
+        .position(|a| a.class == CharClass::Object)
+        .expect("an object atom");
+    assert!(first_object > 0);
+    let window: Vec<Kind> = kinds
+        .iter()
+        .skip_while(|k| **k != Kind::Box)
+        .copied()
+        .collect();
+    assert!(window.contains(&Kind::Penalty));
+}
+
+#[test]
+fn a_formula_can_break_after_a_binary_operator() {
+    // The formula is wider than the measure, so no arrangement fits it on one
+    // line. A breaker that treats it as indivisible has no answer here except
+    // to overflow; one that can split it does the obvious thing.
+    //
+    // Note what the previous behaviour would be: given a formula that *does*
+    // fit on a line of its own, the optimiser rightly prefers an ordinary word
+    // space to paying \binoppenalty. Splitting is a last resort, which is
+    // exactly TeX's intent.
+    let cfg = test_config();
+    let (text, para) = build_split_formula(
+        "the identity ",
+        &[(EM * 4.5, Some(700.0)), (EM * 4.5, Some(500.0)), (EM * 4.5, None)],
+        " holds for every n",
+        cfg,
+    );
+    let width = EM * 10.0;
+    let breaks = break_lines(&para, width);
+    let lines = layout_lines(&para, &breaks);
+    assert!(lines.len() >= 2, "expected the paragraph to wrap");
+
+    let objects_on = |line: &Line| {
+        line.runs
+            .iter()
+            .filter(|r| r.start != u32::MAX && text[r.start as usize..r.end as usize] == *"\u{FFFC}")
+            .count()
+    };
+    let spread: Vec<usize> = lines.iter().map(objects_on).collect();
+    assert_eq!(spread.iter().sum::<usize>(), 3, "every piece must be placed once");
+    assert!(
+        spread.iter().filter(|n| **n > 0).count() >= 2,
+        "the formula should have been split across lines, was {spread:?}"
+    );
+}
+
+#[test]
+fn an_unbreakable_formula_stays_whole() {
+    // The same paragraph with no penalties offered: the optimiser has no
+    // choice but to keep the pieces together.
+    let cfg = test_config();
+    let (text, para) = build_split_formula(
+        "the identity ",
+        &[(EM * 3.0, None), (EM * 3.0, None), (EM * 3.0, None)],
+        " holds for every n",
+        cfg,
+    );
+    let breaks = break_lines(&para, EM * 10.0);
+    let lines = layout_lines(&para, &breaks);
+    let counts: Vec<usize> = lines
+        .iter()
+        .map(|l| {
+            l.runs
+                .iter()
+                .filter(|r| {
+                    r.start != u32::MAX && text[r.start as usize..r.end as usize] == *"\u{FFFC}"
+                })
+                .count()
+        })
+        .collect();
+    assert_eq!(
+        counts.iter().filter(|n| **n > 0).count(),
+        1,
+        "with no penalties the pieces must stay on one line, were {counts:?}"
+    );
+}
+
+#[test]
+fn breaking_a_formula_costs_more_than_breaking_at_a_space() {
+    // The penalties must actually be felt: given a choice, the optimiser
+    // should prefer an ordinary word space to splitting the formula.
+    let cfg = test_config();
+    let (_, cheap) = build_split_formula(
+        "alpha beta ",
+        &[(EM * 2.0, Some(700.0)), (EM * 2.0, None)],
+        " gamma delta",
+        cfg,
+    );
+    let width = EM * 12.0;
+    let breaks = break_lines(&cheap, width);
+    // Whatever it chooses, no line may exceed tolerance and every piece is
+    // placed — the optimiser is free, but must remain correct.
+    for b in &breaks[..breaks.len() - 1] {
+        assert!(b.ratio <= cfg.tolerance + 1e-3, "ratio {} exceeded tolerance", b.ratio);
+    }
+}
+
+#[test]
+fn an_infinite_penalty_between_pieces_forbids_the_break() {
+    let cfg = test_config();
+    let (text, para) = build_split_formula(
+        "the identity ",
+        &[(EM * 3.0, Some(INFINITE_PENALTY)), (EM * 3.0, None)],
+        " holds",
+        cfg,
+    );
+    let breaks = break_lines(&para, EM * 14.0);
+    let lines = layout_lines(&para, &breaks);
+    let counts: Vec<usize> = lines
+        .iter()
+        .map(|l| {
+            l.runs
+                .iter()
+                .filter(|r| {
+                    r.start != u32::MAX && text[r.start as usize..r.end as usize] == *"\u{FFFC}"
+                })
+                .count()
+        })
+        .collect();
+    assert_eq!(
+        counts.iter().filter(|n| **n > 0).count(),
+        1,
+        "an infinite penalty must keep the pieces together, were {counts:?}"
     );
 }

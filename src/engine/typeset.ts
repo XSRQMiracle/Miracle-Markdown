@@ -18,12 +18,13 @@ import {
   Measurer,
   type TextStyle,
 } from "./measure.js";
-import { renderMath } from "./mathjax.js";
-import type { MathGeometry } from "./math.js";
+import { renderMath, renderMathSegments } from "./mathjax.js";
+import type { MathGeometry, MathSegment } from "./math.js";
 import {
   parseBlocks,
   renderBlock,
   DEFAULT_INLINE_OPTIONS,
+  OBJECT_REPLACEMENT,
   type InlineOptions,
   type Block,
   type RenderedBlock,
@@ -83,6 +84,17 @@ export interface TypesetOptions {
    * wants. An explicit \tag always wins, and \notag always suppresses.
    */
   numbering: "none" | "ams" | "all";
+  /**
+   * Whether an inline formula may break across lines.
+   *
+   * TeX does this by default, charging `\binoppenalty` (700) after a binary
+   * operator and `\relpenalty` (500) after a relation, and only at the outer
+   * level of the formula. Turning it off is the equivalent of setting both
+   * penalties to infinity: formulas stay whole, and a long one near the end of
+   * a line is shunted down entire, leaving the gap those penalties exist to
+   * avoid.
+   */
+  breakInsideMath: boolean;
 }
 
 export const DEFAULT_OPTIONS: TypesetOptions = {
@@ -97,6 +109,7 @@ export const DEFAULT_OPTIONS: TypesetOptions = {
   showBadness: false,
   inline: { ...DEFAULT_INLINE_OPTIONS },
   numbering: "none",
+  breakInsideMath: true,
 };
 
 /** A formula, ready to draw: outlines plus the scale that puts them in
@@ -108,6 +121,17 @@ export interface MathRun {
   /** LaTeX source, shown instead of the formula when it does not parse. */
   source: string;
   display: boolean;
+  /** The piece of a split formula this run draws, if it was split. */
+  segment?: MathSegment;
+}
+
+/** One placeholder's worth of formula: its box and how it may break. */
+interface MathPiece extends MathRun {
+  width: number;
+  height: number;
+  depth: number;
+  /** TeX's penalty for breaking after this piece; NaN when it may not. */
+  penaltyAfter: number;
 }
 
 export interface LaidRun {
@@ -262,7 +286,7 @@ export class Typesetter {
     this.measurer.invalidate();
     this.cache.clear();
     this.vcache.clear();
-    this.mathCache.clear();
+    this.pieceCache.clear();
     this.version++;
   }
 
@@ -274,49 +298,6 @@ export class Typesetter {
     return this.measurer.prefixWidth(text, chars, style);
   }
 
-  private mathCache = new Map<string, MathRun & { width: number; height: number; depth: number }>();
-
-  /**
-   * Lay out the formula whose placeholder sits at `charIndex`.
-   *
-   * Returns zero metrics while MathJax is still loading, so the first frame
-   * shows the text without the formula rather than blocking on it; the
-   * typesetter is invalidated once the engine is ready and the second pass
-   * has real numbers.
-   */
-  private mathAt(
-    rendered: RenderedBlock,
-    charIndex: number,
-    style: TextStyle,
-    key: string,
-  ): MathRun & { width: number; height: number; depth: number } {
-    const span = rendered.spans.find(
-      (s) => s.kind === "math" && charIndex >= s.start && charIndex < s.end,
-    );
-    const latex = span?.math ?? "";
-    const display = span?.display ?? false;
-    const ex = this.measurer.exHeight(style);
-    const cacheKey = `${key}|${display ? "d" : "i"}|${ex.toFixed(2)}|${latex}`;
-    const hit = this.mathCache.get(cacheKey);
-    if (hit) return hit;
-
-    const geometry = renderMath(latex, display);
-    const width = geometry.widthEx * ex;
-    const scale =
-      geometry.viewBoxWidth > 0 && width > 0 ? width / geometry.viewBoxWidth : ex / MATHJAX_EX_UNITS;
-    const built = {
-      geometry,
-      scale,
-      source: latex,
-      display,
-      width,
-      height: (geometry.heightEx - geometry.depthEx) * ex,
-      depth: geometry.depthEx * ex,
-    };
-    if (this.mathCache.size > 2000) this.mathCache.clear();
-    this.mathCache.set(cacheKey, built);
-    return built;
-  }
 
   private vcache = new Map<string, { ascent: number; descent: number }>();
 
@@ -667,6 +648,117 @@ export class Typesetter {
     return out;
   }
 
+  /**
+   * Expand each formula placeholder into one placeholder per breakable piece.
+   *
+   * A formula reaches this point as a single U+FFFC. TeX allows an inline
+   * formula to break after an outer-level binary operator or relation, so a
+   * formula that offers such a point is handed to the optimiser as several
+   * boxes with `\binoppenalty` or `\relpenalty` between them. From the
+   * breaker's side nothing is new — that is the point of having modelled a
+   * formula as a box in the first place.
+   *
+   * The source map gives every piece the formula's own starting offset, so
+   * clicking anywhere in a formula puts the caret at its opening delimiter and
+   * reveals the source, however the formula happens to be split at the time.
+   */
+  private expandMath(
+    rendered: RenderedBlock,
+    style: TextStyle,
+    key: string,
+  ): { rendered: RenderedBlock; pieces: Map<number, MathPiece> } {
+    if (!rendered.text.includes(OBJECT_REPLACEMENT)) {
+      return { rendered, pieces: new Map() };
+    }
+
+    const pieces = new Map<number, MathPiece>();
+    let text = "";
+    const map: number[] = [];
+    // Where each original character ended up, so spans can be moved with it.
+    const shifted = new Int32Array(rendered.text.length + 1);
+
+    for (let i = 0; i < rendered.text.length; i++) {
+      shifted[i] = text.length;
+      if (rendered.text[i] !== OBJECT_REPLACEMENT) {
+        text += rendered.text[i];
+        map.push(rendered.map[i]);
+        continue;
+      }
+      const built = this.buildMathPieces(rendered, i, style, key);
+      for (const piece of built) {
+        pieces.set(text.length, piece);
+        text += OBJECT_REPLACEMENT;
+        map.push(rendered.map[i]);
+      }
+    }
+    shifted[rendered.text.length] = text.length;
+    map.push(rendered.map[rendered.map.length - 1]);
+
+    const spans = rendered.spans.map((span) => ({
+      ...span,
+      start: shifted[span.start],
+      end: shifted[span.end],
+    }));
+
+    return { rendered: { text, spans, map: Int32Array.from(map) }, pieces };
+  }
+
+  /** Lay out the formula at `charIndex` and split it if TeX would allow. */
+  private buildMathPieces(
+    rendered: RenderedBlock,
+    charIndex: number,
+    style: TextStyle,
+    key: string,
+  ): MathPiece[] {
+    const span = rendered.spans.find(
+      (s) => s.kind === "math" && charIndex >= s.start && charIndex < s.end,
+    );
+    const latex = span?.math ?? "";
+    const display = span?.display ?? false;
+    const ex = this.measurer.exHeight(style);
+    const cacheKey = `${key}|${display ? "d" : "i"}|${ex.toFixed(2)}|${latex}`;
+    const hit = this.pieceCache.get(cacheKey);
+    if (hit) return hit;
+
+    const { geometry, segments } = this.options.breakInsideMath
+      ? renderMathSegments(latex, display)
+      : { geometry: renderMath(latex, display), segments: [] };
+    const scale =
+      geometry.viewBoxWidth > 0 && geometry.widthEx > 0
+        ? (geometry.widthEx * ex) / geometry.viewBoxWidth
+        : ex / MATHJAX_EX_UNITS;
+    const height = (geometry.heightEx - geometry.depthEx) * ex;
+    const depth = geometry.depthEx * ex;
+
+    const common = { geometry, scale, source: latex, display };
+    let built: MathPiece[];
+    if (segments.length < 2) {
+      built = [
+        { ...common, width: geometry.widthEx * ex, height, depth, penaltyAfter: NaN },
+      ];
+    } else {
+      // Every piece is given the whole formula's height and depth. That is
+      // conservative — a piece with no tall part gets more leading than it
+      // strictly needs — but it can never let two lines collide, and formulas
+      // that break at an outer-level operator are usually of even height
+      // anyway.
+      built = segments.map((segment) => ({
+        ...common,
+        segment,
+        width: segment.width * scale,
+        height,
+        depth,
+        penaltyAfter: segment.penaltyAfter ?? NaN,
+      }));
+    }
+
+    if (this.pieceCache.size > 2000) this.pieceCache.clear();
+    this.pieceCache.set(cacheKey, built);
+    return built;
+  }
+
+  private pieceCache = new Map<string, MathPiece[]>();
+
   /** The real work: hand the paragraph to the Knuth-Plass core. */
   private breakParagraph(
     block: Block,
@@ -675,10 +767,12 @@ export class Typesetter {
     indent: number,
   ): LaidLine[] {
     if (!engine) throw new Error("engine not initialised");
-    const text = rendered.text;
-    if (!text.length) return [];
+    if (!rendered.text.length) return [];
 
     const base = styleForSpan(this.theme, block, null);
+    const expanded = this.expandMath(rendered, base.style, base.key);
+    rendered = expanded.rendered;
+    const pieces = expanded.pieces;
     engine.configure(
       base.style.size,
       this.options.justify && block.type !== "heading",
@@ -693,10 +787,12 @@ export class Typesetter {
       base.style.size * 0.08,
     );
 
+    const text = rendered.text;
     const tokens = engine.tokenize(text);
     const count = tokens.length / 3;
-    // Three floats per token: advance, height above the baseline, depth below.
-    const metrics = new Float32Array(count * 3);
+    // Four floats per token: advance, height, depth, and the penalty for
+    // breaking after it — the last is how a split formula's pieces are joined.
+    const metrics = new Float32Array(count * 4);
 
     // Resolve which span a byte offset falls in, so bold and code runs are
     // measured with the face they will be drawn in.
@@ -738,10 +834,11 @@ export class Typesetter {
       // measured in ex against this style so it sits at the right optical
       // size, and it brings a height and a depth that the line must respect.
       if (tokens[t + 2] === CLASS_OBJECT) {
-        const m = this.mathAt(rendered, toChar(tokens[t]), st.style, st.key);
-        metrics[i * 3] = m.width;
-        metrics[i * 3 + 1] = Math.max(m.height, v.ascent * 0.2);
-        metrics[i * 3 + 2] = m.depth;
+        const piece = pieces.get(toChar(tokens[t]));
+        metrics[i * 4] = piece?.width ?? 0;
+        metrics[i * 4 + 1] = Math.max(piece?.height ?? 0, v.ascent * 0.2);
+        metrics[i * 4 + 2] = piece?.depth ?? 0;
+        metrics[i * 4 + 3] = piece?.penaltyAfter ?? NaN;
         i += 1;
         t += 3;
         continue;
@@ -749,20 +846,21 @@ export class Typesetter {
 
       if (n === 1) {
         const slice = text.slice(toChar(tokens[t]), toChar(tokens[t + 1]));
-        metrics[i * 3] = this.measurer.width(slice, st.style, st.key);
+        metrics[i * 4] = this.measurer.width(slice, st.style, st.key);
       } else {
         const from = toChar(tokens[t]);
         let previous = 0;
         for (let k = 0; k < n; k++) {
           const upto = toChar(tokens[t + k * 3 + 1]);
           const cumulative = this.measurer.width(text.slice(from, upto), st.style, st.key);
-          metrics[(i + k) * 3] = cumulative - previous;
+          metrics[(i + k) * 4] = cumulative - previous;
           previous = cumulative;
         }
       }
       for (let k = 0; k < n; k++) {
-        metrics[(i + k) * 3 + 1] = v.ascent;
-        metrics[(i + k) * 3 + 2] = v.descent;
+        metrics[(i + k) * 4 + 1] = v.ascent;
+        metrics[(i + k) * 4 + 2] = v.descent;
+        metrics[(i + k) * 4 + 3] = NaN;
       }
       i += n;
       t += n * 3;
@@ -817,7 +915,7 @@ export class Typesetter {
           styleKey: st.key,
           scaleX,
           synthetic: false,
-          math: slice === "\uFFFC" ? this.mathAt(rendered, cs, st.style, st.key) : undefined,
+          math: slice === OBJECT_REPLACEMENT ? pieces.get(cs) : undefined,
         });
       }
       lines.push({
