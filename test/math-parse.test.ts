@@ -117,5 +117,70 @@ eq(formulas("$x = \\$5$"), ["x = \\$5"], "an escaped dollar inside math does not
   eq(renderBlock(b, false).text, "a " + OBJ + " b", "typeset mode shows the placeholder");
 }
 
+
+// ---------------------------------------------------------------------------
+// Soft line breaks in CJK text.
+//
+// CommonMark turns a newline inside a paragraph into a space. That is right
+// for scripts that separate words with one and wrong for Chinese and Japanese,
+// where a break in the source is only how the author wrapped the file — and
+// the stray space it leaves is the most familiar complaint about writing
+// Chinese in Markdown.
+// ---------------------------------------------------------------------------
+
+const cjkOn = { ...strict, cjkSoftBreaks: true };
+const cjkOff = { ...strict, cjkSoftBreaks: false };
+
+eq(rendered("中文一行\n中文二行", cjkOn), "中文一行中文二行", "a break between Han characters vanishes");
+eq(rendered("中文一行\n中文二行", cjkOff), "中文一行 中文二行", "and becomes a space when the rule is off");
+eq(rendered("结束。\n开始", cjkOn), "结束。开始", "a break after CJK punctuation vanishes too");
+eq(rendered("意思；\n继续", cjkOn), "意思；继续", "including the fullwidth semicolon");
+
+// Latin text still needs its space — this is the case the rule must not break.
+eq(rendered("one two\nthree four", cjkOn), "one two three four", "Latin keeps its space");
+eq(rendered("end.\nStart", cjkOn), "end. Start", "including across a sentence boundary");
+
+// A boundary with CJK on one side only. Dropping the break is right here
+// because the quarter em of mixed-script spacing is inserted separately; a
+// space as well would read as a mistake.
+eq(rendered("中文\nEnglish", cjkOn), "中文English", "CJK then Latin: the break goes, spacing handles it");
+eq(rendered("English\n中文", cjkOn), "English中文", "and Latin then CJK");
+eq(rendered("中文\nEnglish", cjkOff), "中文 English", "unless the rule is off");
+
+// An explicit space the author typed is theirs to keep.
+eq(rendered("中文 \nEnglish", cjkOn), "中文 English", "a trailing space survives the dropped break");
+
+// The break is judged on what survives into the output, not on the raw
+// source: a delimiter or a formula may sit between.
+eq(rendered("的意思；\n`code` 继续", cjkOn), "的意思；code 继续", "a code span after the break");
+eq(rendered("的意思；\n**粗体**", cjkOn), "的意思；粗体", "an emphasis marker after the break");
+eq(rendered("公式是\n$x$ 这样", cjkOn), "公式是" + OBJ + " 这样", "a formula after the break");
+eq(rendered("**中文**\n继续", cjkOn), "中文继续", "an emphasis marker before the break");
+
+// The map must still line up after a break is dropped.
+{
+  const r = parseInline("中文\n继续", 0, undefined, cjkOn);
+  eq(r.text, "中文继续", "text");
+  eq(Array.from(r.map), [0, 1, 3, 4, 5], "every character still maps to its own source position");
+}
+
+// Blockquotes join their lines the same way.
+{
+  const [b] = parseBlocks("> 引用第一行\n> 引用第二行");
+  eq(renderBlock(b, false, cjkOn).text, "引用第一行引用第二行", "a quote joins CJK lines without a space");
+  eq(renderBlock(b, false, cjkOff).text, "引用第一行 引用第二行", "and with one when the rule is off");
+}
+{
+  const [b] = parseBlocks("> first line\n> second line");
+  eq(renderBlock(b, false, cjkOn).text, "first line second line", "a Latin quote keeps its space");
+}
+
+
+// A continuation line's indentation is the shape of the file, not content.
+eq(rendered("one two\n    three four", cjkOn), "one two three four", "leading indent is stripped");
+eq(rendered("中文一行\n    中文二行", cjkOn), "中文一行中文二行", "and stripped in CJK too");
+eq(rendered("中文 \n  English", cjkOn), "中文 English", "one space, however it was written");
+eq(rendered("a\n\nb", cjkOn), "a b", "consecutive breaks collapse to one space");
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

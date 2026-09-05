@@ -178,6 +178,138 @@ export interface LaidBlock {
   raw: boolean;
 }
 
+// These are kept as sources rather than as shared RegExp objects on purpose.
+// A global regular expression carries a mutable `lastIndex`, and `test` leaves
+// it pointing past the match — so a later `matchAll` on the same object starts
+// midway through the string and quietly finds nothing. Building a fresh one at
+// each use costs nothing here and removes the whole class of bug.
+
+/** `\label{...}` inside a formula. */
+const LABEL_SOURCE = String.raw`\\label\s*\{([^}]*)\}`;
+/** `\ref{...}` and `\eqref{...}`, the two ways to cite a numbered equation. */
+const REFERENCE_SOURCE = String.raw`\\(eq)?ref\s*\{([^}]*)\}`;
+
+const HAS_LABEL = new RegExp(LABEL_SOURCE);
+
+function hasLabel(latex: string): boolean {
+  return HAS_LABEL.test(latex);
+}
+
+/** Every label declared in a formula. */
+function labelsIn(latex: string): string[] {
+  return [...latex.matchAll(new RegExp(LABEL_SOURCE, "g"))].map((m) => m[1].trim());
+}
+
+/** Whether a block might contain a citation worth re-resolving. */
+function citesAnything(block: Block): boolean {
+  return block.source.includes("\\ref") || block.source.includes("\\eqref");
+}
+
+/**
+ * Turn a formula's source into what MathJax should actually see: labels
+ * removed, citations replaced by the numbers they resolve to.
+ *
+ * Neither MathJax nor KaTeX resolves `\ref` on its own — both lay out one
+ * formula at a time and have no idea what else is in the document. Since the
+ * numbering pass has just worked that out, substituting here is both simpler
+ * and cheaper than handing MathJax a global counter to keep.
+ *
+ * An unresolved citation becomes `?`, which is LaTeX's own convention for a
+ * reference to something that is not there.
+ */
+export function resolveLatex(latex: string, labels: Map<string, string>): string {
+  let out = latex;
+  if (out.includes("\\label")) out = out.replace(new RegExp(LABEL_SOURCE, "g"), "");
+  if (out.includes("ref")) {
+    out = out.replace(
+      new RegExp(REFERENCE_SOURCE, "g"),
+      (_match, eq: string | undefined, key: string) => {
+        const number = labels.get(key.trim());
+        if (number === undefined) return eq ? "(?)" : "?";
+        return eq ? "(" + number + ")" : number;
+      },
+    );
+  }
+  return out;
+}
+
+/**
+ * Assign every display equation its number, and record what each label
+ * points at.
+ *
+ * This runs before layout because a reference may point forward: a
+ * paragraph early in the document can cite an equation that appears much
+ * later, and it cannot be typeset until that equation's number is known.
+ * Two passes are the price of forward references, and the first is cheap —
+ * it reads the source and never touches MathJax.
+ */
+export function numberEquations(
+parsed: Block[],
+mode: TypesetOptions["numbering"],
+): Numbering {
+  const tags = new Map<number, string>();
+  const labels = new Map<string, string>();
+  let equation = 0;
+  for (let i = 0; i < parsed.length; i++) {
+    const block = parsed[i];
+    if (block.type !== "math") continue;
+    const tag = equationTag(block.math, equation + 1, mode);
+    if (tag === null) continue;
+    equation++;
+    tags.set(i, tag);
+    for (const label of labelsIn(block.math)) {
+      labels.set(label, tag);
+    }
+  }
+  // Derived from the resolved values, so a block holding a reference
+  // re-typesets exactly when the number it cites moves — and not when some
+  // unrelated paragraph is edited.
+  const version = [...labels].map(([k, v]) => k + "=" + v).join(",");
+  return { tags, labels, version };
+}
+
+/**
+ * The number a display formula should carry, or null for none.
+ *
+ * An explicit \tag is honoured whatever the setting; \notag and
+ * \nonumber suppress. A \label also forces a number, in every mode
+ * including "none": labelling an equation is an explicit request for
+ * something to reference, and silently refusing would leave the citation
+ * with nothing to resolve to. That is what makes "none" a useful default —
+ * no numbers until an equation asks for one.
+ *
+ * Otherwise the setting decides, and under "ams" only the environments
+ * LaTeX itself numbers qualify — the starred forms exist precisely to opt
+ * out.
+ */
+export function equationTag(
+latex: string,
+next: number,
+mode: TypesetOptions["numbering"],
+): string | null {
+  const explicit = /\\tag\s*\*?\s*\{([^}]*)\}/.exec(latex);
+  if (explicit) return explicit[1];
+  if (/\\(notag|nonumber)\b/.test(latex)) return null;
+  if (hasLabel(latex)) return String(next);
+  if (mode === "none") return null;
+  if (mode === "all") return String(next);
+
+  const env = /\\begin\s*\{([a-zA-Z]+\*?)\}/.exec(latex);
+  if (!env) return null;
+  const NUMBERED = ["equation", "align", "alignat", "gather", "multline", "flalign", "eqnarray"];
+  return NUMBERED.includes(env[1]) ? String(next) : null;
+}
+
+/** What the numbering pass produces, before anything is laid out. */
+export interface Numbering {
+  /** Block index to the number that block's equation carries. */
+  tags: Map<number, string>;
+  /** Label to the number it resolves to. */
+  labels: Map<string, string>;
+  /** Changes exactly when some label's number changes. */
+  version: string;
+}
+
 /** Token class codes, mirroring `CharClass` in the Rust core. */
 const CLASS_LETTER = 4;
 const CLASS_OBJECT = 7;
@@ -318,28 +450,19 @@ export class Typesetter {
     focusedBlock: number,
   ): { blocks: LaidBlock[]; height: number } {
     const parsed = parseBlocks(doc);
+    const numbering = numberEquations(parsed, this.options.numbering);
     const out: LaidBlock[] = [];
     let y = 0;
-    // Equation numbers are assigned here, in document order, because this is
-    // the only place that knows it. Doing it in the parser would mean a
-    // formula's number depended on nothing it can see, and doing it in
-    // MathJax would mean holding global counter state across renders that are
-    // otherwise independent and cacheable.
-    let equation = 0;
     for (let i = 0; i < parsed.length; i++) {
       const b = parsed[i];
       if (b.type === "blank") continue;
-      let tag: string | null = null;
-      if (b.type === "math") {
-        tag = this.equationTag(b.math, ++equation);
-        if (tag === null) equation--;
-      }
       const laid = this.layoutBlock(
         b,
         width,
         i === focusedBlock,
         out.at(-1)?.block ?? null,
-        tag,
+        numbering.tags.get(i) ?? null,
+        numbering,
       );
       laid.y = y + laid.spaceBefore;
       y = laid.y + laid.height - laid.spaceBefore;
@@ -353,13 +476,18 @@ export class Typesetter {
     width: number,
     raw: boolean,
     previous: Block | null,
-    tag: string | null = null,
+    tag: string | null,
+    numbering: Numbering,
   ): LaidBlock {
-    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${block.source}`;
+    // A block that cites an equation has to be re-laid-out when that
+    // equation's number moves, and only then; one that cites nothing is
+    // untouched by an edit elsewhere in the document.
+    const cites = citesAnything(block) ? numbering.version : "";
+    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${cites}|${block.source}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
 
-    const laid = this.buildBlock(block, width, raw, previous, tag);
+    const laid = this.buildBlock(block, width, raw, previous, tag, numbering);
     // A cache that grows without bound would outlive its usefulness on a long
     // document; the working set is the visible screen plus a little.
     if (this.cache.size > 4000) this.cache.clear();
@@ -372,7 +500,8 @@ export class Typesetter {
     width: number,
     raw: boolean,
     previous: Block | null,
-    tag: string | null = null,
+    tag: string | null,
+    numbering: Numbering,
   ): LaidBlock {
     const theme = this.theme;
     const rendered = renderBlock(block, raw, this.options.inline);
@@ -387,7 +516,16 @@ export class Typesetter {
     const measure = Math.max(width - indent, theme.bodySize * 4);
 
     if (block.type === "math") {
-      return this.buildDisplayMath(block, rendered, spaceBefore, measure, indent, raw, tag);
+      return this.buildDisplayMath(
+        block,
+        rendered,
+        spaceBefore,
+        measure,
+        indent,
+        raw,
+        tag,
+        numbering,
+      );
     }
 
     if (block.type === "rule") {
@@ -413,7 +551,7 @@ export class Typesetter {
     const lines =
       block.type === "code"
         ? this.buildPreformatted(block, rendered, spaceBefore, indent, raw).lines
-        : this.breakParagraph(block, rendered, measure, indent);
+        : this.breakParagraph(block, rendered, measure, indent, numbering);
 
     const first = lines[0];
     const lh = first
@@ -444,27 +582,6 @@ export class Typesetter {
    * numbers here follow that shape at 1.1 and 1.1 em, close to LaTeX's own
    * 10pt-on-12pt defaults once scaled.
    */
-  /**
-   * The number a display formula should carry, or null for none.
-   *
-   * An explicit \tag is honoured whatever the setting; \notag and
-   * \nonumber suppress. Otherwise the setting decides, and under "ams" only
-   * the environments LaTeX itself numbers qualify — the starred forms exist
-   * precisely to opt out.
-   */
-  private equationTag(latex: string, next: number): string | null {
-    const explicit = /\\tag\s*\*?\s*\{([^}]*)\}/.exec(latex);
-    if (explicit) return explicit[1];
-    if (/\\(notag|nonumber)\b/.test(latex)) return null;
-    if (this.options.numbering === "none") return null;
-    if (this.options.numbering === "all") return String(next);
-
-    const env = /\\begin\s*\{([a-zA-Z]+\*?)\}/.exec(latex);
-    if (!env) return null;
-    const NUMBERED = ["equation", "align", "alignat", "gather", "multline", "flalign", "eqnarray"];
-    return NUMBERED.includes(env[1]) ? String(next) : null;
-  }
-
   private buildDisplayMath(
     block: Block,
     rendered: RenderedBlock,
@@ -473,10 +590,11 @@ export class Typesetter {
     indent: number,
     raw: boolean,
     tag: string | null,
+    numbering: Numbering,
   ): LaidBlock {
     const { style, key } = styleForSpan(this.theme, block, null);
     const ex = this.measurer.exHeight(style);
-    const geometry = renderMath(block.math.trim(), true);
+    const geometry = renderMath(resolveLatex(block.math, numbering.labels), true);
 
     const width = geometry.widthEx * ex;
     const scale =
@@ -666,6 +784,7 @@ export class Typesetter {
     rendered: RenderedBlock,
     style: TextStyle,
     key: string,
+    numbering: Numbering,
   ): { rendered: RenderedBlock; pieces: Map<number, MathPiece> } {
     if (!rendered.text.includes(OBJECT_REPLACEMENT)) {
       return { rendered, pieces: new Map() };
@@ -684,7 +803,7 @@ export class Typesetter {
         map.push(rendered.map[i]);
         continue;
       }
-      const built = this.buildMathPieces(rendered, i, style, key);
+      const built = this.buildMathPieces(rendered, i, style, key, numbering);
       for (const piece of built) {
         pieces.set(text.length, piece);
         text += OBJECT_REPLACEMENT;
@@ -709,11 +828,14 @@ export class Typesetter {
     charIndex: number,
     style: TextStyle,
     key: string,
+    numbering: Numbering,
   ): MathPiece[] {
     const span = rendered.spans.find(
       (s) => s.kind === "math" && charIndex >= s.start && charIndex < s.end,
     );
-    const latex = span?.math ?? "";
+    // References are resolved before the cache key is built, so a formula
+    // whose citation now points at a different number is a different entry.
+    const latex = resolveLatex(span?.math ?? "", numbering.labels);
     const display = span?.display ?? false;
     const ex = this.measurer.exHeight(style);
     const cacheKey = `${key}|${display ? "d" : "i"}|${ex.toFixed(2)}|${latex}`;
@@ -765,12 +887,13 @@ export class Typesetter {
     rendered: RenderedBlock,
     measure: number,
     indent: number,
+    numbering: Numbering,
   ): LaidLine[] {
     if (!engine) throw new Error("engine not initialised");
     if (!rendered.text.length) return [];
 
     const base = styleForSpan(this.theme, block, null);
-    const expanded = this.expandMath(rendered, base.style, base.key);
+    const expanded = this.expandMath(rendered, base.style, base.key, numbering);
     rendered = expanded.rendered;
     const pieces = expanded.pieces;
     engine.configure(

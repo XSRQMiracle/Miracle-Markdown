@@ -350,9 +350,15 @@ function stripPerLine(b: Block, marker: RegExp, options: InlineOptions): Rendere
     }
     at += line.length + 1;
     if (n + 1 < lines.length) {
-      // A newline inside the quote becomes an ordinary space.
-      text += " ";
-      map.push(at - 1);
+      // The same rule the running text follows: a break between wide
+      // characters is how the author wrapped the file, not a space.
+      const next = lines[n + 1].replace(marker, "");
+      const before = text.length ? text[text.length - 1] : "";
+      const wide = isWide(before) || isWide(next.charAt(0));
+      if (!options.cjkSoftBreaks || !wide) {
+        text += " ";
+        map.push(at - 1);
+      }
     }
   });
   map.push(b.end);
@@ -398,12 +404,30 @@ export interface InlineOptions {
    * parsing would no longer see.
    */
   strictDollar: boolean;
+  /**
+   * Drop a source line break that touches a CJK character, instead of turning
+   * it into a space.
+   *
+   * CommonMark says a newline inside a paragraph is a space, which is right
+   * for scripts that separate words with one and wrong for Chinese and
+   * Japanese, where a line break in the source is only how the author chose
+   * to wrap the file. Leave it on and a paragraph reads the same however it
+   * is wrapped; turn it off for CommonMark's literal behaviour.
+   *
+   * Pandoc's `east_asian_line_breaks` drops the newline only when the
+   * characters on *both* sides are wide. We drop it when *either* side is,
+   * because we also insert the quarter em between Han and Latin ourselves: on
+   * a boundary like "意思；\n`\eqref`" Pandoc's rule leaves a space that the
+   * mixed-script spacing then widens further, and the gap reads as a mistake.
+   */
+  cjkSoftBreaks: boolean;
 }
 
 export const DEFAULT_INLINE_OPTIONS: InlineOptions = {
   inlineMath: true,
   texDelimiters: true,
   strictDollar: true,
+  cjkSoftBreaks: true,
 };
 
 /** A stretch of source that carries formatting. */
@@ -418,7 +442,18 @@ interface Format {
   display?: boolean;
 }
 
-const PUNCT = /[!-/:-@[-`{-~\u2000-\u206f\u3000-\u303f\uff00-\uffef]/;
+const PUNCT = /[!-/:-@[-`{-~ -⁯　-〿＀-￯]/;
+
+/**
+ * East Asian wide characters: Han, kana, Hangul, CJK punctuation and the
+ * fullwidth forms. These are the ones whose neighbours never need a space.
+ */
+const WIDE =
+  /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︐-﹯＀-｠￠-￦]/;
+
+function isWide(c: string): boolean {
+  return c.length > 0 && WIDE.test(c);
+}
 
 function isSpace(c: string | undefined): boolean {
   return c === undefined || /\s/.test(c);
@@ -605,6 +640,25 @@ export function parseInline(
 
   // ---- pass two: emit ---------------------------------------------------
   swaps.sort((a, b) => a.from - b.from);
+
+  /** The first character that will survive into the output at or after `from`. */
+  const nextEmitted = (from: number): string => {
+    let j = from;
+    while (j < body.length) {
+      const drop = liveDrops.find(([a, b]) => j >= a && j < b);
+      if (drop) {
+        j = drop[1];
+        continue;
+      }
+      if (swaps.some((w) => j >= w.from && j < w.to)) return OBJECT_REPLACEMENT;
+      if (body[j] === "\n") {
+        j++;
+        continue;
+      }
+      return body[j];
+    }
+    return "";
+  };
   let text = "";
   const map: number[] = [];
   const active: Format[][] = [];
@@ -623,7 +677,32 @@ export function parseInline(
     }
     while (d < liveDrops.length && liveDrops[d][1] <= k) d++;
     if (d < liveDrops.length && k >= liveDrops[d][0] && k < liveDrops[d][1]) continue;
-    text += body[k] === "\n" ? " " : body[k];
+
+    if (body[k] === "\n") {
+      // A continuation line's leading whitespace is not content; CommonMark
+      // strips it, and keeping it would put the indentation of the source
+      // file into the middle of a sentence.
+      let j = k + 1;
+      while (j < body.length && (body[j] === " " || body[j] === "\t")) j++;
+
+      // Judge the break by what actually surrounds it in the finished text,
+      // not by the raw source: a delimiter or a formula may sit between.
+      const before = text.length ? text[text.length - 1] : "";
+      const after = nextEmitted(j);
+      // Whitespace the author already typed is enough; a break adjacent to it
+      // adds nothing.
+      const redundant = before === "" || before === " ";
+      const wide = options.cjkSoftBreaks && (isWide(before) || isWide(after));
+      if (!redundant && !wide) {
+        text += " ";
+        map.push(src(k));
+        active.push([]);
+      }
+      k = j - 1;
+      continue;
+    }
+
+    text += body[k];
     map.push(src(k));
     active.push(live.filter((f) => k >= f.from && k < f.to));
   }
