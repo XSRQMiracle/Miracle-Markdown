@@ -593,8 +593,13 @@ export class Typesetter {
     const lh = first
       ? first.runs[0]?.style.lineHeight ?? theme.lineHeight
       : theme.lineHeight;
-    const height =
-      spaceBefore + (lines.length ? lines.at(-1)!.baseline + theme.bodySize * lh * 0.35 : 0);
+    // Interline glue already respects each line's ink in the Rust core. The
+    // block boundary must do the same: a deep last-line formula cannot fit
+    // inside the ordinary text's nominal descent allowance.
+    const last = lines.at(-1);
+    const height = spaceBefore + (last
+      ? last.baseline + Math.max(last.depth, theme.bodySize * lh * 0.35)
+      : 0);
 
     return {
       block,

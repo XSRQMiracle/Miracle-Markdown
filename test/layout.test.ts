@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { initSync } from "../crates/typeset-wasm/pkg/typeset_wasm.js";
 import { DEFAULT_OPTIONS, DEFAULT_THEME, initEngine, Typesetter } from "../src/engine/typeset.js";
 import { Editor } from "../src/editor/editor.js";
+import { EMPTY_GEOMETRY } from "../src/engine/math.js";
 
 Object.defineProperty(globalThis, "document", {
   configurable: true,
@@ -76,4 +77,21 @@ assert.deepEqual(emptyLines.map((line) => [line.docStart, line.docEnd]), [[0, 1]
 assert.deepEqual(runs("````\na\n```").map((r) => r.text), ["a", "```"]);
 assert.deepEqual(runs("```\na\n```not-close").map((r) => r.text), ["a", "```not-close"]);
 assert.deepEqual(runs("~~~\na\n~~~~").map((r) => r.text), ["a"]);
+
+// Inject only the external formula measurement; the real WASM still lays out
+// the paragraph and the document pass still positions the following block.
+const deepMathTypesetter = new Typesetter({ ...DEFAULT_THEME }, {
+  ...DEFAULT_OPTIONS, inline: { ...DEFAULT_OPTIONS.inline }, justify: false,
+});
+(deepMathTypesetter as any).buildMathPieces = () => [{
+  geometry: EMPTY_GEOMETRY, scale: 1, source: "deep", display: false,
+  width: 20, height: 30, depth: 80, penaltyAfter: NaN,
+}];
+const deepBlocks = deepMathTypesetter.layoutDocument("last $deep$\n# Next", 1000, -1).blocks;
+const deepLast = deepBlocks[0].lines.at(-1)!;
+assert.equal(deepLast.depth, 80, "the core keeps the formula's actual descent");
+assert.ok(deepBlocks[0].height >= deepLast.baseline + deepLast.depth,
+  "a paragraph contains all of its last line's ink");
+assert.ok(deepBlocks[1].y - deepBlocks[1].spaceBefore >= deepBlocks[0].y + deepLast.baseline + deepLast.depth,
+  "the next block starts after the previous formula's ink");
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");
