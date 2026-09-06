@@ -173,6 +173,13 @@ export function parseBlocks(
   // artefact of splitting, not a blank line the author wrote.
   const count = lines.length > 1 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
 
+  // Ordered lists number themselves. CommonMark takes the start from the
+  // first item and ignores every number after it, so "1. 1. 1." reads as
+  // 1, 2, 3 — which is what lets an author reorder items without renumbering
+  // the source by hand. A stack, because a nested list has its own counter and
+  // the outer one must resume where it left off.
+  const counters: ListCounter[] = [];
+
   let i = 0;
   while (i < count) {
     const line = lines[i];
@@ -226,6 +233,7 @@ export function parseBlocks(
           i = count;
         }
       }
+counters.length = 0;
       blocks.push(
         block("math", doc.slice(start, end), start, end, {
           math: doc.slice(afterOpen, bodyEnd),
@@ -254,6 +262,7 @@ export function parseBlocks(
           }),
         );
       } else {
+counters.length = 0;
         blocks.push(block("code", doc.slice(start, end), start, end, { lang: fence[3] }));
       }
       i = j + 1;
@@ -267,6 +276,7 @@ export function parseBlocks(
     }
 
     if (RULE.test(line)) {
+counters.length = 0;
       blocks.push(block("rule", line, start, start + line.length, {}));
       i++;
       continue;
@@ -274,6 +284,7 @@ export function parseBlocks(
 
     const heading = HEADING.exec(line);
     if (heading) {
+counters.length = 0;
       blocks.push(
         block("heading", line, start, start + line.length, { level: heading[1].length }),
       );
@@ -290,11 +301,12 @@ export function parseBlocks(
       while (j < count && !interruptsParagraph(lines[j], options)) j++;
       const end = blockEnd(doc, offsets, lines.length, j, start, line);
       const indent = (ul ? ul[1] : ol![1]).length;
+      const level = Math.floor(indent / 2) + 1;
       blocks.push(
         block("list", doc.slice(start, end), start, end, {
-          level: Math.floor(indent / 2) + 1,
+          level,
           ordered: !!ol,
-          marker: ol ? `${ol[2]}${ol[3]}` : "•",
+          marker: listMarker(counters, level, ol),
         }),
       );
       i = j;
@@ -305,6 +317,7 @@ export function parseBlocks(
       let j = i;
       while (j < count && QUOTE.test(lines[j])) j++;
       const end = blockEnd(doc, offsets, lines.length, j, start, line);
+counters.length = 0;
       blocks.push(block("quote", doc.slice(start, end), start, end));
       i = j;
       continue;
@@ -314,6 +327,7 @@ export function parseBlocks(
     let j = i + 1;
     while (j < count && !interruptsParagraph(lines[j], options)) j++;
     const end = blockEnd(doc, offsets, lines.length, j, start, line);
+counters.length = 0;
     blocks.push(block("paragraph", doc.slice(start, end), start, end));
     i = j;
   }
@@ -322,6 +336,43 @@ export function parseBlocks(
     blocks.push(block("paragraph", "", 0, 0));
   }
   return blocks;
+}
+
+/**
+ * The number to print on an ordered list item.
+ *
+ * Deeper levels are discarded on the way out of a nested list, so returning to
+ * the outer level resumes its own count rather than restarting. A level that
+ * changes between bullets and numbers starts over, since the two are not the
+ * same list.
+ */
+function listMarker(
+  counters: ListCounter[],
+  level: number,
+  ordered: RegExpExecArray | null,
+): string {
+  // Leaving a nested list discards its counter; the level we return to keeps
+  // its own and carries on.
+  while (counters.length && counters[counters.length - 1].level > level) counters.pop();
+  const top = counters[counters.length - 1];
+  const continues = top !== undefined && top.level === level && top.ordered === !!ordered;
+
+  if (!ordered) {
+    // Bullets need no count, but the level must still be claimed so that a
+    // later number restarts rather than resuming a list this one interrupted.
+    if (!continues) {
+      if (top && top.level === level) counters.pop();
+      counters.push({ level, ordered: false, next: 0, delimiter: "" });
+    }
+    return "•";
+  }
+
+  if (continues) return `${top.next++}${top.delimiter}`;
+  if (top && top.level === level) counters.pop();
+  const written = Number.parseInt(ordered[2], 10);
+  const from = Number.isFinite(written) ? written : 1;
+  counters.push({ level, ordered: true, next: from + 1, delimiter: ordered[3] });
+  return `${from}${ordered[3]}`;
 }
 
 /**
@@ -536,6 +587,14 @@ export const DEFAULT_INLINE_OPTIONS: InlineOptions = {
   strictDollar: true,
   cjkSoftBreaks: true,
 };
+
+/** One level of an in-progress list, for numbering ordered items. */
+interface ListCounter {
+  level: number;
+  ordered: boolean;
+  next: number;
+  delimiter: string;
+}
 
 /** A stretch of source that carries formatting. */
 interface Format {

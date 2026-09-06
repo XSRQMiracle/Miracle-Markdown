@@ -297,5 +297,41 @@ eq(parseInline("a\\\nb", 0).text, "a b", "backslash-newline keeps the legacy sof
   eq(ok, true, "every rendered character maps back to the identical source character");
 }
 
+
+// --- ordered list numbering ------------------------------------------------
+// CommonMark takes an ordered list's start from its first item and ignores
+// every number after it, which is what lets an author reorder items without
+// renumbering the source by hand.
+const markers = (doc: string) =>
+  parseBlocks(doc).filter((b) => b.type === "list").map((b) => b.marker);
+
+eq(markers("1. a\n1. b\n1. c"), ["1.", "2.", "3."], "repeated 1. counts up");
+eq(markers("1. a\n2. b\n3. c"), ["1.", "2.", "3."], "already-correct numbers are kept");
+eq(markers("1. a\n7. b\n2. c"), ["1.", "2.", "3."], "later numbers are ignored");
+eq(markers("5. a\n1. b"), ["5.", "6."], "the first item sets the start");
+eq(markers("1) a\n1) b"), ["1)", "2)"], "the delimiter the author chose is kept");
+eq(markers("- a\n- b"), ["\u2022", "\u2022"], "bullets stay bullets");
+
+// A nested list keeps its own count, and the outer level resumes.
+eq(
+  markers("1. a\n  1. x\n  1. y\n1. b"),
+  ["1.", "1.", "2.", "2."],
+  "a nested list counts separately and the outer one carries on",
+);
+
+// Anything that is not a list ends the run.
+eq(markers("1. a\n\npara\n\n1. b"), ["1.", "1."], "a paragraph between items restarts");
+eq(markers("1. a\n\n1. b"), ["1.", "2."], "but a blank line alone does not");
+eq(markers("1. a\n- b\n1. c"), ["1.", "\u2022", "1."], "switching to bullets restarts the count");
+
+// The source is untouched: only the printed marker is computed.
+{
+  const doc = "1. first\n1. second";
+  const [, second] = parseBlocks(doc).filter((b) => b.type === "list");
+  eq(second.source, "1. second", "the block still holds what the author typed");
+  eq(renderBlock(second, false).text, "second", "and renders its own text");
+  eq(renderBlock(second, true).text, "1. second", "raw mode shows the typed number");
+}
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);
