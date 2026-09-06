@@ -24,7 +24,7 @@ pub mod unicode;
 
 pub use layout::{layout_lines, DrawRun, Line};
 pub use linebreak::{break_lines, Breakpoint};
-pub use prepare::{prepare, tokenize, Token};
+pub use prepare::{prepare, tokenize, tokenize_with_boundaries, Token};
 pub use unicode::{CharClass, PunctStyle};
 
 /// One measurable unit of text handed to the host for width measurement.

@@ -14,6 +14,11 @@ pub struct Token {
     pub start: u32,
     pub end: u32,
     pub class: CharClass,
+    /// A real dictionary hyphenation opportunity follows this token.
+    ///
+    /// Adjacent letter tokens are not enough to infer this: the host may
+    /// require an otherwise unbroken word to be split at a paint boundary.
+    pub hyphen_after: bool,
 }
 
 /// Split text into measurable tokens.
@@ -48,12 +53,67 @@ pub fn tokenize(text: &str, style: PunctStyle, hyphenate: bool) -> Vec<Token> {
             start: i as u32,
             end: (i + c.len_utf8()) as u32,
             class,
+            hyphen_after: false,
         });
     }
     if let Some(s) = latin_start {
         push_word(&mut tokens, text, s, text.len(), hyphenate);
     }
     tokens
+}
+
+/// Split measurable tokens at host-mandated byte boundaries.
+///
+/// Tokenization and hyphenation deliberately happen first, over the complete
+/// word. A bold or link boundary changes how glyphs are measured and painted,
+/// but it must neither erase the word's real hyphenation opportunities nor
+/// invent a new one. Invalid UTF-8 offsets are ignored rather than sliced.
+pub fn tokenize_with_boundaries(
+    text: &str,
+    style: PunctStyle,
+    hyphenate: bool,
+    boundaries: &[u32],
+) -> Vec<Token> {
+    let tokens = tokenize(text, style, hyphenate);
+    if boundaries.is_empty() || tokens.is_empty() {
+        return tokens;
+    }
+
+    let mut cuts: Vec<u32> = boundaries
+        .iter()
+        .copied()
+        .filter(|&cut| {
+            cut > 0 &&
+                (cut as usize) < text.len() &&
+                text.is_char_boundary(cut as usize)
+        })
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    if cuts.is_empty() {
+        return tokens;
+    }
+
+    let mut split = Vec::with_capacity(tokens.len() + cuts.len());
+    let mut cut_index = 0;
+    for token in tokens {
+        while cuts.get(cut_index).is_some_and(|&cut| cut <= token.start) {
+            cut_index += 1;
+        }
+        let mut start = token.start;
+        while let Some(&cut) = cuts.get(cut_index).filter(|&&cut| cut < token.end) {
+            split.push(Token {
+                start,
+                end: cut,
+                class: token.class,
+                hyphen_after: false,
+            });
+            start = cut;
+            cut_index += 1;
+        }
+        split.push(Token { start, ..token });
+    }
+    split
 }
 
 /// Emit a Latin word, split at its hyphenation points.
@@ -65,21 +125,29 @@ pub fn tokenize(text: &str, style: PunctStyle, hyphenate: bool) -> Vec<Token> {
 /// footing — which shows up on screen as syllables that overlap or drift
 /// apart.
 ///
-/// Two adjacent `Letter` tokens that touch in the source are, by construction,
-/// the two halves of a hyphenation point; nothing else can produce them, since
-/// a real word boundary always has something between.
 fn push_word(tokens: &mut Vec<Token>, text: &str, start: usize, end: usize, hyphenate: bool) {
     let word = &text[start..end];
     let long_enough = word.chars().count() >= 5;
     if !hyphenate || !long_enough || !word.chars().all(char::is_alphabetic) {
-        tokens.push(Token { start: start as u32, end: end as u32, class: CharClass::Letter });
+        tokens.push(Token {
+            start: start as u32,
+            end: end as u32,
+            class: CharClass::Letter,
+            hyphen_after: false,
+        });
         return;
     }
 
     let mut at = start;
-    for syllable in hypher::hyphenate(word, hypher::Lang::English) {
+    let mut syllables = hypher::hyphenate(word, hypher::Lang::English).peekable();
+    while let Some(syllable) = syllables.next() {
         let next = at + syllable.len();
-        tokens.push(Token { start: at as u32, end: next as u32, class: CharClass::Letter });
+        tokens.push(Token {
+            start: at as u32,
+            end: next as u32,
+            class: CharClass::Letter,
+            hyphen_after: syllables.peek().is_some(),
+        });
         at = next;
     }
     debug_assert_eq!(at, end, "hyphenation must preserve the word");
@@ -140,7 +208,8 @@ pub fn prepare(
     let last_char = |t: &Token| text[t.start as usize..t.end as usize].chars().next_back();
 
     for (i, tok) in tokens.iter().enumerate() {
-        let width = metrics.get(i * 4).copied().unwrap_or(0.0);
+        let measured_width = metrics.get(i * 4).copied();
+        let width = measured_width.filter(|w| w.is_finite()).unwrap_or(0.0);
         let height = metrics.get(i * 4 + 1).copied().unwrap_or(0.0);
         let depth = metrics.get(i * 4 + 2).copied().unwrap_or(0.0);
         let break_after = metrics.get(i * 4 + 3).copied().unwrap_or(f32::NAN);
@@ -151,7 +220,13 @@ pub fn prepare(
 
         if tok.class == CharClass::Space {
             // TeX's interword glue: for a typical serif, w ± w/2 ∓ w/3.
-            items.push(Item::glue(space_width, space_width * 0.5, space_width / 3.0));
+            // Use this token's measured style: code and heading spaces need
+            // not have the same advance as body text. `space_width` remains a
+            // defensive fallback for an incomplete metrics buffer.
+            let w = measured_width
+                .filter(|w| w.is_finite() && *w >= 0.0)
+                .unwrap_or(space_width);
+            items.push(Item::glue(w, w * 0.5, w / 3.0));
             continue;
         }
 
@@ -211,8 +286,10 @@ pub fn prepare(
         let Some(next_c) = first_char(next) else { continue };
         let this_c = last_char(tok).unwrap_or(c);
 
-        // A hyphenation point: two pieces of one word, touching in the source.
-        if tok.class == CharClass::Letter
+        // A dictionary hyphenation point. Adjacent letter boxes may merely be
+        // a style boundary and must remain unbreakable.
+        if tok.hyphen_after
+            && tok.class == CharClass::Letter
             && next.class == CharClass::Letter
             && tok.end == next.start
         {

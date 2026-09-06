@@ -12,9 +12,9 @@ const ASCENT: f32 = EM * 0.8;
 const DESCENT: f32 = EM * 0.2;
 
 /// Measure tokens the way a real host would, but deterministically.
-/// Returns [width, height, depth] per token.
+/// Returns [width, height, depth, break penalty] per token.
 fn measure(text: &str, tokens: &[Token]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(tokens.len() * 3);
+    let mut out = Vec::with_capacity(tokens.len() * 4);
     for t in tokens {
         let s = &text[t.start as usize..t.end as usize];
         let w = match t.class {
@@ -416,7 +416,7 @@ fn font_expansion_scales_glyphs_instead_of_spaces() {
 /// Per-character widths that differ sharply, so that any scheme which
 /// apportions a word's width evenly across its parts is exposed.
 fn variable_measure(text: &str, tokens: &[Token]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(tokens.len() * 3);
+    let mut out = Vec::with_capacity(tokens.len() * 4);
     for t in tokens {
         let s = &text[t.start as usize..t.end as usize];
         let w = match t.class {
@@ -470,6 +470,8 @@ fn hyphenated_words_are_split_into_measurable_pieces() {
     let cfg = test_config();
     let toks = tokenize("extraordinary", cfg.punct_style, true);
     assert!(toks.len() > 1, "a long word should offer hyphenation points");
+    assert!(toks[..toks.len() - 1].iter().all(|token| token.hyphen_after));
+    assert!(!toks.last().unwrap().hyphen_after);
     let joined: String = toks
         .iter()
         .map(|t| &"extraordinary"[t.start as usize..t.end as usize])
@@ -479,6 +481,81 @@ fn hyphenated_words_are_split_into_measurable_pieces() {
     // And with hyphenation off it stays whole.
     let whole = tokenize("extraordinary", cfg.punct_style, false);
     assert_eq!(whole.len(), 1);
+}
+
+#[test]
+fn style_boundaries_split_measurement_without_inventing_hyphens() {
+    let cfg = Config { hyphenate: false, ..test_config() };
+    let text = "abc";
+    let tokens = tokenize_with_boundaries(text, cfg.punct_style, cfg.hyphenate, &[1]);
+    let pieces: Vec<&str> = tokens
+        .iter()
+        .map(|t| &text[t.start as usize..t.end as usize])
+        .collect();
+    assert_eq!(pieces, vec!["a", "bc"]);
+    assert!(tokens.iter().all(|t| !t.hyphen_after));
+
+    let para = prepare(text, &tokens, &measure(text, &tokens), EM / 3.0, cfg);
+    assert_eq!(para.items[0].kind, Kind::Box);
+    assert_eq!(para.items[1].kind, Kind::Box, "a style cut must not insert a penalty");
+    assert!(para.items.iter().all(|item| !item.flagged));
+}
+
+#[test]
+fn style_boundaries_preserve_real_hyphenation_points() {
+    let cfg = test_config();
+    let text = "extraordinary";
+    let plain = tokenize(text, cfg.punct_style, true);
+    let split = tokenize_with_boundaries(text, cfg.punct_style, true, &[1, 3, 5, 7]);
+    let points = |tokens: &[Token]| {
+        tokens
+            .iter()
+            .filter(|token| token.hyphen_after)
+            .map(|token| token.end)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(points(&split), points(&plain));
+    assert!(split.iter().any(|token| token.end == 1 && !token.hyphen_after));
+}
+
+#[test]
+fn style_boundaries_are_validated_as_utf8_offsets() {
+    let cfg = Config { hyphenate: false, ..test_config() };
+    let text = "é😀中文";
+    // 1 is inside é, 3 is inside the emoji and 7 is inside 中. None may be
+    // used for slicing; valid, unsorted and duplicate offsets remain safe.
+    let tokens = tokenize_with_boundaries(
+        text,
+        cfg.punct_style,
+        cfg.hyphenate,
+        &[7, 2, 3, 2, 6, 999],
+    );
+    let pieces: Vec<&str> = tokens
+        .iter()
+        .map(|token| &text[token.start as usize..token.end as usize])
+        .collect();
+    assert_eq!(pieces, vec!["é", "😀", "中", "文"]);
+}
+
+#[test]
+fn object_tokens_survive_mandatory_boundaries() {
+    let cfg = Config { hyphenate: false, ..test_config() };
+    let text = "a\u{FFFC}b\u{FFFC}";
+    let tokens = tokenize_with_boundaries(text, cfg.punct_style, cfg.hyphenate, &[1, 4, 5]);
+    assert_eq!(tokens.iter().filter(|token| token.class == CharClass::Object).count(), 2);
+}
+
+#[test]
+fn a_space_uses_its_own_measured_width() {
+    let cfg = test_config();
+    let text = "a b";
+    let tokens = tokenize(text, cfg.punct_style, false);
+    let mut metrics = measure(text, &tokens);
+    let space = tokens.iter().position(|token| token.class == CharClass::Space).unwrap();
+    metrics[space * 4] = 9.0;
+    let para = prepare(text, &tokens, &metrics, 5.0, cfg);
+    let glue = para.items.iter().find(|item| item.kind == Kind::Glue && item.width > 0.0).unwrap();
+    assert_eq!(glue.width, 9.0);
 }
 
 #[test]
@@ -526,7 +603,7 @@ fn build_with_tall_token(
     cfg: Config,
 ) -> Vec<Line> {
     let tokens = tokenize(text, cfg.punct_style, cfg.hyphenate);
-    let mut metrics = Vec::with_capacity(tokens.len() * 3);
+    let mut metrics = Vec::with_capacity(tokens.len() * 4);
     for t in &tokens {
         let s = &text[t.start as usize..t.end as usize];
         let w = match t.class {

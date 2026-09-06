@@ -142,6 +142,8 @@ export interface LaidRun {
   docEnd: number;
   style: TextStyle;
   styleKey: string;
+  /** Identity of the rendered span this run is painted from. */
+  spanId: number;
   scaleX: number;
   /** Set on the hyphen the breaker inserted; it has no source of its own. */
   synthetic: boolean;
@@ -327,6 +329,26 @@ const INDIVIDUALLY_PLACED =
 /** True for a fragment that is safe to draw joined to its neighbour. */
 export function isLatinWordPiece(text: string): boolean {
   return text.length > 0 && !INDIVIDUALLY_PLACED.test(text);
+}
+
+/**
+ * UTF-8 byte boundaries at which token measurement or paint style changes.
+ *
+ * Markdown spans use JavaScript's UTF-16 indices while the Rust core slices
+ * UTF-8. Keeping the conversion in one place prevents bold/link boundaries
+ * beside emoji or non-ASCII text from landing inside a code point.
+ */
+export function spanByteBoundaries(text: string, spans: readonly Span[]): Uint32Array {
+  const toByte = charToByteIndex(text);
+  const total = toByte(text.length);
+  const boundaries = new Set<number>();
+  for (const span of spans) {
+    for (const position of [span.start, span.end]) {
+      const byte = toByte(position);
+      if (byte > 0 && byte < total) boundaries.add(byte);
+    }
+  }
+  return Uint32Array.from([...boundaries].sort((a, b) => a - b));
 }
 
 let engine: Engine | null = null;
@@ -614,6 +636,7 @@ export class Typesetter {
         docEnd: block.end,
         style,
         styleKey: key,
+        spanId: 0,
         scaleX: 1,
         synthetic: false,
         math: { geometry, scale, source: block.math, display: true },
@@ -632,6 +655,7 @@ export class Typesetter {
         docEnd: block.start,
         style,
         styleKey: key,
+        spanId: -1,
         scaleX: 1,
         synthetic: true,
       });
@@ -700,6 +724,7 @@ export class Typesetter {
                   docEnd: rendered.map[Math.min(at + lineText.length, rendered.map.length - 1)],
                   style,
                   styleKey: key,
+                  spanId: 0,
                   scaleX: 1,
                   synthetic: false,
                 },
@@ -752,6 +777,7 @@ export class Typesetter {
         isLatinWordPiece(prev.text) &&
         isLatinWordPiece(run.text) &&
         prev.styleKey === run.styleKey &&
+        prev.spanId === run.spanId &&
         prev.scaleX === run.scaleX &&
         prev.docEnd === run.docStart &&
         Math.abs(
@@ -911,7 +937,7 @@ export class Typesetter {
     );
 
     const text = rendered.text;
-    const tokens = engine.tokenize(text);
+    const tokens = engine.tokenize(text, spanByteBoundaries(text, rendered.spans));
     const count = tokens.length / 3;
     // Four floats per token: advance, height, depth, and the penalty for
     // breaking after it — the last is how a split formula's pieces are joined.
@@ -920,17 +946,18 @@ export class Typesetter {
     // Resolve which span a byte offset falls in, so bold and code runs are
     // measured with the face they will be drawn in.
     const toChar = byteToCharIndex(text);
-    const toByte = charToByteIndex(text);
-    const spanStyles = rendered.spans.map((s) => ({
+    const spanStyles = rendered.spans.map((s, id) => ({
       span: s,
+      id,
       ...styleForSpan(this.theme, block, s),
     }));
+    const fallbackStyle = { span: null, id: -1, ...base };
     const styleAt = (byteOffset: number) => {
       const ch = toChar(byteOffset);
       for (const s of spanStyles) {
         if (ch >= s.span.start && ch < s.span.end) return s;
       }
-      return spanStyles[0] ?? base;
+      return spanStyles[0] ?? fallbackStyle;
     };
 
     // Measure. Pieces of one hyphenated word arrive as separate tokens that
@@ -939,18 +966,18 @@ export class Typesetter {
     // and the pieces sum to the width the word has when it is not broken.
     for (let i = 0, t = 0; i < count; ) {
       let n = 1;
+      const st = styleAt(tokens[t]);
       if (tokens[t + 2] === CLASS_LETTER) {
         while (
           i + n < count &&
           tokens[t + n * 3 + 2] === CLASS_LETTER &&
           tokens[t + n * 3] === tokens[t + (n - 1) * 3 + 1] &&
-          styleAt(tokens[t + n * 3]).key === styleAt(tokens[t]).key
+          styleAt(tokens[t + n * 3]).key === st.key &&
+          styleAt(tokens[t + n * 3]).id === st.id
         ) {
           n++;
         }
       }
-
-      const st = styleAt(tokens[t]);
       const v = this.vmetrics(st.style, st.key);
 
       // A formula arrives as U+FFFC. Its box is whatever MathJax laid out,
@@ -1020,6 +1047,7 @@ export class Typesetter {
             docEnd: prev?.docEnd ?? 0,
             style: prev?.style ?? base.style,
             styleKey: prev?.styleKey ?? base.key,
+            spanId: prev?.spanId ?? -1,
             scaleX,
             synthetic: true,
           });
@@ -1036,6 +1064,7 @@ export class Typesetter {
           docEnd: rendered.map[ce] ?? rendered.map[rendered.map.length - 1],
           style: st.style,
           styleKey: st.key,
+          spanId: st.id,
           scaleX,
           synthetic: false,
           math: slice === OBJECT_REPLACEMENT ? pieces.get(cs) : undefined,
@@ -1051,7 +1080,6 @@ export class Typesetter {
         indent,
       });
     }
-    void toByte;
     return lines;
   }
 }
