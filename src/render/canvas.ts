@@ -14,6 +14,7 @@
 
 import type { LaidBlock, LaidRun, Theme } from "../engine/typeset.js";
 import { cssFont } from "../engine/measure.js";
+import type { MathDrawCommand } from "../engine/math.js";
 
 export interface Viewport {
   scrollTop: number;
@@ -165,8 +166,9 @@ export class Renderer {
     // A split formula draws its own piece; each carries outlines already
     // shifted so its left edge is the origin.
     const path = math.segment ? math.segment.path : math.geometry.path;
+    const commands = math.segment ? math.segment.commands : math.geometry.commands;
 
-    if (!path || math.geometry.error) {
+    if ((!path && !commands?.length) || math.geometry.error) {
       // Show the LaTeX itself, tinted, rather than a gap or a broken glyph.
       // A piece of a split formula has no sensible source of its own, so only
       // the first one speaks for the whole.
@@ -180,11 +182,80 @@ export class Renderer {
 
     ctx.save();
     ctx.translate(x, baseline);
-    ctx.scale(math.scale, math.scale);
-    ctx.fillStyle = run.style.color;
-    ctx.fill(path);
+    ctx.scale(math.scale * run.scaleX, math.scale);
+    if (commands?.length) {
+      this.drawMathCommands(commands, run.style.color);
+    } else if (path) {
+      // Compatibility for geometries cached by the original, single-path
+      // representation.
+      ctx.fillStyle = run.style.color;
+      ctx.fill(path);
+    }
     ctx.restore();
     this.currentFill = "";
+  }
+
+  /** Replay one MathJax SVG display list in document paint order. */
+  private drawMathCommands(commands: readonly MathDrawCommand[], currentColor: string): void {
+    const ctx = this.ctx;
+    const color = (value: string): string =>
+      value.toLowerCase() === "currentcolor" ? currentColor : value;
+
+    for (const command of commands) {
+      ctx.save();
+      const [a, b, c, d, e, f] = command.transform;
+      ctx.transform(a, b, c, d, e, f);
+
+      if (command.kind === "text") {
+        ctx.font = `${command.fontStyle} ${command.fontWeight} ${command.fontSize}px ${command.fontFamily}`;
+        ctx.textAlign =
+          command.textAnchor === "middle"
+            ? "center"
+            : command.textAnchor === "end"
+              ? "right"
+              : "left";
+        ctx.textBaseline = "alphabetic";
+        if (command.fill && command.opacity * command.fillOpacity > 0) {
+          ctx.fillStyle = color(command.fill);
+          ctx.globalAlpha = command.opacity * command.fillOpacity;
+          ctx.fillText(command.text, command.x, command.y);
+        }
+        if (
+          command.stroke &&
+          command.strokeWidth > 0 &&
+          command.opacity * command.strokeOpacity > 0
+        ) {
+          ctx.strokeStyle = color(command.stroke);
+          ctx.lineWidth = command.strokeWidth;
+          ctx.globalAlpha = command.opacity * command.strokeOpacity;
+          ctx.strokeText(command.text, command.x, command.y);
+        }
+        ctx.restore();
+        continue;
+      }
+
+      ctx.lineWidth = command.strokeWidth;
+      ctx.lineCap = command.lineCap;
+      ctx.lineJoin = command.lineJoin;
+      ctx.miterLimit = command.miterLimit;
+      ctx.setLineDash(command.lineDash);
+      ctx.lineDashOffset = command.lineDashOffset;
+      if (command.fill && command.opacity * command.fillOpacity > 0) {
+        ctx.fillStyle = color(command.fill);
+        ctx.globalAlpha = command.opacity * command.fillOpacity;
+        ctx.fill(command.path, command.fillRule);
+      }
+      if (
+        command.stroke &&
+        command.strokeWidth > 0 &&
+        command.opacity * command.strokeOpacity > 0
+      ) {
+        ctx.strokeStyle = color(command.stroke);
+        ctx.globalAlpha = command.opacity * command.strokeOpacity;
+        ctx.stroke(command.path);
+      }
+      ctx.restore();
+    }
   }
 
   /** Quote bars, code panels, rules and list bullets. */
