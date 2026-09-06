@@ -284,18 +284,10 @@ export function parseBlocks(
     const ul = UL.exec(line);
     const ol = OL.exec(line);
     if (ul || ol) {
-      // A list item continues over lazy continuation lines.
+      // A list item continues over ordinary lazy continuation lines, but a
+      // block opener starts a new block just as it would after a paragraph.
       let j = i + 1;
-      while (
-        j < count &&
-        lines[j].trim() !== "" &&
-        !UL.test(lines[j]) &&
-        !OL.test(lines[j]) &&
-        !HEADING.test(lines[j]) &&
-        !FENCE.test(lines[j])
-      ) {
-        j++;
-      }
+      while (j < count && !interruptsParagraph(lines[j], options)) j++;
       const end = blockEnd(doc, offsets, lines.length, j, start, line);
       const indent = (ul ? ul[1] : ol![1]).length;
       blocks.push(
@@ -434,7 +426,12 @@ export function renderBlock(
   } else if (b.type === "quote") {
     return stripPerLine(b, /^\s*>\s?/, options);
   } else if (b.type === "list") {
-    const m = UL.exec(b.source) ?? OL.exec(b.source);
+    // UL and OL deliberately match a complete source line. Match only the
+    // first one here so a lazy continuation does not prevent the list marker
+    // from being stripped from a multi-line item.
+    const newline = b.source.indexOf("\n");
+    const firstLine = newline >= 0 ? b.source.slice(0, newline) : b.source;
+    const m = UL.exec(firstLine) ?? OL.exec(firstLine);
     if (m) {
       const consumed = m[0].length - m[m.length - 1].length;
       base += consumed;

@@ -113,6 +113,48 @@ eq(parseInline("a\\\nb", 0).text, "a b", "backslash-newline keeps the legacy sof
   eq(renderBlock(b, true).text, doc, "the focused block shows raw source");
 }
 {
+  const doc = "- **first**\n  continued normally";
+  const [b] = parseBlocks(doc);
+  const rendered = renderBlock(b, false);
+  eq(b.type, "list", "an ordinary lazy continuation stays in its list item");
+  eq(b.source, doc, "a multi-line list item retains its exact source range");
+  eq(rendered.text, "first continued normally", "a multi-line bullet strips its first-line marker");
+  eq(rendered.map[0], doc.indexOf("first"), "the first list character maps past the marker");
+  eq(
+    rendered.map[rendered.text.indexOf("continued")],
+    doc.indexOf("continued"),
+    "a continuation character maps to its original source position",
+  );
+  eq(rendered.map[rendered.map.length - 1], b.end, "the multi-line list end map matches its range");
+}
+{
+  const doc = "12) first\ncontinuation";
+  const [b] = parseBlocks(doc);
+  eq(b.marker, "12)", "an ordered list retains its rendered marker");
+  eq(renderBlock(b, false).text, "first continuation", "an ordered multi-line item strips its source marker");
+}
+{
+  const doc = "- item\n> quote\n---\n$$\nx + y\n$$\nafter";
+  const blocks = parseBlocks(doc);
+  eq(
+    blocks.map((b) => b.type),
+    ["list", "quote", "rule", "math", "paragraph"],
+    "quote, rule, and display math interrupt a list continuation",
+  );
+  eq(blocks.map((b) => b.source), ["- item", "> quote", "---", "$$\nx + y\n$$", "after"], "list interrupts preserve every block source");
+  eq(
+    blocks.map((b) => [b.start, b.end]),
+    blocks.map((b) => [doc.indexOf(b.source), doc.indexOf(b.source) + b.source.length]),
+    "list interrupts retain exact document ranges",
+  );
+}
+{
+  const doc = "- item\n\\[\nx + y\n\\]\nafter";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["list", "math", "paragraph"], "TeX display math interrupts a list continuation");
+  eq(blocks[1].source, "\\[\nx + y\n\\]", "the TeX display block is not swallowed by the list");
+}
+{
   const doc = "> quoted **text**\n> second";
   const [b] = parseBlocks(doc);
   eq(renderBlock(b, false).text, "quoted text second", "blockquote strips its markers");
