@@ -160,10 +160,17 @@ async function main() {
   // being typed; once it is ready the document re-typesets with real boxes.
   const mathOptions: MathOptions = { ...DEFAULT_MATH_OPTIONS };
   const reloadMath = async () => {
-    await initMath(mathOptions);
-    editor.invalidateMath();
+    try {
+      if (await initMath(mathOptions)) editor.invalidateMath();
+    } catch (error) {
+      editor.invalidateMath();
+      throw error;
+    }
   };
-  void reloadMath();
+  void reloadMath().catch((error) => {
+    console.error("MathJax initialization failed", error);
+    document.getElementById("math-button")!.title = "公式引擎加载失败，可在公式设置中重试";
+  });
 
   buildMathPanel(
     document.getElementById("math-panel") as HTMLElement,
