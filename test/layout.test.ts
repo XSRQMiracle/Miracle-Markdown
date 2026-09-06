@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { initSync } from "../crates/typeset-wasm/pkg/typeset_wasm.js";
 import { DEFAULT_OPTIONS, DEFAULT_THEME, initEngine, Typesetter } from "../src/engine/typeset.js";
+import { Editor } from "../src/editor/editor.js";
 
 Object.defineProperty(globalThis, "document", {
   configurable: true,
@@ -58,4 +59,18 @@ for (const source of ["$$\nx+1\n$$", "---", "a\nb", "> quote", "- item"]) {
   assert.deepEqual(block.lines.map((line) => line.runs.map((r) => r.text).join("")), source.split("\n"));
   assert.ok(block.lines.flatMap((line) => line.runs).every((r) => !r.math));
 }
+for (const source of ["", "\n", "a\n", "a\n\nb", "\n\n\n", "$$\nx\n$$", "---", "```\na\n\nb\n```", "a\nb"]) {
+  const editor = Object.create(Editor.prototype) as any;
+  editor.typesetter = typesetter;
+  editor.text = source;
+  for (let position = 0; position <= source.length; position++) {
+    editor.blocks = typesetter.layoutDocument(source, 1000, position).blocks;
+    const found = editor.locate(position);
+    assert.ok(found && Number.isFinite(found.x), `${JSON.stringify(source)} has a caret at ${position}`);
+    assert.equal(editor.offsetInLine(found.block, found.line, found.x), position,
+      `physical source lines round trip at ${position} in ${JSON.stringify(source)}`);
+  }
+}
+const emptyLines = typesetter.layoutDocument("a\n\nb\n", 1000, -1).blocks.flatMap((b) => b.lines);
+assert.deepEqual(emptyLines.map((line) => [line.docStart, line.docEnd]), [[0, 1], [2, 2], [3, 4], [5, 5]]);
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");

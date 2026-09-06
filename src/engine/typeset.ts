@@ -22,6 +22,7 @@ import { renderMath, renderMathSegments } from "./mathjax.js";
 import type { MathGeometry, MathSegment } from "./math.js";
 import {
   parseBlocks,
+  blockIndexAtPosition,
   renderBlock,
   DEFAULT_INLINE_OPTIONS,
   OBJECT_REPLACEMENT,
@@ -152,6 +153,9 @@ export interface LaidRun {
 }
 
 export interface LaidLine {
+  /** Editable source extent, independent of whether the line paints glyphs. */
+  docStart: number;
+  docEnd: number;
   /** Baseline, relative to the top of the block. Computed by the core using
    *  TeX's interline glue, not by multiplying out a fixed line height. */
   baseline: number;
@@ -401,7 +405,7 @@ function styleForSpan(
 
 /** Extra space above a block, in pixels. TeX's vertical glue. */
 function spaceAbove(block: Block, theme: Theme, previous: Block | null): number {
-  if (!previous) return 0;
+  if (!previous || previous.type === "blank") return 0;
   switch (block.type) {
     case "heading":
       // Headings bind more tightly to what follows than to what precedes.
@@ -415,9 +419,7 @@ function spaceAbove(block: Block, theme: Theme, previous: Block | null): number 
     case "list":
       return previous.type === "list" ? theme.bodySize * 0.25 : theme.bodySize * 0.7;
     default:
-      return previous.type === "blank" || previous.type === "heading"
-        ? theme.bodySize * 0.7
-        : theme.bodySize * 0.7;
+      return theme.bodySize * 0.7;
   }
 }
 
@@ -469,15 +471,23 @@ export class Typesetter {
   layoutDocument(
     doc: string,
     width: number,
-    focusedBlock: number,
+    focusedPosition: number,
   ): { blocks: LaidBlock[]; height: number } {
     const parsed = parseBlocks(doc, this.options.inline);
+    // Markdown's semantic AST excludes the final empty split element. The
+    // editor still needs a physical line for the insertion point after LF.
+    if (doc.endsWith("\n")) {
+      parsed.push({
+        type: "blank", start: doc.length, end: doc.length, source: "",
+        level: 0, ordered: false, marker: "", lang: "", math: "",
+      });
+    }
+    const focusedBlock = blockIndexAtPosition(parsed, focusedPosition);
     const numbering = numberEquations(parsed, this.options.numbering);
     const out: LaidBlock[] = [];
     let y = 0;
     for (let i = 0; i < parsed.length; i++) {
       const b = parsed[i];
-      if (b.type === "blank") continue;
       const laid = this.layoutBlock(
         b,
         width,
@@ -505,7 +515,7 @@ export class Typesetter {
     // equation's number moves, and only then; one that cites nothing is
     // untouched by an edit elsewhere in the document.
     const cites = citesAnything(block) ? numbering.version : "";
-    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${cites}|${block.source}`;
+    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${previous?.type ?? ""}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${cites}|${block.source}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
 
@@ -532,7 +542,9 @@ export class Typesetter {
     // Source editing is a presentation mode shared by every block kind.
     // Resolve it before preview-only math/rule builders so their atomic
     // geometry can never hide editable delimiters or physical source lines.
-    if (raw) return this.buildPreformatted(block, rendered, spaceBefore, 0, true);
+    if (raw || block.type === "blank") {
+      return this.buildPreformatted(block, rendered, spaceBefore, 0, raw);
+    }
 
     const indent =
       block.type === "quote"
@@ -667,6 +679,8 @@ export class Typesetter {
       block,
       lines: [
         {
+          docStart: block.start,
+          docEnd: block.end,
           baseline: above + height,
           height,
           depth,
@@ -709,6 +723,8 @@ export class Typesetter {
       const isFence = hideFence && (li === 0 || li === src.length - 1) && /^\s*(`{3,}|~{3,})/.test(lineText);
       if (!isFence) {
         lines.push({
+          docStart: rendered.map[at],
+          docEnd: rendered.map[Math.min(at + lineText.length, rendered.map.length - 1)],
           baseline: n * lineHeight + v.ascent,
           height: v.ascent,
           depth: v.descent,
@@ -735,7 +751,7 @@ export class Typesetter {
       }
       at += lineText.length + 1;
     }
-    const height = spaceBefore + n * lineHeight + style.size * 0.5;
+    const height = spaceBefore + n * lineHeight + (block.type === "blank" ? 0 : style.size * 0.5);
     return {
       block,
       lines,
@@ -1027,6 +1043,8 @@ export class Typesetter {
       const runCount = flat[p];
       const ratio = flat[p + 1];
       const width = flat[p + 2];
+      const docStart = rendered.map[toChar(flat[p + 4])];
+      const docEnd = rendered.map[toChar(flat[p + 5])];
       const baseline = flat[p + 6];
       const height = flat[p + 7];
       const depth = flat[p + 8];
@@ -1071,6 +1089,8 @@ export class Typesetter {
         });
       }
       lines.push({
+        docStart,
+        docEnd,
         baseline,
         height,
         depth,

@@ -16,12 +16,7 @@
  */
 
 import { Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
-import {
-  blockIndexAtPosition,
-  parseBlocks,
-  sourceRangeOwnsPosition,
-  type Block,
-} from "../markdown/parse.js";
+import { sourceRangeOwnsPosition } from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
 import {
   DEFAULT_OPTIONS,
@@ -111,10 +106,6 @@ export class Editor {
 
   setOptions(patch: Partial<TypesetOptions>): void {
     Object.assign(this.typesetter.options, patch);
-    // Delimiter options affect block boundaries as well as inline rendering.
-    // A cache keyed only by source would otherwise disagree with layout about
-    // which block owns the caret after a setting changes.
-    this.parseCache = null;
     this.typesetter.invalidate();
     this.invalidate();
   }
@@ -196,36 +187,13 @@ export class Editor {
     const result = this.typesetter.layoutDocument(
       this.text,
       this.measure,
-      this.focusedBlock(),
+      this.hasFocus && this.interacted ? this.selEnd : -1,
     );
     this.blocks = result.blocks;
     this.docHeight = result.height;
     this.lastLayoutMs = performance.now() - t0;
     this.dirty = false;
   }
-
-  /**
-   * Index of the block holding the caret, in the same numbering the
-   * typesetter uses (which counts blank blocks, so it cannot be derived from
-   * the laid-out list). The parse is cached against the document text, so
-   * this costs nothing on a resize and one pass per edit.
-   */
-  private focusedBlock(): number {
-    // Revealing a block's markdown is a response to the caret being in it, so
-    // an unfocused editor shows the document fully typeset.
-    if (!this.hasFocus || !this.interacted) return -1;
-    if (!this.parseCache || this.parseCache.text !== this.text) {
-      this.parseCache = {
-        text: this.text,
-        blocks: parseBlocks(this.text, this.options.inline),
-      };
-    }
-    const caret = this.selEnd;
-    const blocks = this.parseCache.blocks;
-    return blockIndexAtPosition(blocks, caret);
-  }
-
-  private parseCache: { text: string; blocks: Block[] } | null = null;
 
   private render(): void {
     if (this.dirty) this.relayout();
@@ -312,7 +280,7 @@ export class Editor {
   }
 
   private offsetInLine(b: LaidBlock, line: LaidLine, x: number): number {
-    if (!line.runs.length) return b.block.start;
+    if (!line.runs.length) return line.docStart;
     for (const run of line.runs) {
       if (run.synthetic) continue;
       const w = this.runWidth(run);
@@ -321,8 +289,8 @@ export class Editor {
         return this.offsetInRun(run, x - run.x);
       }
     }
-    const last = line.runs[line.runs.length - 1];
-    return last.docEnd;
+    const last = line.runs.findLast((run) => !run.synthetic);
+    return last?.docEnd ?? line.docEnd;
   }
 
   /** Binary search inside a word for the closest character boundary. */
@@ -374,6 +342,9 @@ export class Editor {
       const b = this.blocks[i];
       if (!sourceRangeOwnsPosition(b.block, this.blocks[i + 1]?.block, offset)) continue;
       for (const line of b.lines) {
+        if (!line.runs.length && offset >= line.docStart && offset <= line.docEnd) {
+          return { block: b, line, x: 0 };
+        }
         for (const run of line.runs) {
           if (run.synthetic) continue;
           if (offset >= run.docStart && offset <= run.docEnd) {
@@ -419,6 +390,12 @@ export class Editor {
           const ex = run.x + this.typesetter.prefixWidth(run.text, e, run.style) * run.scaleX;
           x0 = Math.min(x0, sx);
           x1 = Math.max(x1, ex);
+        }
+        // A selected physical newline has source extent even when its line
+        // paints no glyphs. Give it a visible selection cell on that line.
+        if (lo <= line.docEnd && hi > line.docEnd && this.text[line.docEnd] === "\n") {
+          x0 = Math.min(x0, line.width);
+          x1 = Math.max(x1, line.width + size * 0.5);
         }
         if (x1 > x0) {
           rects.push({
@@ -515,9 +492,7 @@ export class Editor {
   private lineBounds(offset: number): { start: number; end: number } {
     const found = this.locate(offset);
     if (!found) return { start: offset, end: offset };
-    const runs = found.line.runs.filter((r) => !r.synthetic);
-    if (!runs.length) return { start: offset, end: offset };
-    return { start: runs[0].docStart, end: runs[runs.length - 1].docEnd };
+    return { start: found.line.docStart, end: found.line.docEnd };
   }
 
   private scrollCaretIntoView(): void {
