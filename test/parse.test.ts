@@ -333,5 +333,54 @@ eq(markers("1. a\n- b\n1. c"), ["1.", "\u2022", "1."], "switching to bullets res
   eq(renderBlock(second, true).text, "1. second", "raw mode shows the typed number");
 }
 
+
+// --- autolinks -------------------------------------------------------------
+// The scheme is what separates a link from markup that merely looks like one,
+// so HTML sitting in a paragraph must survive untouched.
+const autoHref = (body: string) =>
+  parseInline(body, 0).spans.find((s) => s.kind === "link")?.href;
+
+eq(parseInline("<https://example.com>", 0).text, "https://example.com",
+   "the angle brackets are removed");
+eq(autoHref("<https://example.com>"), "https://example.com", "and the URL becomes the href");
+eq(autoHref("<http://a.b/c?d=e#f>"), "http://a.b/c?d=e#f", "query and fragment survive");
+eq(autoHref("<ftp://host/path>"), "ftp://host/path", "any scheme qualifies");
+eq(autoHref("<mailto:a@b.c>"), "mailto:a@b.c", "an explicit mailto is a URI autolink");
+
+// Email autolinks carry no scheme; the renderer supplies it.
+eq(parseInline("<user@example.com>", 0).text, "user@example.com", "an email keeps its text");
+eq(autoHref("<user@example.com>"), "mailto:user@example.com", "and gains a mailto href");
+
+// Not autolinks.
+eq(autoHref("<div>"), undefined, "a bare tag has no scheme and is not a link");
+eq(parseInline("<div>", 0).text, "<div>", "and survives verbatim");
+eq(autoHref("<not a url>"), undefined, "spaces disqualify a candidate");
+eq(autoHref("<https://a b>"), undefined, "including inside the URL");
+eq(autoHref("< https://x>"), undefined, "a leading space disqualifies it");
+eq(autoHref("<a:b>"), undefined, "a one-letter scheme is too short");
+
+// Interaction with the constructs scanned around it.
+eq(parseInline("`<https://x>`", 0).text, "<https://x>", "a code span stays literal");
+eq(parseInline("see <https://x> now", 0).text, "see https://x now", "inside a sentence");
+{
+  const r = parseInline("[label](<https://x>)", 0);
+  eq(r.text, "label", "an angle destination is still a destination, not an autolink");
+  eq(r.spans.find((s) => s.kind === "link")?.href, "https://x", "and keeps its href");
+}
+{
+  // CommonMark forbids a link inside a link; the outer one owns the text.
+  const r = parseInline("[<https://x>](y)", 0);
+  eq(r.spans.filter((s) => s.kind === "link").length >= 1, true,
+     "a nested autolink does not create a second link format");
+  eq(r.text, "<https://x>", "and the label keeps its literal angle brackets");
+}
+{
+  const body = "a <https://x> b";
+  const r = parseInline(body, 100);
+  eq(r.map.length, r.text.length + 1, "the source map still covers every character");
+  eq(r.map[r.text.indexOf("https")], 100 + body.indexOf("https"),
+     "and the URL text maps past the opening bracket");
+}
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

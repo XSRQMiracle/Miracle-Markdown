@@ -759,6 +759,19 @@ export function parseInline(
       continue;
     }
 
+    // An autolink is only a link when it is not already inside one: CommonMark
+    // forbids a link within a link, and letting both formats cover the same
+    // characters would leave the span builder to choose arbitrarily.
+    if (c === "<" && !label) {
+      const auto = matchAutolink(body, i, limit);
+      if (auto) {
+        drops.push([i, i + 1], [auto.close, auto.close + 1]);
+        formats.push({ kind: "link", from: i + 1, to: auto.close, href: auto.href });
+        i = auto.close + 1;
+        continue;
+      }
+    }
+
     if (c === "[") {
       const close = matchBracket(body, i, limit);
       if (close > 0 && close < limit && body[close + 1] === "(") {
@@ -1027,6 +1040,38 @@ function scanDollarMath(
       }
     }
     return { end: k + 1, bodyStart, bodyEnd: k, display: false };
+  }
+  return null;
+}
+
+/**
+ * A URI autolink: a scheme, a colon, then anything but whitespace and angle
+ * brackets. The scheme is what separates `<https://x>` from `<div>`, so HTML
+ * that happens to sit in a paragraph is left alone.
+ */
+const AUTOLINK_URI = /^<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\x00-\x20]*>/;
+
+/**
+ * An email autolink. CommonMark spells this out separately because it carries
+ * no scheme; the `mailto:` is supplied by the renderer, not the author.
+ */
+const AUTOLINK_EMAIL =
+  /^<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*>/;
+
+/** Where the closing angle bracket sits, and what the link points at. */
+function matchAutolink(
+  body: string,
+  from: number,
+  limit: number,
+): { close: number; href: string } | null {
+  const candidate = body.slice(from, limit);
+  const uri = AUTOLINK_URI.exec(candidate);
+  if (uri) {
+    return { close: from + uri[0].length - 1, href: uri[0].slice(1, -1) };
+  }
+  const email = AUTOLINK_EMAIL.exec(candidate);
+  if (email) {
+    return { close: from + email[0].length - 1, href: `mailto:${email[0].slice(1, -1)}` };
   }
   return null;
 }
