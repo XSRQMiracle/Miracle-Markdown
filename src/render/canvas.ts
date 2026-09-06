@@ -189,6 +189,7 @@ export class Renderer {
 
   /** Quote bars, code panels, rules and list bullets. */
   private drawDecoration(b: LaidBlock, theme: Theme, view: Viewport): void {
+    if (b.raw) return;
     const ctx = this.ctx;
     const type = b.block.type;
 

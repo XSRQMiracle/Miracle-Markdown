@@ -529,6 +529,11 @@ export class Typesetter {
     const rendered = renderBlock(block, raw, this.options.inline);
     const spaceBefore = spaceAbove(block, theme, previous);
 
+    // Source editing is a presentation mode shared by every block kind.
+    // Resolve it before preview-only math/rule builders so their atomic
+    // geometry can never hide editable delimiters or physical source lines.
+    if (raw) return this.buildPreformatted(block, rendered, spaceBefore, 0, true);
+
     const indent =
       block.type === "quote"
         ? theme.bodySize * 1.4
@@ -544,7 +549,6 @@ export class Typesetter {
         spaceBefore,
         measure,
         indent,
-        raw,
         tag,
         numbering,
       );
@@ -566,14 +570,11 @@ export class Typesetter {
 
     // Code keeps its own line structure: breaking it optimally would be
     // actively wrong.
-    if (block.type === "code" && !raw) {
+    if (block.type === "code") {
       return this.buildPreformatted(block, rendered, spaceBefore, indent, raw);
     }
 
-    const lines =
-      block.type === "code"
-        ? this.buildPreformatted(block, rendered, spaceBefore, indent, raw).lines
-        : this.breakParagraph(block, rendered, measure, indent, numbering);
+    const lines = this.breakParagraph(block, rendered, measure, indent, numbering);
 
     const first = lines[0];
     const lh = first
@@ -610,7 +611,6 @@ export class Typesetter {
     spaceBefore: number,
     measure: number,
     indent: number,
-    raw: boolean,
     tag: string | null,
     numbering: Numbering,
   ): LaidBlock {
@@ -682,7 +682,7 @@ export class Typesetter {
       rendered,
       indent,
       marker: "",
-      raw,
+      raw: false,
     };
   }
 

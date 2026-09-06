@@ -50,4 +50,12 @@ const math = runs("a$x$**b**");
 assert.equal(math.at(-1)?.text, "b");
 assert.equal(math.at(-1)?.style.weight, 700);
 assert.equal(math.at(-1)?.docStart, 6);
+for (const source of ["$$\nx+1\n$$", "---", "a\nb", "> quote", "- item"]) {
+  const block = typesetter.layoutDocument(source, 1000, 0).blocks[0];
+  assert.equal(block.raw, true);
+  assert.equal(block.indent, 0);
+  assert.equal(block.marker, "");
+  assert.deepEqual(block.lines.map((line) => line.runs.map((r) => r.text).join("")), source.split("\n"));
+  assert.ok(block.lines.flatMap((line) => line.runs).every((r) => !r.math));
+}
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");
