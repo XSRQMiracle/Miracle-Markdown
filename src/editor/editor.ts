@@ -296,7 +296,7 @@ export class Editor {
   /** Binary search inside a word for the closest character boundary. */
   private offsetInRun(run: LaidRun, dx: number): number {
     const n = run.text.length;
-    if (n <= 1) {
+    if (run.math || n <= 1) {
       const w = this.runWidth(run);
       return dx > w / 2 ? run.docEnd : run.docStart;
     }
@@ -319,7 +319,16 @@ export class Editor {
   }
 
   private runWidth(run: LaidRun): number {
-    return this.typesetter.measureText(run.text, run.style, run.styleKey) * run.scaleX;
+    return (run.math?.width ?? this.typesetter.measureText(run.text, run.style, run.styleKey)) * run.scaleX;
+  }
+
+  /** Formulas are atomic source ranges, not the U+FFFC text we send to WASM. */
+  private xInRun(run: LaidRun, offset: number): number {
+    if (run.math) return run.x + (offset >= run.docEnd ? this.runWidth(run) : 0);
+    const chars = run.docEnd - run.docStart === run.text.length
+      ? Math.max(0, Math.min(run.text.length, offset - run.docStart))
+      : offset >= run.docEnd ? run.text.length : 0;
+    return run.x + this.typesetter.prefixWidth(run.text, chars, run.style) * run.scaleX;
   }
 
   /** Screen rectangle for the caret, in document coordinates. */
@@ -348,11 +357,7 @@ export class Editor {
         for (const run of line.runs) {
           if (run.synthetic) continue;
           if (offset >= run.docStart && offset <= run.docEnd) {
-            const span = run.docEnd - run.docStart;
-            const chars =
-              span === run.text.length ? offset - run.docStart : offset >= run.docEnd ? run.text.length : 0;
-            const x = run.x + this.typesetter.prefixWidth(run.text, chars, run.style) * run.scaleX;
-            return { block: b, line, x };
+            return { block: b, line, x: this.xInRun(run, offset) };
           }
         }
       }
@@ -382,12 +387,9 @@ export class Editor {
         for (const run of line.runs) {
           if (run.synthetic) continue;
           if (run.docEnd <= lo || run.docStart >= hi) continue;
-          const span = run.docEnd - run.docStart;
-          const exact = span === run.text.length;
-          const s = exact ? Math.max(0, lo - run.docStart) : 0;
-          const e = exact ? Math.min(run.text.length, hi - run.docStart) : run.text.length;
-          const sx = run.x + this.typesetter.prefixWidth(run.text, s, run.style) * run.scaleX;
-          const ex = run.x + this.typesetter.prefixWidth(run.text, e, run.style) * run.scaleX;
+          const exact = !run.math && run.docEnd - run.docStart === run.text.length;
+          const sx = exact ? this.xInRun(run, Math.max(lo, run.docStart)) : run.x;
+          const ex = exact ? this.xInRun(run, Math.min(hi, run.docEnd)) : run.x + this.runWidth(run);
           x0 = Math.min(x0, sx);
           x1 = Math.max(x1, ex);
         }

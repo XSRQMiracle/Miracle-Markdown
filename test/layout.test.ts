@@ -94,4 +94,37 @@ assert.ok(deepBlocks[0].height >= deepLast.baseline + deepLast.depth,
   "a paragraph contains all of its last line's ink");
 assert.ok(deepBlocks[1].y - deepBlocks[1].spaceBefore >= deepBlocks[0].y + deepLast.baseline + deepLast.depth,
   "the next block starts after the previous formula's ink");
+
+const loadingLine = layout("a$x + y$b").lines[0];
+const loadingRun = loadingLine.runs.find((r) => r.math)!;
+assert.equal(loadingRun.math!.fallback?.text, "x + y");
+assert.equal(loadingRun.math!.width, 48, "fallback uses the measured monospace text, not U+FFFC");
+assert.equal(loadingRun.math!.height, 12);
+assert.equal(loadingRun.math!.depth, 4);
+assert.ok(loadingLine.runs.at(-1)!.x >= loadingRun.x + loadingRun.math!.width,
+  "following text starts after the loading fallback");
+const fallbackEditor = Object.create(Editor.prototype) as any;
+fallbackEditor.typesetter = typesetter;
+fallbackEditor.text = "a$x + y$b";
+fallbackEditor.blocks = [layout(fallbackEditor.text)];
+fallbackEditor.selStart = loadingRun.docStart;
+fallbackEditor.selEnd = loadingRun.docEnd;
+assert.equal(fallbackEditor.runWidth(loadingRun), 48);
+assert.equal(fallbackEditor.offsetInRun(loadingRun, 47), loadingRun.docEnd);
+assert.equal(fallbackEditor.locate(loadingRun.docEnd).x, loadingRun.x + 48);
+assert.equal(fallbackEditor.selectionRects()[0].w, 48, "selection uses the same formula box");
+const displayFallback = layout("$$\nx + y\n$$").lines[0];
+const displayRun = displayFallback.runs[0];
+assert.equal(displayRun.math!.width, 48);
+assert.equal(displayFallback.width, 48);
+assert.equal(displayRun.x, (1000 - 48) / 2, "display fallback is centered using its painted width");
+const formulaPresentation = (geometry: typeof EMPTY_GEOMETRY, source: string) =>
+  (typesetter as any).mathRun(geometry, source, false, loadingRun.style);
+const badFormula = formulaPresentation({ ...EMPTY_GEOMETRY, widthEx: 99, error: "bad TeX" }, "x\n+ y");
+assert.equal(badFormula.fallback.text, "x + y");
+assert.equal(badFormula.width, 48, "partial error geometry cannot dictate the fallback box");
+assert.equal(formulaPresentation({ ...EMPTY_GEOMETRY, error: "loading" }, "").width, 10);
+const invisibleFormula = formulaPresentation({ ...EMPTY_GEOMETRY, widthEx: 2 }, "\\hphantom{x}");
+assert.equal(invisibleFormula.fallback, undefined, "valid inkless formulas do not turn into source text");
+assert.ok(invisibleFormula.width > 0, "valid inkless formulas retain their advance");
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");

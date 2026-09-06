@@ -118,7 +118,7 @@ export class Renderer {
           // A formula draws as outlines rather than text: MathJax laid it out,
           // we own where it goes. One fill call, whatever its complexity.
           if (run.math) {
-            this.drawMath(run, x, y, theme);
+            this.drawMath(run, x, y);
             continue;
           }
 
@@ -159,7 +159,7 @@ export class Renderer {
    * scale. When the formula did not parse we fall back to its source, which
    * is the honest thing to show while it is still being typed.
    */
-  private drawMath(run: LaidRun, x: number, baseline: number, theme: Theme): void {
+  private drawMath(run: LaidRun, x: number, baseline: number): void {
     const math = run.math!;
     const ctx = this.ctx;
 
@@ -168,15 +168,16 @@ export class Renderer {
     const path = math.segment ? math.segment.path : math.geometry.path;
     const commands = math.segment ? math.segment.commands : math.geometry.commands;
 
-    if ((!path && !commands?.length) || math.geometry.error) {
-      // Show the LaTeX itself, tinted, rather than a gap or a broken glyph.
-      // A piece of a split formula has no sensible source of its own, so only
-      // the first one speaks for the whole.
-      if (math.segment && math.segment.path === null) return;
-      const text = math.source || "…";
-      this.setFont(cssFont({ ...run.style, italic: false, family: theme.monoFamily }));
-      this.setFill(math.geometry.error === "loading" ? theme.mutedColor : "#b3402f");
-      ctx.fillText(text, x, baseline);
+    if (math.fallback) {
+      // The typesetter already selected and measured this presentation.
+      // Choosing a different string or font here would invalidate its box.
+      this.setFont(cssFont(math.fallback.style));
+      this.setFill(math.fallback.style.color);
+      ctx.save();
+      ctx.translate(x, baseline);
+      ctx.scale(run.scaleX, 1);
+      ctx.fillText(math.fallback.text, 0, 0);
+      ctx.restore();
       return;
     }
 

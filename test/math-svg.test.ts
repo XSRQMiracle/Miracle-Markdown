@@ -4,11 +4,13 @@
 // browser by supplying the small DOM and Path2D surface the walker needs.
 import {
   geometryFromSvg,
+  EMPTY_GEOMETRY,
   segmentInlineMath,
   type MathDrawCommand,
   type Matrix,
 } from "../src/engine/math.js";
 import { Renderer } from "../src/render/canvas.js";
+import { cssFont, type TextStyle } from "../src/engine/measure.js";
 
 let failures = 0;
 function eq(actual: unknown, expected: unknown, label: string): void {
@@ -224,6 +226,8 @@ class RecordingContext {
   save(): void {}
   restore(): void {}
   transform(): void {}
+  translate(): void {}
+  scale(): void {}
   setLineDash(): void {}
   fill(): void { this.events.push({ op: "fill", color: String(this.fillStyle) }); }
   stroke(): void { this.events.push({ op: "stroke", color: String(this.strokeStyle), width: this.lineWidth }); }
@@ -242,6 +246,30 @@ class RecordingContext {
   eq(strokes.some((event) => event.width === 70), true, "canvas paints the table separator");
   eq(context.events.some((event) => event.op === "fill" && event.color === "red"), true, "canvas paints explicit formula colours");
   eq(context.events.some((event) => event.op === "fillText" && event.text === "😀"), true, "canvas draws Unicode text rather than dropping it");
+}
+
+{
+  const context = new RecordingContext();
+  const painter = Object.create(Renderer.prototype) as any;
+  painter.ctx = context;
+  painter.currentFont = "";
+  painter.currentFill = "";
+  const style: TextStyle = {
+    family: "monospace", size: 18, weight: 400, italic: false,
+    color: "#8a8a8a", lineHeight: 1.75,
+  };
+  const math = {
+    geometry: { ...EMPTY_GEOMETRY, error: "loading" },
+    width: 100, height: 12, depth: 4, scale: 1, source: "unmeasured source", display: false,
+    fallback: { text: "measured fallback", style },
+  };
+  painter.drawMath({ math, style, scaleX: 1.1 }, 10, 20);
+  eq(context.events, [{ op: "fillText", color: style.color, text: math.fallback.text }],
+    "canvas uses the exact fallback representation selected by layout");
+  eq(context.font, cssFont(style), "canvas uses the measured fallback font");
+  context.events.length = 0;
+  painter.drawMath({ math: { ...math, geometry: EMPTY_GEOMETRY, fallback: undefined }, style, scaleX: 1 }, 10, 20);
+  eq(context.events, [], "valid inkless math does not paint unmeasured source text");
 }
 
 console.log(failures ? `\n${failures} failing` : "\nall passing");
