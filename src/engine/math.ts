@@ -281,7 +281,6 @@ function applyMathJaxRules(node: Element, style: Presentation): void {
   }
   if (node.getAttribute("data-line") !== null || node.getAttribute("data-frame") !== null) {
     style.fill = null;
-    style.stroke = "currentColor";
     style.strokeWidth = 70;
   }
   if (classes.has("mjx-dashed")) style.lineDash = [140];

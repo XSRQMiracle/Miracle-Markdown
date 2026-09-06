@@ -19,6 +19,7 @@ import {
   type TextStyle,
 } from "./measure.js";
 import { renderMath, renderMathSegments } from "./mathjax.js";
+import { sourceLineEnds } from "./source-layout.js";
 import type { MathGeometry, MathSegment } from "./math.js";
 import {
   parseBlocks,
@@ -478,9 +479,10 @@ export class Typesetter {
     focusedPosition: number,
   ): { blocks: LaidBlock[]; height: number } {
     const parsed = parseBlocks(doc, this.options.inline);
-    // Markdown's semantic AST excludes the final empty split element. The
-    // editor still needs a physical line for the insertion point after LF.
-    if (doc.endsWith("\n")) {
+    // Most blocks exclude the trailing LF, but an unterminated code/math
+    // block owns it and already lays out its final source line when focused.
+    // Only synthesize a line when no parsed block owns that insertion point.
+    if (doc.endsWith("\n") && parsed.at(-1)?.end !== doc.length) {
       parsed.push({
         type: "blank", start: doc.length, end: doc.length, source: "",
         level: 0, ordered: false, marker: "", lang: "", math: "",
@@ -547,7 +549,7 @@ export class Typesetter {
     // Resolve it before preview-only math/rule builders so their atomic
     // geometry can never hide editable delimiters or physical source lines.
     if (raw || block.type === "blank") {
-      return this.buildPreformatted(block, rendered, spaceBefore, 0, raw);
+      return this.buildPreformatted(block, rendered, spaceBefore, 0, raw, width);
     }
 
     const indent =
@@ -704,13 +706,14 @@ export class Typesetter {
     };
   }
 
-  /** Fenced code and the focused block: one source line per display line. */
+  /** Preserve physical source lines; focused source also wraps to the measure. */
   private buildPreformatted(
     block: Block,
     rendered: RenderedBlock,
     spaceBefore: number,
     indent: number,
     raw: boolean,
+    width = Infinity,
   ): LaidBlock {
     const { style, key } = styleForSpan(this.theme, block, null);
     const lineHeight = style.size * style.lineHeight;
@@ -728,32 +731,42 @@ export class Typesetter {
       const isFence = closingFence !== null &&
         (li === 0 || (li === src.length - 1 && closingFence.test(lineText)));
       if (!isFence) {
-        lines.push({
-          docStart: rendered.map[at],
-          docEnd: rendered.map[Math.min(at + lineText.length, rendered.map.length - 1)],
-          baseline: n * lineHeight + v.ascent,
-          height: v.ascent,
-          depth: v.descent,
-          ratio: 0,
-          width: this.measurer.width(lineText, style, key),
-          indent,
-          runs: lineText.length
-            ? [
-                {
-                  x: 0,
-                  text: lineText,
-                  docStart: rendered.map[at],
-                  docEnd: rendered.map[Math.min(at + lineText.length, rendered.map.length - 1)],
-                  style,
-                  styleKey: key,
-                  spanId: 0,
-                  scaleX: 1,
-                  synthetic: false,
-                },
-              ]
-            : [],
-        });
-        n++;
+        const ends = raw
+          ? sourceLineEnds(lineText, width, (part) => this.measurer.width(part, style, key))
+          : [lineText.length];
+        let start = 0;
+        for (const end of ends) {
+          const part = lineText.slice(start, end);
+          const docStart = rendered.map[at + start];
+          const docEnd = rendered.map[at + end];
+          lines.push({
+            docStart,
+            docEnd,
+            baseline: n * lineHeight + v.ascent,
+            height: v.ascent,
+            depth: v.descent,
+            ratio: 0,
+            width: this.measurer.width(part, style, key),
+            indent,
+            runs: part.length
+              ? [
+                  {
+                    x: 0,
+                    text: part,
+                    docStart,
+                    docEnd,
+                    style,
+                    styleKey: key,
+                    spanId: 0,
+                    scaleX: 1,
+                    synthetic: false,
+                  },
+                ]
+              : [],
+          });
+          n++;
+          start = end;
+        }
       }
       at += lineText.length + 1;
     }

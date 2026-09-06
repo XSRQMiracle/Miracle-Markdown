@@ -78,6 +78,104 @@ assert.deepEqual(runs("````\na\n```").map((r) => r.text), ["a", "```"]);
 assert.deepEqual(runs("```\na\n```not-close").map((r) => r.text), ["a", "```not-close"]);
 assert.deepEqual(runs("~~~\na\n~~~~").map((r) => r.text), ["a"]);
 
+// Source layout keeps every character and physical newline, while fitting
+// ordinary words and even an unbroken URL into the editing column.
+const longSource = "long paragraph ".repeat(30) + "\n" + "x".repeat(70) + "  end";
+const narrow = typesetter.layoutDocument(longSource, 240, 0).blocks[0];
+assert.ok(narrow.lines.length > 2, "focused source soft-wraps inside physical lines");
+assert.ok(narrow.lines.every((line) => line.width <= 240), "source remains inside the editing column");
+assert.equal(narrow.lines.map((line) => longSource.slice(line.docStart, line.docEnd)).join(""),
+  longSource.replaceAll("\n", ""), "soft wraps preserve whitespace and all source characters");
+assert.ok(narrow.lines.some((line) => longSource[line.docEnd] === "\n"), "physical LF still ends a visual line");
+for (const line of narrow.lines) {
+  assert.equal(line.runs.map((run) => run.text).join(""), longSource.slice(line.docStart, line.docEnd));
+}
+for (const source of ["# " + "heading ".repeat(15), "> " + "quote ".repeat(20),
+  "- " + "list ".repeat(25), "$$\n" + "x + y ".repeat(25) + "\n$$",
+  "```\n" + "function ".repeat(25) + "\n```", "😀e\u0301👨‍👩‍👧‍👦中".repeat(20)]) {
+  const raw = typesetter.layoutDocument(source, 240, 0).blocks[0];
+  const boundaries = new Set([source.length, ...Array.from(
+    new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(source), (s) => s.index,
+  )]);
+  assert.ok(raw.lines.every((line) => line.width <= 240));
+  assert.ok(raw.lines.every((line) => boundaries.has(line.docStart) && boundaries.has(line.docEnd)),
+    "soft wrapping never splits a grapheme");
+  assert.equal(raw.lines.flatMap((line) => line.runs.map((run) => run.text)).join(""), source.replaceAll("\n", ""));
+}
+
+const editable = (source: string, position = 0) => {
+  const editor = Object.create(Editor.prototype) as any;
+  Object.assign(editor, {
+    typesetter, text: source, selStart: position, selEnd: position,
+    caretAffinity: "downstream", preferredX: null, hasFocus: true, interacted: true,
+    scrollTop: 0, host: { clientWidth: 336, clientHeight: 10000 },
+    canvas: { getBoundingClientRect: () => ({ left: 0, top: 0 }) },
+    schedule() {},
+  });
+  editor.relayout();
+  return editor;
+};
+const wrappedEditor = editable(longSource);
+for (let position = 0; position <= longSource.length; position++) {
+  const found = wrappedEditor.locate(position);
+  assert.ok(found && found.x <= 240, `source caret ${position} is visible`);
+  assert.equal(wrappedEditor.offsetInLine(found.block, found.line, found.x), position);
+}
+const visualLines = wrappedEditor.blocks[0].lines;
+for (let i = 1; i < visualLines.length; i++) {
+  wrappedEditor.moveVertical(1, false);
+  assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i],
+    "ArrowDown reaches the following visual line, including shared source offsets");
+}
+for (let i = visualLines.length - 2; i >= 0; i--) {
+  wrappedEditor.moveVertical(-1, false);
+  assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i], "ArrowUp returns through every visual line");
+}
+const firstLine = visualLines[0];
+const endHit = wrappedEditor.positionAt(48 + firstLine.width + 1, 56 + firstLine.baseline - 5);
+wrappedEditor.moveTo(endHit.offset, false, endHit.affinity);
+assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, firstLine, "clicking the wrapped line end stays on that line");
+const nextLine = visualLines[1];
+const startHit = wrappedEditor.positionAt(48, 56 + nextLine.baseline - 5);
+wrappedEditor.moveTo(startHit.offset, false, startHit.affinity);
+assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "clicking the shared offset on the next line stays there");
+const key = (name: string) => wrappedEditor.onKeyDown({ key: name, preventDefault() {} });
+key("End");
+assert.equal(wrappedEditor.selEnd, nextLine.docEnd);
+assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "End uses the upstream side of a wrap");
+key("Home");
+assert.equal(wrappedEditor.selEnd, nextLine.docStart);
+assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "Home uses the downstream side of a wrap");
+wrappedEditor.selStart = 0;
+wrappedEditor.selEnd = longSource.length;
+assert.equal(wrappedEditor.selectionRects().length, visualLines.length, "selection covers every wrapped source line");
+
+for (const source of ["\n", "a\n", "```\na\n", "~~~\na\n", "$$\na\n", "```math\na\n", "```\na\n```\n"]) {
+  const editor = editable(source, source.length);
+  const lines = editor.blocks.flatMap((b: any) => b.lines);
+  assert.equal(lines.filter((line: any) => line.docStart === source.length && line.docEnd === source.length).length,
+    1, "the terminal source line has exactly one owner");
+  editor.moveVertical(-1, false);
+  assert.ok(editor.selEnd < source.length, `ArrowUp leaves EOF in ${JSON.stringify(source)}`);
+}
+const unfinished = editable("```\na\n", 6);
+assert.equal(unfinished.blocks.length, 1, "an open fence retains its trailing source line");
+assert.equal(unfinished.blocks[0].raw, true, "EOF keeps the open fence focused");
+unfinished.moveVertical(-1, false);
+assert.equal(unfinished.selEnd, 4);
+unfinished.moveVertical(1, false);
+assert.equal(unfinished.selEnd, 6, "vertical movement round-trips through the terminal line");
+
+const revealEditor = editable(longSource);
+revealEditor.interacted = false;
+revealEditor.relayout();
+revealEditor.interacted = true;
+revealEditor.host.clientHeight = 120;
+revealEditor.moveTo(longSource.length, false);
+assert.equal(revealEditor.blocks[0].raw, true);
+assert.ok(revealEditor.caretRect().x <= 240, "revealing source keeps the target caret within the column");
+assert.ok(revealEditor.scrollTop > 0, "scrolling uses the newly revealed source layout");
+
 // Inject only the external formula measurement; the real WASM still lays out
 // the paragraph and the document pass still positions the following block.
 const deepMathTypesetter = new Typesetter({ ...DEFAULT_THEME }, {

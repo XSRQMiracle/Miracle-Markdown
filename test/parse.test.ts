@@ -46,7 +46,7 @@ eq(parseInline("[label](http://x)", 0).text, "label", "link syntax leaves the la
   const r = parseInline(body, 0);
   const link = r.spans.find((s) => s.kind === "link");
   eq(r.text, "x!", "an escaped parenthesis does not close a link destination");
-  eq(link?.href, String.raw`a\)b`, "an escaped parenthesis remains part of the href source");
+  eq(link?.href, "a)b", "destination escapes are decoded after finding the source boundary");
   eq(Array.from(r.map), [1, 9, 10], "text after an escaped destination maps past its real closer");
 }
 {
@@ -64,7 +64,6 @@ eq(parseInline("[label](http://x)", 0).text, "label", "link syntax leaves the la
     { body: "[a$$x](url$$)b", text: "a$$xb", map: [1, 2, 3, 4, 13, 14], kinds: ["math"] },
     { body: String.raw`[a\(x](url\))b`, text: "a(xb", map: [1, 3, 4, 13, 14], kinds: ["math"] },
     { body: String.raw`[a\[x](url\])b`, text: "a[xb", map: [1, 3, 4, 13, 14], kinds: ["math"] },
-    { body: "[a`x](url`)b", text: "a`xb", map: [1, 2, 3, 11, 12], kinds: ["code"] },
     { body: "[a*x](url)b*", text: "a*xb*", map: [1, 2, 3, 10, 11, 12], kinds: ["em"] },
     { body: "[a**x](url)b**", text: "a**xb**", map: [1, 2, 3, 4, 11, 12, 13, 14], kinds: ["strong"] },
     { body: "[a~~x](url)b~~", text: "a~~xb~~", map: [1, 2, 3, 4, 11, 12, 13, 14], kinds: ["strike"] },
@@ -79,6 +78,64 @@ eq(parseInline("[label](http://x)", 0).text, "label", "link syntax leaves the la
     );
     eq(Array.from(r.map), test.map, `${test.kinds[0]} fallback retains its exact source map`);
   }
+}
+// Link components have distinct grammars. In particular, parentheses in an
+// angle destination or a quoted title never extend the link into later prose.
+{
+  const targets = [
+    { target: "<foo(bar>", href: "foo(bar" },
+    { target: "<foo)bar>", href: "foo)bar" },
+    { target: "<foo bar>", href: "foo bar" },
+    { target: 'url "("', href: "url" },
+    { target: "url ')'", href: "url" },
+    { target: "url (title)", href: "url" },
+    { target: '<foo(bar> "a (title)"', href: "foo(bar" },
+    { target: String.raw`<foo\>bar> "quoted \"title\""`, href: "foo>bar" },
+    { target: "url\n\t'title'\n", href: "url" },
+    { target: "", href: "" },
+    { target: "<> 'title'", href: "" },
+    { target: '"a title"', href: "" },
+    { target: '"title"', href: '"title"' },
+  ];
+  for (const { target, href } of targets) {
+    const linkSource = `[x](${target})`;
+    const suffix = " prose ) tail";
+    const body = linkSource + suffix;
+    const rendered = parseInline(body, 7);
+    eq(rendered.text, "x" + suffix, `link tail preserves prose after ${JSON.stringify(target)}`);
+    eq(rendered.spans.find((s) => s.kind === "link")?.href, href, "href contains only the decoded destination");
+    eq(Array.from(rendered.map), [8, ...Array.from({ length: suffix.length + 1 }, (_, i) => 7 + linkSource.length + i)],
+      "source mapping skips exactly the complete link tail");
+  }
+  for (const body of ["[x](<foo(bar)", "[x](<foo\nbar>)", "[x](a b)", '[x](url "unfinished) tail',
+    '[x](url "title" garbage) tail', "[x](url (nested (title)))", "[x](url\n\n 'title')"]) {
+    const rendered = parseInline(body, 0);
+    eq(rendered.spans.some((s) => s.kind === "link"), false, "malformed link tails remain source text");
+  }
+}
+{
+  const body = "[foo`](/uri)`";
+  const rendered = parseInline(body, 7);
+  eq(rendered.text, "[foo](/uri)", "code opacity is resolved before choosing a link label boundary");
+  eq(rendered.spans.some((s) => s.kind === "link"), false, "a closing bracket inside code cannot create a link");
+  const code = rendered.spans.find((s) => s.code)!;
+  eq(rendered.text.slice(code.start, code.end), "](/uri)", "the entire code span stays visible");
+  eq(Array.from(rendered.map), [0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 13].map((i) => i + 7),
+    "code/link precedence preserves exact source offsets");
+  const cases = [
+    { body: "[a`x](url`)b", text: "[ax](url)b", href: undefined },
+    { body: "[a`]`b](url)", text: "a]b", href: "url" },
+    { body: "[a``]`b``c](url)", text: "a]`bc", href: "url" },
+    { body: "[a`b](url)", text: "a`b", href: "url" },
+    { body: "[a`b``](url)", text: "a`b``", href: "url" },
+    { body: "[`x](first)`][y](second)", text: "[x](first)]y", href: "second" },
+  ];
+  for (const { body, text, href } of cases) {
+    const rendered = parseInline(body, 0);
+    eq(rendered.text, text, `code runs and label brackets agree for ${JSON.stringify(body)}`);
+    eq(rendered.spans.find((s) => s.kind === "link")?.href, href, "only brackets outside matched code close labels");
+  }
+  eq(parseInline("`a``b`", 0).text, "a``b", "a longer backtick run cannot close a shorter one");
 }
 {
   const body = "[x](a_(b)";

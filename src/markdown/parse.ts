@@ -691,31 +691,27 @@ export function parseInline(
     }
 
     if (c === "`") {
-      let n = 1;
-      while (i + n < limit && body[i + n] === "`") n++;
-      const close = body.indexOf("`".repeat(n), i + n);
-      if (close > 0 && close + n <= limit) {
-        drops.push([i, i + n], [close, close + n]);
-        formats.push({ kind: "code", from: i + n, to: close, href: "" });
-        i = close + n;
-        continue;
+      const code = scanBackticks(body, i, limit);
+      if (code.close >= 0) {
+        drops.push([i, code.contentAt], [code.close, code.end]);
+        formats.push({ kind: "code", from: code.contentAt, to: code.close, href: "" });
       }
-      i += n;
+      i = code.end;
       continue;
     }
 
     if (c === "[") {
-      const close = matchBracket(body, i);
+      const close = matchBracket(body, i, limit);
       if (close > 0 && close < limit && body[close + 1] === "(") {
-        const paren = matchLinkDestination(body, close + 1);
-        if (paren > 0 && paren < limit) {
-          drops.push([i, i + 1], [close, paren + 1]);
-          linkLabels.push({ start: i + 1, close, end: paren + 1, openStart: open.length });
+        const target = matchLinkDestination(body, close + 1, limit);
+        if (target) {
+          drops.push([i, i + 1], [close, target.end]);
+          linkLabels.push({ start: i + 1, close, end: target.end, openStart: open.length });
           formats.push({
             kind: "link",
             from: i + 1,
             to: close,
-            href: body.slice(close + 2, paren),
+            href: target.href,
           });
           i = i + 1;
           continue;
@@ -976,12 +972,40 @@ function scanDollarMath(
   return null;
 }
 
-/** Index of the `]` matching the `[` at `from`, honouring nesting. */
-function matchBracket(body: string, from: number): number {
+/**
+ * Match whole backtick runs, never a prefix of a longer run. The same scanner
+ * determines code opacity while finding a label and while parsing its text.
+ * An unmatched opener advances over that complete run as literal content.
+ */
+function scanBackticks(
+  body: string,
+  from: number,
+  limit: number,
+): { contentAt: number; close: number; end: number } {
+  let contentAt = from + 1;
+  while (contentAt < limit && body[contentAt] === "`") contentAt++;
+  let at = contentAt;
+  while (at < limit) {
+    const close = body.indexOf("`", at);
+    if (close < 0 || close >= limit) break;
+    let end = close + 1;
+    while (end < limit && body[end] === "`") end++;
+    if (end - close === contentAt - from) return { contentAt, close, end };
+    at = end;
+  }
+  return { contentAt, close: -1, end: contentAt };
+}
+
+/** Index of the matching `]`, honouring nesting, escapes, and opaque code. */
+function matchBracket(body: string, from: number, limit: number): number {
   let depth = 0;
-  for (let i = from; i < body.length; i++) {
-    if (body[i] === "\\") {
+  for (let i = from; i < limit; i++) {
+    if (body[i] === "\\" && isEscapableAsciiPunctuation(body[i + 1])) {
       i++;
+      continue;
+    }
+    if (body[i] === "`") {
+      i = scanBackticks(body, i, limit).end - 1;
       continue;
     }
     if (body[i] === "[") depth++;
@@ -994,23 +1018,105 @@ function matchBracket(body: string, from: number): number {
 }
 
 /**
- * Index of the `)` closing an inline link destination.
- *
- * Bare destinations may contain balanced parentheses. Backslash-escaped
- * parentheses are URL content, so they neither open nor close a nested pair.
+ * Parse the complete link tail before hiding any source. Angle destinations,
+ * bare destinations, and titles have different delimiter rules; balancing all
+ * parentheses together can consume prose after the actual link.
  */
-function matchLinkDestination(body: string, from: number): number {
-  if (body[from] !== "(") return -1;
-  let depth = 1;
-  for (let i = from + 1; i < body.length; i++) {
-    if (body[i] === "\\") {
-      i++;
-      continue;
+function matchLinkDestination(
+  body: string,
+  from: number,
+  limit: number,
+): { end: number; href: string } | null {
+  const start = skipLinkWhitespace(body, from + 1, limit);
+  if (start < 0 || start >= limit) return null;
+  if (body[start] === ")") return { end: start + 1, href: "" };
+
+  let i = start;
+  let destinationStart = start;
+  let destinationEnd = -1;
+  if (body[i] === "<") {
+    destinationStart = ++i;
+    while (i < limit) {
+      if (body[i] === "\\" && isEscapableAsciiPunctuation(body[i + 1])) i += 2;
+      else if (body[i] === "<" || body[i] === "\n" || body[i] === "\r") break;
+      else if (body[i] === ">") {
+        destinationEnd = i++;
+        break;
+      } else i++;
     }
-    if (body[i] === "(") depth++;
-    else if (body[i] === ")") {
-      depth--;
-      if (depth === 0) return i;
+  } else {
+    let depth = 0;
+    while (i < limit) {
+      const c = body[i];
+      if (c.charCodeAt(0) <= 0x20 || c.charCodeAt(0) === 0x7f) break;
+      if (c === "\\" && isEscapableAsciiPunctuation(body[i + 1])) {
+        i += 2;
+        continue;
+      }
+      if (c === "(") depth++;
+      else if (c === ")") {
+        if (depth === 0) break;
+        depth--;
+      }
+      i++;
+    }
+    if (depth === 0 && i > start) destinationEnd = i;
+  }
+
+  if (destinationEnd >= 0) {
+    const after = skipLinkWhitespace(body, i, limit);
+    let close = after;
+    if (after > i && body[after] !== ")") {
+      const titleEnd = matchLinkTitle(body, after, limit);
+      close = titleEnd < 0 ? -1 : skipLinkWhitespace(body, titleEnd, limit);
+    }
+    if (close >= 0 && close < limit && body[close] === ")") {
+      const href = body.slice(destinationStart, destinationEnd).replace(
+        /\\(.)/g,
+        (escape, c: string) => isEscapableAsciiPunctuation(c) ? c : escape,
+      );
+      return { end: close + 1, href };
+    }
+  }
+
+  // A title can appear without a destination, but a valid destination takes
+  // precedence: ("title") links to the literal URL "title", quotes included.
+  const titleEnd = matchLinkTitle(body, start, limit);
+  const close = titleEnd < 0 ? -1 : skipLinkWhitespace(body, titleEnd, limit);
+  return close >= 0 && close < limit && body[close] === ")"
+    ? { end: close + 1, href: "" }
+    : null;
+}
+
+/** Components permit spaces, tabs, and at most one line ending between them. */
+function skipLinkWhitespace(body: string, from: number, limit: number): number {
+  let lineEndings = 0;
+  let i = from;
+  while (i < limit) {
+    if (body[i] === " " || body[i] === "\t") i++;
+    else if (body[i] === "\n" || body[i] === "\r") {
+      if (++lineEndings > 1) return -1;
+      if (body[i] === "\r" && body[i + 1] === "\n") i++;
+      i++;
+    } else break;
+  }
+  return i;
+}
+
+/** End just after a quoted or parenthesized title, before trailing whitespace. */
+function matchLinkTitle(body: string, from: number, limit: number): number {
+  const opener = body[from];
+  if (opener !== '"' && opener !== "'" && opener !== "(") return -1;
+  const closer = opener === "(" ? ")" : opener;
+  for (let i = from + 1; i < limit; i++) {
+    const c = body[i];
+    if (c === "\\" && isEscapableAsciiPunctuation(body[i + 1])) i++;
+    else if (c === closer) return i + 1;
+    else if (opener === "(" && c === "(") return -1;
+    else if (c === "\n" || c === "\r") {
+      const after = skipLinkWhitespace(body, i, limit);
+      if (after < 0) return -1;
+      i = after - 1;
     }
   }
   return -1;

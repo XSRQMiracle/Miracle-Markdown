@@ -43,6 +43,13 @@ interface Snapshot {
   end: number;
 }
 
+type CaretAffinity = "upstream" | "downstream";
+interface CaretPosition {
+  offset: number;
+  /** Which visual line owns a source offset shared by a soft wrap. */
+  affinity: CaretAffinity;
+}
+
 export class Editor {
   private renderer: Renderer;
   private typesetter: Typesetter;
@@ -51,6 +58,7 @@ export class Editor {
   private text = "";
   private selStart = 0;
   private selEnd = 0;
+  private caretAffinity: CaretAffinity = "downstream";
   private preferredX: number | null = null;
 
   private blocks: LaidBlock[] = [];
@@ -131,6 +139,7 @@ export class Editor {
   setText(text: string): void {
     this.text = normalizeLineEndings(text);
     this.selStart = this.selEnd = 0;
+    this.caretAffinity = "downstream";
     this.undoStack = [];
     this.redoStack = [];
     this.invalidate();
@@ -256,8 +265,8 @@ export class Editor {
 
   // -- geometry ----------------------------------------------------------
 
-  /** Document offset for a point in canvas coordinates. */
-  private offsetAt(clientX: number, clientY: number): number {
+  /** Source position and visual affinity for a point in canvas coordinates. */
+  private positionAt(clientX: number, clientY: number): CaretPosition {
     const rect = this.canvas.getBoundingClientRect();
     const x = clientX - rect.left - this.gutter;
     const y = clientY - rect.top - this.originY + this.scrollTop;
@@ -270,13 +279,20 @@ export class Editor {
       }
       if (!best || Math.abs(y - b.y) < Math.abs(y - best.y)) best = b;
     }
-    if (!best || !best.lines.length) return best ? best.block.start : this.text.length;
+    if (!best || !best.lines.length) {
+      return { offset: best ? best.block.start : this.text.length, affinity: "downstream" };
+    }
 
     let line: LaidLine = best.lines[0];
     for (const l of best.lines) {
       if (y >= best.y + l.baseline - this.theme.bodySize) line = l;
     }
-    return this.offsetInLine(best, line, x - best.indent);
+    return this.positionInLine(best, line, x - best.indent);
+  }
+
+  private positionInLine(b: LaidBlock, line: LaidLine, x: number): CaretPosition {
+    const offset = this.offsetInLine(b, line, x);
+    return { offset, affinity: offset === line.docEnd ? "upstream" : "downstream" };
   }
 
   private offsetInLine(b: LaidBlock, line: LaidLine, x: number): number {
@@ -346,11 +362,19 @@ export class Editor {
   }
 
   /** Find the block, line and x offset for a document position. */
-  private locate(offset: number): { block: LaidBlock; line: LaidLine; x: number } | null {
+  private locate(
+    offset: number,
+    affinity: CaretAffinity = this.caretAffinity,
+  ): { block: LaidBlock; line: LaidLine; x: number } | null {
     for (let i = 0; i < this.blocks.length; i++) {
       const b = this.blocks[i];
       if (!sourceRangeOwnsPosition(b.block, this.blocks[i + 1]?.block, offset)) continue;
-      for (const line of b.lines) {
+      for (let li = 0; li < b.lines.length; li++) {
+        const line = b.lines[li];
+        // A soft wrap has two caret locations for one source offset. Keep
+        // the side chosen by a mouse hit, vertical move, or Home/End.
+        if (b.raw && affinity !== "upstream" && offset === line.docEnd &&
+          b.lines[li + 1]?.docStart === offset) continue;
         if (!line.runs.length && offset >= line.docStart && offset <= line.docEnd) {
           return { block: b, line, x: 0 };
         }
@@ -432,8 +456,10 @@ export class Editor {
     this.onChange?.();
     this.text = this.text.slice(0, from) + insert + this.text.slice(to);
     this.selStart = this.selEnd = from + insert.length;
+    this.caretAffinity = "downstream";
     this.preferredX = null;
     this.invalidate();
+    this.scrollCaretIntoView();
   }
 
   private insert(s: string, coalesce = true): void {
@@ -449,6 +475,7 @@ export class Editor {
     this.text = snap.text;
     this.selStart = snap.start;
     this.selEnd = snap.end;
+    this.caretAffinity = "downstream";
     this.invalidate();
   }
 
@@ -459,17 +486,20 @@ export class Editor {
     this.text = snap.text;
     this.selStart = snap.start;
     this.selEnd = snap.end;
+    this.caretAffinity = "downstream";
     this.invalidate();
   }
 
   // -- caret movement ----------------------------------------------------
 
-  private moveTo(offset: number, extend: boolean): void {
+  private moveTo(offset: number, extend: boolean, affinity: CaretAffinity = "downstream"): void {
     this.selEnd = Math.max(0, Math.min(this.text.length, offset));
+    this.caretAffinity = affinity;
     if (!extend) this.selStart = this.selEnd;
     this.caretVisible = true;
-    this.scrollCaretIntoView();
     this.invalidate();
+    // Reveal the target block before measuring where its caret must scroll.
+    this.scrollCaretIntoView();
   }
 
   private moveVertical(dir: -1 | 1, extend: boolean): void {
@@ -486,8 +516,8 @@ export class Editor {
       this.moveTo(dir < 0 ? 0 : this.text.length, extend);
       return;
     }
-    const offset = this.offsetInLine(next.b, next.l, targetX - next.b.indent);
-    this.moveTo(offset, extend);
+    const position = this.positionInLine(next.b, next.l, targetX - next.b.indent);
+    this.moveTo(position.offset, extend, position.affinity);
     this.preferredX = targetX;
   }
 
@@ -518,16 +548,12 @@ export class Editor {
       e.preventDefault();
       this.interacted = true;
       this.focus();
-      const offset = this.offsetAt(e.clientX, e.clientY);
-      if (e.shiftKey) this.moveTo(offset, true);
-      else {
-        this.selStart = this.selEnd = offset;
-        this.preferredX = null;
-        this.invalidate();
-      }
+      const position = this.positionAt(e.clientX, e.clientY);
+      this.preferredX = null;
+      this.moveTo(position.offset, e.shiftKey, position.affinity);
       const move = (ev: MouseEvent) => {
-        this.selEnd = this.offsetAt(ev.clientX, ev.clientY);
-        this.invalidate();
+        const position = this.positionAt(ev.clientX, ev.clientY);
+        this.moveTo(position.offset, true, position.affinity);
       };
       const up = () => {
         window.removeEventListener("mousemove", move);
@@ -563,7 +589,9 @@ export class Editor {
       this.text = this.text.slice(0, start) + data + this.text.slice(start + length);
       this.composing = { start, length: data.length };
       this.selStart = this.selEnd = start + data.length;
+      this.caretAffinity = "downstream";
       this.invalidate();
+      this.scrollCaretIntoView();
     });
 
     this.input.addEventListener("compositionend", (e) => {
@@ -673,11 +701,13 @@ export class Editor {
         return;
       case "Home":
         e.preventDefault();
+        this.preferredX = null;
         this.moveTo(this.lineBounds(this.selEnd).start, e.shiftKey);
         return;
       case "End":
         e.preventDefault();
-        this.moveTo(this.lineBounds(this.selEnd).end, e.shiftKey);
+        this.preferredX = null;
+        this.moveTo(this.lineBounds(this.selEnd).end, e.shiftKey, "upstream");
         return;
       case "Backspace":
         e.preventDefault();
