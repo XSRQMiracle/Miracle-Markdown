@@ -614,17 +614,31 @@ export function parseInline(
   const swaps: Array<{ from: number; to: number }> = [];
   /** Source positions that are literal because a backslash escaped them. */
   const escaped = new Set<number>();
+  /** Label-local scan boundaries, including the emphasis stack they own. */
+  const linkLabels: Array<{ start: number; close: number; end: number; openStart: number }> = [];
 
   // ---- pass one: find the real delimiters ------------------------------
   const open: Array<{ marker: string; at: number; contentAt: number }> = [];
   let i = 0;
   while (i < body.length) {
+    const label = linkLabels.at(-1);
+    if (label && i === label.close) {
+      // The label has already been scanned for inline formatting. Skip its
+      // closing bracket and the complete destination so math or emphasis in
+      // the URL cannot leak back into the rendered label.
+      open.length = label.openStart;
+      linkLabels.pop();
+      i = label.end;
+      continue;
+    }
+
+    const limit = label?.close ?? body.length;
     const c = body[i];
 
     if (options.texDelimiters && c === "\\" && (body[i + 1] === "(" || body[i + 1] === "[")) {
       const display = body[i + 1] === "[";
       const close = findUnescapedDelimiter(body, display ? "\\]" : "\\)", i + 2);
-      if (close > 0) {
+      if (close > 0 && close + 2 <= limit) {
         swaps.push({ from: i, to: close + 2 });
         formats.push({
           kind: "math",
@@ -660,7 +674,7 @@ export function parseInline(
     // Math is scanned before emphasis and code so that a formula's contents
     // are never reinterpreted as markdown.
     if (options.inlineMath && c === "$") {
-      const found = scanDollarMath(body, i, options.strictDollar);
+      const found = scanDollarMath(body, i, options.strictDollar, limit);
       if (found) {
         swaps.push({ from: i, to: found.end });
         formats.push({
@@ -678,9 +692,9 @@ export function parseInline(
 
     if (c === "`") {
       let n = 1;
-      while (body[i + n] === "`") n++;
+      while (i + n < limit && body[i + n] === "`") n++;
       const close = body.indexOf("`".repeat(n), i + n);
-      if (close > 0) {
+      if (close > 0 && close + n <= limit) {
         drops.push([i, i + n], [close, close + n]);
         formats.push({ kind: "code", from: i + n, to: close, href: "" });
         i = close + n;
@@ -692,10 +706,11 @@ export function parseInline(
 
     if (c === "[") {
       const close = matchBracket(body, i);
-      if (close > 0 && body[close + 1] === "(") {
-        const paren = body.indexOf(")", close);
-        if (paren > 0) {
+      if (close > 0 && close < limit && body[close + 1] === "(") {
+        const paren = matchLinkDestination(body, close + 1);
+        if (paren > 0 && paren < limit) {
           drops.push([i, i + 1], [close, paren + 1]);
+          linkLabels.push({ start: i + 1, close, end: paren + 1, openStart: open.length });
           formats.push({
             kind: "link",
             from: i + 1,
@@ -712,15 +727,15 @@ export function parseInline(
 
     if (c === "*" || c === "_" || c === "~") {
       let n = 1;
-      while (body[i + n] === c) n++;
+      while (i + n < limit && body[i + n] === c) n++;
       const marker = c === "~" ? (n >= 2 ? "~~" : "") : n >= 2 ? c + c : c;
       if (!marker) {
         i += n;
         continue;
       }
       const len = marker.length;
-      const before = body[i - 1];
-      const after = body[i + len];
+      const before = i === label?.start ? undefined : body[i - 1];
+      const after = i + len < limit ? body[i + len] : undefined;
       // CommonMark's flanking rules, in their essential form: a run that has
       // whitespace after it cannot open, and one with whitespace before it
       // cannot close.
@@ -738,7 +753,7 @@ export function parseInline(
 
       if (!intraword) {
         const top = open.findLastIndex((o) => o.marker === marker);
-        if (canClose && top >= 0) {
+        if (canClose && top >= (label?.openStart ?? 0)) {
           const o = open[top];
           open.length = top;
           drops.push([o.at, o.at + len], [i, i + len]);
@@ -763,7 +778,7 @@ export function parseInline(
     i++;
   }
 
-  // Code and link content is opaque to emphasis, so drop any emphasis that
+  // Code content is opaque to emphasis, so drop any emphasis that
   // strayed inside one.
   const opaque = formats.filter((f) => f.kind === "code");
   const live = formats.filter(
@@ -915,16 +930,17 @@ function scanDollarMath(
   body: string,
   at: number,
   strict: boolean,
+  limit: number = body.length,
 ): { end: number; bodyStart: number; bodyEnd: number; display: boolean } | null {
   const display = body[at + 1] === "$";
   const delimiter = display ? "$$" : "$";
   const bodyStart = at + delimiter.length;
-  if (bodyStart >= body.length) return null;
+  if (bodyStart >= limit) return null;
 
   if (!display && strict && isSpace(body[bodyStart])) return null;
 
   let k = bodyStart;
-  while (k < body.length) {
+  while (k < limit) {
     if (body[k] === "\\") {
       k += 2;
       continue;
@@ -936,7 +952,7 @@ function scanDollarMath(
       continue;
     }
     if (display) {
-      if (body[k + 1] === "$") {
+      if (k + 1 < limit && body[k + 1] === "$") {
         return { end: k + 2, bodyStart, bodyEnd: k, display: true };
       }
       k++;
@@ -950,7 +966,7 @@ function scanDollarMath(
       }
       // The clause that saves prices: a closing delimiter immediately before
       // a digit is far more likely to be currency than mathematics.
-      if (body[k + 1] !== undefined && /\d/.test(body[k + 1])) {
+      if (k + 1 < limit && /\d/.test(body[k + 1])) {
         k++;
         continue;
       }
@@ -970,6 +986,29 @@ function matchBracket(body: string, from: number): number {
     }
     if (body[i] === "[") depth++;
     else if (body[i] === "]") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Index of the `)` closing an inline link destination.
+ *
+ * Bare destinations may contain balanced parentheses. Backslash-escaped
+ * parentheses are URL content, so they neither open nor close a nested pair.
+ */
+function matchLinkDestination(body: string, from: number): number {
+  if (body[from] !== "(") return -1;
+  let depth = 1;
+  for (let i = from + 1; i < body.length; i++) {
+    if (body[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (body[i] === "(") depth++;
+    else if (body[i] === ")") {
       depth--;
       if (depth === 0) return i;
     }

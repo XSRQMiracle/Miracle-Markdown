@@ -21,6 +21,72 @@ eq(parseInline("**盒子（box）**：不可伸缩", 0).text, "盒子（box）�
 eq(parseInline("~~gone~~", 0).text, "gone", "strikethrough markers are removed");
 eq(parseInline("`code`", 0).text, "code", "code ticks are removed");
 eq(parseInline("[label](http://x)", 0).text, "label", "link syntax leaves the label");
+{
+  const body = "[x](https://a_(b))";
+  const r = parseInline(body, 7);
+  const link = r.spans.find((s) => s.kind === "link");
+  eq(r.text, "x", "balanced parentheses remain inside a link destination");
+  eq(link?.href, "https://a_(b)", "the complete balanced destination becomes the href");
+  eq(Array.from(r.map), [8, 25], "a balanced link has an exact offset source map");
+}
+{
+  const r = parseInline("[**x**](a_(b))", 0);
+  const link = r.spans.find((s) => s.kind === "link");
+  eq([r.text, link?.strong, link?.href], ["x", true, "a_(b)"], "link labels still parse inline formatting");
+}
+{
+  const r = parseInline("**[a *b*](url)**", 0);
+  eq(r.text, "a b", "emphasis can wrap a complete link with locally formatted label");
+  eq(r.spans.every((s) => s.strong), true, "a label scope preserves its outer emphasis stack");
+  eq(r.spans.at(-1)?.em, true, "local emphasis closes inside the label");
+  eq(parseInline("*[a*](url)", 0).text, "*a*", "a label cannot close emphasis opened outside it");
+}
+{
+  const body = String.raw`[x](a\)b)!`;
+  const r = parseInline(body, 0);
+  const link = r.spans.find((s) => s.kind === "link");
+  eq(r.text, "x!", "an escaped parenthesis does not close a link destination");
+  eq(link?.href, String.raw`a\)b`, "an escaped parenthesis remains part of the href source");
+  eq(Array.from(r.map), [1, 9, 10], "text after an escaped destination maps past its real closer");
+}
+{
+  const body = "[x](a/$y$)!";
+  const r = parseInline(body, 20);
+  const link = r.spans.find((s) => s.kind === "link");
+  eq(r.text, "x!", "math-like text in a destination never leaks into output");
+  eq(link?.href, "a/$y$", "dollar delimiters remain literal destination content");
+  eq(r.spans.some((s) => s.kind === "math"), false, "a link destination creates no math span");
+  eq(Array.from(r.map), [21, 30, 31], "an opaque destination retains the exact source map");
+}
+{
+  const cases = [
+    { body: "[a$x](url$)b", text: "a$xb", map: [1, 2, 3, 11, 12], kinds: ["math"] },
+    { body: "[a$$x](url$$)b", text: "a$$xb", map: [1, 2, 3, 4, 13, 14], kinds: ["math"] },
+    { body: String.raw`[a\(x](url\))b`, text: "a(xb", map: [1, 3, 4, 13, 14], kinds: ["math"] },
+    { body: String.raw`[a\[x](url\])b`, text: "a[xb", map: [1, 3, 4, 13, 14], kinds: ["math"] },
+    { body: "[a`x](url`)b", text: "a`xb", map: [1, 2, 3, 11, 12], kinds: ["code"] },
+    { body: "[a*x](url)b*", text: "a*xb*", map: [1, 2, 3, 10, 11, 12], kinds: ["em"] },
+    { body: "[a**x](url)b**", text: "a**xb**", map: [1, 2, 3, 4, 11, 12, 13, 14], kinds: ["strong"] },
+    { body: "[a~~x](url)b~~", text: "a~~xb~~", map: [1, 2, 3, 4, 11, 12, 13, 14], kinds: ["strike"] },
+  ];
+  for (const test of cases) {
+    const r = parseInline(test.body, 0);
+    eq(r.text, test.text, `${test.kinds[0]} cannot close across a link-label boundary`);
+    eq(
+      r.spans.some((s) => test.kinds.includes(s.kind)),
+      false,
+      `${test.kinds[0]} creates no cross-boundary span`,
+    );
+    eq(Array.from(r.map), test.map, `${test.kinds[0]} fallback retains its exact source map`);
+  }
+}
+{
+  const body = "[x](a_(b)";
+  const r = parseInline(body, 3);
+  eq(r.text, body, "an incomplete balanced destination falls back to literal text");
+  eq(r.spans.some((s) => s.kind === "link"), false, "an incomplete destination creates no link span");
+  eq(Array.from(r.map), [3, 4, 5, 6, 7, 8, 9, 10, 11, 12], "an incomplete link keeps an identity source map");
+}
 eq(parseInline("2 * 3 * 4", 0).text, "2 * 3 * 4", "lone asterisks stay literal");
 eq(parseInline("a\\*b", 0).text, "a*b", "backslash escapes the marker");
 eq(parseInline(String.raw`\a`, 0).text, String.raw`\a`, "backslash before a letter stays literal");
