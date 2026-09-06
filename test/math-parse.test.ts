@@ -82,7 +82,15 @@ eq(rendered("$a*b*c$"), OBJ, "no emphasis leaks out of a formula");
 
 // --- escaping -------------------------------------------------------------
 eq(formulas("\\$x\\$"), [], "escaped dollars do not open math");
+eq(rendered("\\$x\\$"), "$x$", "escaped dollar delimiters remain visible literally");
 eq(formulas("$x = \\$5$"), ["x = \\$5"], "an escaped dollar inside math does not close it");
+eq(formulas(String.raw`\\$x$`), ["x"], "an even slash run leaves a dollar opener active");
+eq(rendered(String.raw`\\$x$`), "\\" + OBJ, "the escaped slash before dollar math remains literal");
+eq(formulas(String.raw`\\(x\\)`), [], "escaped TeX opener does not start math");
+eq(rendered(String.raw`\\(x\\)`), String.raw`\(x\)`, "escaped TeX delimiters remain literal");
+eq(rendered(String.raw`\alpha outside math`), String.raw`\alpha outside math`,
+   "a TeX-like command outside math keeps its slash");
+eq(rendered("`\\$x\\$`"), "\\$x\\$", "code spans keep escaped-looking math delimiters opaque");
 
 // --- blocks ---------------------------------------------------------------
 {

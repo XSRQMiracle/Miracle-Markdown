@@ -23,6 +23,27 @@ eq(parseInline("`code`", 0).text, "code", "code ticks are removed");
 eq(parseInline("[label](http://x)", 0).text, "label", "link syntax leaves the label");
 eq(parseInline("2 * 3 * 4", 0).text, "2 * 3 * 4", "lone asterisks stay literal");
 eq(parseInline("a\\*b", 0).text, "a*b", "backslash escapes the marker");
+eq(parseInline(String.raw`\a`, 0).text, String.raw`\a`, "backslash before a letter stays literal");
+eq(parseInline(String.raw`\中`, 0).text, String.raw`\中`, "backslash before CJK stays literal");
+eq(parseInline(String.raw`\。`, 0).text, String.raw`\。`, "Unicode punctuation is not escapable");
+eq(
+  parseInline(String.raw`C:\Users\miracle\note.md`, 0).text,
+  String.raw`C:\Users\miracle\note.md`,
+  "a Windows path keeps its backslashes",
+);
+
+{
+  const punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+  const escaped = [...punctuation].map((c) => parseInline("\\" + c, 0).text).join("");
+  eq(escaped, punctuation, "every CommonMark ASCII punctuation character is escapable");
+}
+{
+  const literal = ["a", "0", " ", "中", "。", "é"];
+  const rendered = literal.map((c) => parseInline("\\" + c, 0).text);
+  eq(rendered, literal.map((c) => "\\" + c), "non-punctuation characters keep the slash");
+}
+eq(parseInline("`\\*`", 0).text, "\\*", "code span content is opaque to escapes");
+eq(parseInline("a\\\nb", 0).text, "a b", "backslash-newline keeps the legacy soft-break fallback");
 
 // --- the source map --------------------------------------------------------
 {
@@ -34,6 +55,14 @@ eq(parseInline("a\\*b", 0).text, "a*b", "backslash escapes the marker");
 {
   const r = parseInline("plain", 7);
   eq(Array.from(r.map), [7, 8, 9, 10, 11, 12], "map is offset by the block base");
+}
+{
+  const r = parseInline("a\\*b", 0);
+  eq(Array.from(r.map), [0, 2, 3, 4], "map skips a valid backslash escape");
+}
+{
+  const r = parseInline(String.raw`\a`, 7);
+  eq(Array.from(r.map), [7, 8, 9], "map remains an identity for a literal backslash");
 }
 
 // --- styles carry through --------------------------------------------------

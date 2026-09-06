@@ -544,6 +544,24 @@ interface Format {
   display?: boolean;
 }
 
+/**
+ * The ASCII punctuation characters CommonMark permits after a backslash.
+ *
+ * Keep this narrower than `PUNCT` below: that expression also contains
+ * Unicode punctuation for emphasis flanking, while a backslash before `。` or
+ * any other non-ASCII character is literal source and must survive.
+ */
+function isEscapableAsciiPunctuation(c: string | undefined): boolean {
+  if (c === undefined) return false;
+  const n = c.charCodeAt(0);
+  return (
+    (n >= 0x21 && n <= 0x2f) ||
+    (n >= 0x3a && n <= 0x40) ||
+    (n >= 0x5b && n <= 0x60) ||
+    (n >= 0x7b && n <= 0x7e)
+  );
+}
+
 const PUNCT = /[!-/:-@[-`{-~ -⁯　-〿＀-￯]/;
 
 /**
@@ -616,7 +634,18 @@ export function parseInline(
       }
     }
 
-    if (c === "\\" && i + 1 < body.length) {
+    if (c === "\\" && body[i + 1] === "\n") {
+      // CommonMark gives backslash-newline forced-break semantics. The layout
+      // model cannot carry that distinction yet, so retain the existing soft
+      // break fallback explicitly instead of either showing or losing the
+      // slash accidentally. A future hard-break span/penalty can replace this
+      // branch without broadening ordinary backslash escapes again.
+      drops.push([i, i + 1]);
+      i += 2;
+      continue;
+    }
+
+    if (c === "\\" && isEscapableAsciiPunctuation(body[i + 1])) {
       drops.push([i, i + 1]);
       escaped.add(i + 1);
       i += 2;
