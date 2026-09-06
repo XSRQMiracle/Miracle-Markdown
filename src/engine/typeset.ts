@@ -23,6 +23,7 @@ import type { MathGeometry, MathSegment } from "./math.js";
 import {
   parseBlocks,
   blockIndexAtPosition,
+  fenceCloser,
   renderBlock,
   DEFAULT_INLINE_OPTIONS,
   OBJECT_REPLACEMENT,
@@ -718,9 +719,11 @@ export class Typesetter {
     // A fenced block's own ``` lines are structure, not content.
     const hideFence = block.type === "code" && !raw;
     const src = text.split("\n");
+    const closingFence = hideFence ? fenceCloser(src[0]) : null;
     for (let li = 0; li < src.length; li++) {
       const lineText = src[li];
-      const isFence = hideFence && (li === 0 || li === src.length - 1) && /^\s*(`{3,}|~{3,})/.test(lineText);
+      const isFence = closingFence !== null &&
+        (li === 0 || (li === src.length - 1 && closingFence.test(lineText)));
       if (!isFence) {
         lines.push({
           docStart: rendered.map[at],

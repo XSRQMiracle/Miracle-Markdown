@@ -77,6 +77,11 @@ export interface RenderedBlock {
 }
 
 const FENCE = /^(\s*)(`{3,}|~{3,})\s*(\S*)/;
+/** Shared by parsing and preview so an invalid closer remains visible code. */
+export function fenceCloser(openingLine: string): RegExp | null {
+  const fence = FENCE.exec(openingLine);
+  return fence ? new RegExp(`^\\s*${fence[2][0]}{${fence[2].length},}\\s*$`) : null;
+}
 /** A display formula opened by $$ or by \[ on its own line. */
 const MATH_OPEN = /^\s*(\$\$|\\\[)/;
 const HEADING = /^(#{1,6})\s+(.*)$/;
@@ -232,9 +237,12 @@ export function parseBlocks(
 
     const fence = FENCE.exec(line);
     if (fence) {
-      const closer = fence[2][0];
+      // CommonMark requires the closing run to use the same character and to
+      // be at least as long as the opener. Compile this once for the whole
+      // block; a shorter run is content, not a premature close.
+      const closeFence = fenceCloser(line)!;
       let j = i + 1;
-      while (j < count && !new RegExp(`^\\s*${closer}{3,}\\s*$`).test(lines[j])) j++;
+      while (j < count && !closeFence.test(lines[j])) j++;
       const end = j < count ? offsets[j] + lines[j].length : doc.length;
       const info = fence[3].toLowerCase();
       if (info === "math" || info === "latex" || info === "katex") {

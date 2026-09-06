@@ -80,6 +80,33 @@ eq(parseInline("a\\\nb", 0).text, "a b", "backslash-newline keeps the legacy sof
      "block types in order");
 }
 {
+  const doc = "````js\nalpha\n```\nafter";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["code"], "a shorter backtick run does not close a fence");
+  eq(blocks[0].source, doc, "an invalid short closer remains code content");
+}
+{
+  const doc = "````js\nalpha\n`````\nafter";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["code", "paragraph"], "a longer backtick run closes a fence");
+  eq(blocks[0].source, "````js\nalpha\n`````", "the valid longer closer ends the code source");
+}
+{
+  const doc = "~~~~\nalpha\n~~~\nafter";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["code"], "a shorter tilde run does not close a fence");
+}
+{
+  const doc = "~~~~\nalpha\n````\nafter";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["code"], "the other fence character cannot close a block");
+}
+{
+  const doc = "~~~\nalpha\n~~~~\nafter";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["code", "paragraph"], "a longer tilde run closes a fence");
+}
+{
   const doc = "# 标题 **粗**";
   const [b] = parseBlocks(doc);
   eq(renderBlock(b, false).text, "标题 粗", "heading strips its hashes and markers");

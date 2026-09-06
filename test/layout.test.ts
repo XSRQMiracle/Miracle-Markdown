@@ -73,4 +73,7 @@ for (const source of ["", "\n", "a\n", "a\n\nb", "\n\n\n", "$$\nx\n$$", "---", "
 }
 const emptyLines = typesetter.layoutDocument("a\n\nb\n", 1000, -1).blocks.flatMap((b) => b.lines);
 assert.deepEqual(emptyLines.map((line) => [line.docStart, line.docEnd]), [[0, 1], [2, 2], [3, 4], [5, 5]]);
+assert.deepEqual(runs("````\na\n```").map((r) => r.text), ["a", "```"]);
+assert.deepEqual(runs("```\na\n```not-close").map((r) => r.text), ["a", "```not-close"]);
+assert.deepEqual(runs("~~~\na\n~~~~").map((r) => r.text), ["a"]);
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");
