@@ -12,6 +12,7 @@ import { buildMathPanel } from "./ui/math-panel.js";
 import { onImageSettled } from "./engine/images.js";
 import { DocumentSession } from "./markdown/session.js";
 import { confirmUnsavedDocument, showDocumentError } from "./ui/document-dialog.js";
+import { buildFindBar } from "./ui/find-bar.js";
 
 const stage = document.getElementById("stage") as HTMLElement;
 const canvas = document.getElementById("surface") as HTMLCanvasElement;
@@ -118,13 +119,38 @@ async function main() {
   openButton.addEventListener("click", () => void fileAction(() => session.open()));
   saveButton.addEventListener("click", () => void fileAction(() => session.save()));
   saveAsButton.addEventListener("click", () => void fileAction(() => session.save(true)));
+  const findBar = buildFindBar(document.getElementById("find-bar") as HTMLElement, editor);
   window.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s" && !document.querySelector("dialog[open]")) {
+    if (document.querySelector("dialog[open]")) return;
+    // Escape closes the search from anywhere, including the document itself,
+    // which is where the caret is once a match has been stepped to.
+    if (e.key === "Escape" && findBar.isOpen) {
+      e.preventDefault();
+      findBar.close();
+      return;
+    }
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod) return;
+    const key = e.key.toLowerCase();
+    if (key === "s") {
       e.preventDefault();
       void fileAction(() => session.save(e.shiftKey));
+    } else if (key === "f") {
+      // ⌥⌘F opens the same bar with the replacement field ready, which is
+      // where the platform puts "find and replace".
+      e.preventDefault();
+      findBar.open(editor.selectedText() || undefined, e.altKey);
+    } else if (key === "g") {
+      // ⌘G continues a search that is already running; with the bar closed
+      // there is nothing to continue.
+      if (findBar.step(e.shiftKey)) e.preventDefault();
     }
   });
-  editor.onChange = () => session.updateText(editor.getText());
+  editor.onChange = () => {
+    session.updateText(editor.getText());
+    // Typing under an open search changes what it finds.
+    findBar.refresh();
+  };
   syncSession();
   if (isDesktop()) {
     let closePending = false;

@@ -5,3 +5,4 @@ crates/typeset-wasm/pkg/
 src-tauri/gen/
 *.tmp
 .DS_Store
+.claude/

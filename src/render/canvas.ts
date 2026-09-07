@@ -31,7 +31,13 @@ export interface SelectionRect {
   y: number;
   w: number;
   h: number;
+  /** Paint colour, for the bands that mark something other than a selection. */
+  color?: string;
 }
+
+/** The selection's own colour, and the one search matches are marked in. */
+export const SELECTION_COLOR = "#cddcf0";
+export const MATCH_COLOR = "#f6e3a1";
 
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
@@ -96,9 +102,9 @@ export class Renderer {
     ctx.translate(view.originX, view.originY - view.scrollTop);
 
     // Selection sits under the text so glyphs stay legible on top of it.
-    if (selection.length) {
-      this.setFill("#cddcf0");
-      for (const r of selection) ctx.fillRect(r.x, r.y, r.w, r.h);
+    for (const r of selection) {
+      this.setFill(r.color ?? SELECTION_COLOR);
+      ctx.fillRect(r.x, r.y, r.w, r.h);
     }
 
     const top = view.scrollTop - view.originY;

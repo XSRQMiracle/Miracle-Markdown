@@ -15,10 +15,11 @@
  * where it needs to be.
  */
 
-import { Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
+import { MATCH_COLOR, Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
 import { listItemMarker, sourceRangeOwnsPosition, type BlockType } from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
 import { wordAt, wordBoundary } from "./words.js";
+import { compileSearch, expandReplacement, findMatches, type Match, type SearchQuery } from "./search.js";
 import {
   DEFAULT_OPTIONS,
   DEFAULT_THEME,
@@ -110,6 +111,13 @@ export class Editor {
     value: string;
     updated: boolean;
   } | null = null;
+  private search: SearchQuery | null = null;
+  private matches: Match[] = [];
+  /** The text `matches` was computed from, so a stale set is never shown. */
+  private matchesFor: string | null = null;
+  /** Which match the selection is on, or -1. */
+  private current = -1;
+
   private undoStack: Snapshot[] = [];
   private redoStack: Snapshot[] = [];
   private lastEditAt = -Infinity;
@@ -198,6 +206,14 @@ export class Editor {
     return this.text;
   }
 
+  /** The selected source text, for seeding a search with it. */
+  selectedText(): string {
+    return this.text.slice(
+      Math.min(this.selStart, this.selEnd),
+      Math.max(this.selStart, this.selEnd),
+    );
+  }
+
   focus(): void {
     this.input.focus({ preventScroll: true });
   }
@@ -272,7 +288,8 @@ export class Editor {
       this.blocks,
       view,
       this.theme,
-      selection,
+      // Matches go under the selection, which marks the current one.
+      [...this.matchRects(view), ...selection],
       caret,
       this.caretVisible && this.hasFocus && this.interacted,
       this.options.showBadness,
@@ -447,9 +464,10 @@ export class Editor {
     return null;
   }
 
-  private selectionRects(): SelectionRect[] {
-    const lo = Math.min(this.selStart, this.selEnd);
-    const hi = Math.max(this.selStart, this.selEnd);
+  private selectionRects(
+    lo = Math.min(this.selStart, this.selEnd),
+    hi = Math.max(this.selStart, this.selEnd),
+  ): SelectionRect[] {
     const rects: SelectionRect[] = [];
     for (const b of this.blocks) {
       if (b.block.end < lo || b.block.start > hi) continue;
@@ -483,6 +501,141 @@ export class Editor {
       }
     }
     return rects;
+  }
+
+  /**
+   * Bands under the matches that are on screen.
+   *
+   * A long document can hold thousands of matches, and each band costs a walk
+   * over the blocks to place. Only what the reader can see is placed, which
+   * bounds the work by the window rather than by the document.
+   */
+  private matchRects(view: Viewport): SelectionRect[] {
+    this.refreshMatches();
+    if (!this.matches.length) return [];
+    const top = view.scrollTop - view.originY - 200;
+    const bottom = top + view.height + 400;
+    let from = Infinity;
+    let to = -Infinity;
+    for (const b of this.blocks) {
+      if (b.y + b.height < top || b.y > bottom) continue;
+      from = Math.min(from, b.block.start);
+      to = Math.max(to, b.block.end);
+    }
+    const rects: SelectionRect[] = [];
+    for (const m of this.matches) {
+      if (m.end < from || m.start > to) continue;
+      for (const r of this.selectionRects(m.start, m.end)) rects.push({ ...r, color: MATCH_COLOR });
+    }
+    return rects;
+  }
+
+  // -- search ------------------------------------------------------------
+
+  /**
+   * Point the search at a query, or put it away.
+   *
+   * The nearest match at or after the caret is selected straight away, so
+   * typing into the find field walks the document the way a browser's own
+   * find does. The caret is left where it is when nothing matches, rather
+   * than jumping to the top.
+   */
+  setSearch(query: SearchQuery | null): SearchStatus {
+    this.search = query && query.text ? query : null;
+    this.matchesFor = null;
+    this.current = -1;
+    this.refreshMatches();
+    if (this.search) this.goToMatch(this.indexFrom(Math.min(this.selStart, this.selEnd), 1, true));
+    else this.invalidate();
+    return this.searchStatus();
+  }
+
+  /** Select the next match after the selection, wrapping at the end. */
+  findNext(backwards = false): SearchStatus {
+    this.refreshMatches();
+    const from = backwards ? Math.min(this.selStart, this.selEnd) : Math.max(this.selStart, this.selEnd);
+    this.goToMatch(this.indexFrom(from, backwards ? -1 : 1, false));
+    return this.searchStatus();
+  }
+
+  /** Replace the match the selection is on, then move to the next. */
+  replaceCurrent(replacement: string): SearchStatus {
+    this.refreshMatches();
+    const match = this.matches[this.current];
+    // Only a match the author can see selected is replaced; otherwise this
+    // is the first press of the button and it just finds one.
+    if (!match || match.start !== Math.min(this.selStart, this.selEnd) ||
+      match.end !== Math.max(this.selStart, this.selEnd)) {
+      return this.findNext();
+    }
+    const text = expandReplacement(replacement, match);
+    this.replace(match.start, match.end, text, false);
+    this.refreshMatches();
+    // Carry on from the end of what was written, so a replacement containing
+    // the query does not match itself for ever.
+    this.goToMatch(this.indexFrom(match.start + text.length, 1, true));
+    return this.searchStatus();
+  }
+
+  /** Replace every match as one edit, so one undo puts the document back. */
+  replaceAll(replacement: string): SearchStatus {
+    this.refreshMatches();
+    if (!this.matches.length) return this.searchStatus();
+    const first = this.matches[0];
+    const last = this.matches[this.matches.length - 1];
+    let out = "";
+    let at = first.start;
+    for (const m of this.matches) {
+      out += this.text.slice(at, m.start) + expandReplacement(replacement, m);
+      at = m.end;
+    }
+    out += this.text.slice(at, last.end);
+    this.replace(first.start, last.end, out, false);
+    this.refreshMatches();
+    this.current = -1;
+    return this.searchStatus();
+  }
+
+  searchStatus(): SearchStatus {
+    this.refreshMatches();
+    return {
+      matches: this.matches.length,
+      index: this.current < 0 ? 0 : this.current + 1,
+      valid: !this.search || compileSearch(this.search) !== undefined,
+    };
+  }
+
+  /** Recompute the matches when the text under them has changed. */
+  private refreshMatches(): void {
+    if (!this.search) {
+      if (this.matches.length) this.matches = [];
+      return;
+    }
+    if (this.matchesFor === this.text) return;
+    this.matchesFor = this.text;
+    this.matches = findMatches(this.text, this.search);
+    // An edit can leave the counter pointing past the end of the new set.
+    if (this.current >= this.matches.length) this.current = -1;
+  }
+
+  /** The match to go to from a position, wrapping around the document. */
+  private indexFrom(position: number, direction: 1 | -1, inclusive: boolean): number {
+    if (!this.matches.length) return -1;
+    if (direction > 0) {
+      const at = this.matches.findIndex((m) => (inclusive ? m.start >= position : m.start > position));
+      return at < 0 ? 0 : at;
+    }
+    for (let i = this.matches.length - 1; i >= 0; i--) {
+      if (inclusive ? this.matches[i].end <= position : this.matches[i].end < position) return i;
+    }
+    return this.matches.length - 1;
+  }
+
+  private goToMatch(index: number): void {
+    this.current = index;
+    const match = this.matches[index];
+    if (match) this.select(match.start, match.end);
+    else this.invalidate();
   }
 
   // -- editing -----------------------------------------------------------
@@ -1058,6 +1211,14 @@ export class Editor {
     if (this.frame) cancelAnimationFrame(this.frame);
     this.input.remove();
   }
+}
+
+/** What the find bar shows: how many matches, which one, and whether the
+ *  author's pattern compiles at all. */
+export interface SearchStatus {
+  matches: number;
+  index: number;
+  valid: boolean;
 }
 
 export interface StatusInfo {
