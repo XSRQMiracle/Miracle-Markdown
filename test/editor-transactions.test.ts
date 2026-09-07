@@ -126,4 +126,65 @@ function fixture(text='aOLDz', start=4, end=1) {
   event('keydown',{key:'Enter'});
   assert.equal(e.getText(), '- one \n- ');
 }
+// --- delimiter pairing ----------------------------------------------------
+{
+  const typing = (text: string, start: number, end = start) => {
+    const {editor:e,input,event} = fixture(text, start, end);
+    return {
+      editor: e,
+      type: (ch: string) => { input.value = ch; event('input',{inputType:'insertText'}); },
+      state: () => [e.getText(), e.selStart, e.selEnd] as const,
+    };
+  };
+
+  let t = typing('abc', 3);
+  t.type('('); assert.deepEqual(t.state(), ['abc()', 4, 4], 'a bracket opens a pair around the caret');
+  t.type(')'); assert.deepEqual(t.state(), ['abc()', 5, 5], 'and its closer steps over the one already there');
+  t.type(')'); assert.deepEqual(t.state(), ['abc())', 6, 6], 'a closer with nothing to step over is written');
+
+  t = typing('abc', 0);
+  t.type('('); assert.deepEqual(t.state(), ['(abc', 1, 1], 'nothing is opened against a word');
+  t = typing('abc def', 3);
+  t.type('['); assert.deepEqual(t.state(), ['abc[] def', 4, 4], 'but a space after the caret is room enough');
+
+  t = typing('abc', 0, 3);
+  t.type('*'); assert.deepEqual(t.state(), ['*abc*', 1, 4], 'a selection is wrapped and stays selected');
+  t.type('_'); assert.deepEqual(t.state(), ['*_abc_*', 2, 5], 'so it can be wrapped again');
+  t = typing('abc', 3, 0);
+  t.type('('); assert.deepEqual(t.state(), ['(abc)', 1, 4], 'a backwards selection wraps the same way');
+  t = typing('x', 0, 1);
+  t.type('a'); assert.deepEqual(t.state(), ['a', 1, 1], 'an ordinary character still replaces the selection');
+
+  t = typing('', 0);
+  t.type('`'); assert.deepEqual(t.state(), ['``', 1, 1], 'a backtick pairs like a bracket');
+  t.type('`'); assert.deepEqual(t.state(), ['``', 2, 2], 'stepping over its twin');
+  t.type('`'); assert.deepEqual(t.state(), ['```', 3, 3], 'so a fence can still be typed');
+  t = typing('code', 4);
+  t.type('`'); assert.deepEqual(t.state(), ['code`', 5, 5], 'a symmetric delimiter does not open against a word');
+
+  // Verbatim blocks take what is typed.
+  t = typing('```\nx\n```', 5);
+  t.type('('); assert.deepEqual(t.state(), ['```\nx(\n```', 6, 6], 'a code fence is literal');
+
+  // Backspace undoes a pair in one keystroke, as it was made in one.
+  const {editor:e,input,event} = fixture('', 0, 0);
+  input.value = '('; event('input',{inputType:'insertText'});
+  event('keydown',{key:'Backspace'});
+  assert.equal(e.getText(), '', 'backspace between an empty pair takes both');
+  input.value = '('; event('input',{inputType:'insertText'});
+  input.value = 'x'; event('input',{inputType:'insertText'});
+  event('keydown',{key:'Backspace'});
+  assert.equal(e.getText(), '()', 'with something between them it takes only that');
+  event('keydown',{key:'Backspace'});
+  assert.equal(e.getText(), '', 'and the emptied pair goes together again');
+}
+{
+  // Pasted and IME-committed text is never paired: one is not typing, and the
+  // other has a transaction of its own to keep whole.
+  const {editor:e,event} = fixture('', 0, 0);
+  event('paste',{preventDefault(){}, clipboardData:{getData:()=>'('}});
+  assert.equal(e.getText(), '(');
+  event('compositionstart'); event('compositionend',{data:'（'});
+  assert.equal(e.getText(), '(（');
+}
 console.log('all editor transaction tests passing');

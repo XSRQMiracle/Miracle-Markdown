@@ -39,6 +39,24 @@ const MIN_MEASURE = 240;
 const PAGE_TOP = 56;
 
 /**
+ * Delimiters that close themselves when one is typed.
+ *
+ * Kept to the brackets and the backtick. The emphasis characters are absent
+ * on purpose: `*` opens a bullet far more often than a pair, and `_` falls
+ * inside identifiers — auto-closing either would fight the writer. They can
+ * still wrap a selection, where the intent is unambiguous.
+ */
+const AUTO_CLOSE: Record<string, string> = { "(": ")", "[": "]", "{": "}", "`": "`" };
+const CLOSERS = new Set(Object.values(AUTO_CLOSE));
+/** What a typed character wraps a selection in. */
+const WRAPPERS: Record<string, string> = {
+  ...AUTO_CLOSE, '"': '"', "'": "'", "*": "*", "_": "_", "~": "~", "$": "$",
+  "“": "”", "‘": "’", "（": "）", "【": "】", "「": "」", "《": "》",
+};
+/** Blocks whose content is literal, where a typed delimiter is just text. */
+const VERBATIM: BlockType[] = ["code", "frontmatter", "html", "math", "table"];
+
+/**
  * Whether the keyboard follows Apple's conventions.
  *
  * The two platforms disagree about which modifier does what: macOS moves by
@@ -733,7 +751,8 @@ export class Editor {
       this.interacted = true;
       const value = this.input.value;
       this.input.value = "";
-      if (value) this.insert(value);
+      if (!value) return;
+      if (value.length !== 1 || !this.autoPair(value)) this.insert(value);
     });
 
     this.input.addEventListener("paste", (e) => {
@@ -855,11 +874,15 @@ export class Editor {
         this.moveTo(byDocument ? this.text.length : this.lineBounds(this.selEnd).end,
           e.shiftKey, "upstream");
         return;
-      case "Backspace":
+      case "Backspace": {
         e.preventDefault();
         if (lo !== hi) this.replace(lo, hi, "");
-        else if (lo > 0) this.replace(this.stepBack(lo), lo, "", true);
+        // An empty pair was inserted in one keystroke, so it goes in one too.
+        else if (lo > 0 && AUTO_CLOSE[this.text[lo - 1]] === this.text[lo]) {
+          this.replace(lo - 1, lo + 1, "", true);
+        } else if (lo > 0) this.replace(this.stepBack(lo), lo, "", true);
         return;
+      }
       case "Delete":
         e.preventDefault();
         if (lo !== hi) this.replace(lo, hi, "");
@@ -875,6 +898,64 @@ export class Editor {
         this.insert("  ", false);
         return;
     }
+  }
+
+  /**
+   * Pair up a typed delimiter.
+   *
+   * Three things, in the order a keystroke could mean them:
+   *
+   *  - over a selection, the character wraps it — the one case where the
+   *    intent is beyond doubt, so the set of characters accepted is widest
+   *    here and includes the emphasis marks and `$`;
+   *  - onto a closer that is already there, it steps over rather than
+   *    doubling it, which is what makes typing a whole pair feel unchanged;
+   *  - otherwise it opens a pair, unless the text it would enclose says
+   *    otherwise.
+   *
+   * Only characters the author typed reach this. An IME commit goes through
+   * the composition path instead, where the transaction is already delicate
+   * and a silent extra character would be worse than a missing convenience.
+   *
+   * Returns whether it handled the character.
+   */
+  private autoPair(ch: string): boolean {
+    const lo = Math.min(this.selStart, this.selEnd);
+    const hi = Math.max(this.selStart, this.selEnd);
+    // Blocks are laid out on the next frame; a fast typist can outrun it.
+    if (this.dirty) this.relayout();
+    const type = this.blockTypeAt(lo);
+    if (type && VERBATIM.includes(type)) return false;
+
+    if (lo !== hi) {
+      const close = WRAPPERS[ch];
+      if (!close) return false;
+      this.replace(lo, hi, ch + this.text.slice(lo, hi) + close, false);
+      // Keep the text selected, so wrapping it again in something else is
+      // one more keystroke rather than a fresh selection.
+      this.select(lo + ch.length, hi + ch.length);
+      return true;
+    }
+
+    if (CLOSERS.has(ch) && this.text[lo] === ch) {
+      this.moveTo(lo + 1, false);
+      return true;
+    }
+
+    const close = AUTO_CLOSE[ch];
+    if (!close) return false;
+    // Nothing is opened against a word: the author is writing "don't" or
+    // reaching into "f(x)", not asking for a pair.
+    const after = this.text[lo] ?? "";
+    if (after && /[\p{L}\p{N}]/u.test(after)) return false;
+    // A symmetric delimiter cannot tell opening from closing, so it stays out
+    // of a word's way on the left too — and lets ``` be typed as a fence.
+    const before = lo > 0 ? this.text[lo - 1] : "";
+    if (close === ch && before && (before === ch || /[\p{L}\p{N}]/u.test(before))) return false;
+
+    this.replace(lo, lo, ch + close, false);
+    this.select(lo + 1, lo + 1);
+    return true;
   }
 
   /**
@@ -931,8 +1012,7 @@ export class Editor {
    */
   private hardBreak(): string {
     const type = this.blockTypeAt(this.selEnd);
-    const verbatim: BlockType[] = ["code", "frontmatter", "html", "math", "table"];
-    if (type && verbatim.includes(type)) return "\n";
+    if (type && VERBATIM.includes(type)) return "\n";
 
     // A quotation is recognised line by line, so a continuation without the
     // marker leaves the block rather than breaking inside it — and the
