@@ -18,7 +18,8 @@ import {
   Measurer,
   type TextStyle,
 } from "./measure.js";
-import { renderMath, renderMathSegments } from "./mathjax.js";
+import { renderMath, renderMathSegments, renderDisplayMath } from "./mathjax.js";
+import { mathDirectives, resolveMathSource } from "./math-source.js";
 import { fitImage, requestImage, type ImageStatus } from "./images.js";
 import { sourceLineEnds } from "./source-layout.js";
 import type { MathGeometry, MathSegment } from "./math.js";
@@ -255,28 +256,6 @@ export interface TableLayout {
   padding: number;
 }
 
-// These are kept as sources rather than as shared RegExp objects on purpose.
-// A global regular expression carries a mutable `lastIndex`, and `test` leaves
-// it pointing past the match — so a later `matchAll` on the same object starts
-// midway through the string and quietly finds nothing. Building a fresh one at
-// each use costs nothing here and removes the whole class of bug.
-
-/** `\label{...}` inside a formula. */
-const LABEL_SOURCE = String.raw`\\label\s*\{([^}]*)\}`;
-/** `\ref{...}` and `\eqref{...}`, the two ways to cite a numbered equation. */
-const REFERENCE_SOURCE = String.raw`\\(eq)?ref\s*\{([^}]*)\}`;
-
-const HAS_LABEL = new RegExp(LABEL_SOURCE);
-
-function hasLabel(latex: string): boolean {
-  return HAS_LABEL.test(latex);
-}
-
-/** Every label declared in a formula. */
-function labelsIn(latex: string): string[] {
-  return [...latex.matchAll(new RegExp(LABEL_SOURCE, "g"))].map((m) => m[1].trim());
-}
-
 /** Whether this block depends on document-wide equation/footnote numbering. */
 function usesNumbering(block: Block): boolean {
   // Detect commands, not their raw argument text: stripping quote markers
@@ -285,33 +264,8 @@ function usesNumbering(block: Block): boolean {
     block.source.includes("\\ref") || block.source.includes("\\eqref");
 }
 
-/**
- * Turn a formula's source into what MathJax should actually see: labels
- * removed, citations replaced by the numbers they resolve to.
- *
- * Neither MathJax nor KaTeX resolves `\ref` on its own — both lay out one
- * formula at a time and have no idea what else is in the document. Since the
- * numbering pass has just worked that out, substituting here is both simpler
- * and cheaper than handing MathJax a global counter to keep.
- *
- * An unresolved citation becomes `?`, which is LaTeX's own convention for a
- * reference to something that is not there.
- */
-export function resolveLatex(latex: string, labels: Map<string, string>): string {
-  let out = latex;
-  if (out.includes("\\label")) out = out.replace(new RegExp(LABEL_SOURCE, "g"), "");
-  if (out.includes("ref")) {
-    out = out.replace(
-      new RegExp(REFERENCE_SOURCE, "g"),
-      (_match, eq: string | undefined, key: string) => {
-        const number = labels.get(key.trim());
-        if (number === undefined) return eq ? "(?)" : "?";
-        return eq ? "(" + number + ")" : number;
-      },
-    );
-  }
-  return out;
-}
+/** Resolve document references without taking ownership of TeX tag syntax. */
+export const resolveLatex = resolveMathSource;
 
 /**
  * Assign every display equation its number, and record what each label
@@ -320,8 +274,8 @@ export function resolveLatex(latex: string, labels: Map<string, string>): string
  * This runs before layout because a reference may point forward: a
  * paragraph early in the document can cite an equation that appears much
  * later, and it cannot be typeset until that equation's number is known.
- * Two passes are the price of forward references, and the first is cheap —
- * it reads the source and never touches MathJax.
+ * The metadata pass shares the formula cache with layout, so unchanged
+ * formulas do not need to be parsed by MathJax again.
  */
 export function numberEquations(
 parsed: Block[],
@@ -333,12 +287,25 @@ mode: TypesetOptions["numbering"],
   for (let i = 0; i < parsed.length; i++) {
     const block = parsed[i];
     if (block.type !== "math") continue;
-    const tag = equationTag(block.math, equation + 1, mode);
+    // The actual TeX parser decides which commands execute, including tags
+    // expanded from macros and separate tags/labels on aligned rows. The
+    // lexical fallback is used only while MathJax is loading or source is
+    // incomplete; the normal math-ready invalidation replaces that layout.
+    const semantic = renderMath(block.math, true).equation;
+    const tag = semantic
+      ? semantic.tags[0] ?? (semantic.suppressed ? null
+        : semantic.labels.length || mode === "all" || (mode === "ams" && semantic.numberedEnvironment)
+          ? String(equation + 1) : null)
+      : equationTag(block.math, equation + 1, mode);
     if (tag === null) continue;
     equation++;
     tags.set(i, tag);
-    for (const label of labelsIn(block.math)) {
-      labels.set(label, tag);
+    if (semantic) {
+      for (const label of semantic.labels) labels.set(label, semantic.references[label] ?? tag);
+    } else {
+      for (const directive of mathDirectives(block.math)) {
+        if (directive.name === "label") labels.set(directive.value.trim(), tag);
+      }
     }
   }
   // Derived from the resolved values, so a block holding a reference
@@ -394,17 +361,17 @@ latex: string,
 next: number,
 mode: TypesetOptions["numbering"],
 ): string | null {
-  const explicit = /\\tag\s*\*?\s*\{([^}]*)\}/.exec(latex);
-  if (explicit) return explicit[1];
-  if (/\\(notag|nonumber)\b/.test(latex)) return null;
-  if (hasLabel(latex)) return String(next);
+  const directives = mathDirectives(latex);
+  const explicit = directives.find((directive) => directive.name === "tag");
+  if (explicit) return explicit.value;
+  if (directives.some((directive) => directive.name === "notag" || directive.name === "nonumber")) return null;
+  if (directives.some((directive) => directive.name === "label")) return String(next);
   if (mode === "none") return null;
   if (mode === "all") return String(next);
 
-  const env = /\\begin\s*\{([a-zA-Z]+\*?)\}/.exec(latex);
-  if (!env) return null;
   const NUMBERED = ["equation", "align", "alignat", "gather", "multline", "flalign", "eqnarray"];
-  return NUMBERED.includes(env[1]) ? String(next) : null;
+  return directives.some((directive) => directive.name === "begin" && NUMBERED.includes(directive.value))
+    ? String(next) : null;
 }
 
 /** What the numbering pass produces, before anything is laid out. */
@@ -835,7 +802,8 @@ export class Typesetter {
   ): LaidBlock {
     const { style, key } = styleForSpan(this.theme, block, null);
     const latex = resolveLatex(block.math, numbering.labels);
-    const math = this.mathRun(renderMath(latex, true), latex, true, style);
+    const widthEx = measure / this.measurer.exHeight(style);
+    const math = this.mathRun(renderDisplayMath(latex, tag, widthEx), latex, true, style);
     const { width, height, depth } = math;
 
     // Centre it, but never push it off the left edge: an equation wider than
@@ -856,24 +824,6 @@ export class Typesetter {
         math,
       },
     ];
-
-    // The number sits flush to the right margin, as LaTeX's does — not beside
-    // the formula, which would move as the formula's width changed.
-    if (tag !== null) {
-      const label = `(${tag})`;
-      const labelWidth = this.measurer.width(label, style, key);
-      runs.push({
-        x: Math.max(x + width + this.theme.bodySize, measure - labelWidth),
-        text: label,
-        docStart: block.start,
-        docEnd: block.start,
-        style,
-        styleKey: key,
-        spanId: -1,
-        scaleX: 1,
-        synthetic: true,
-      });
-    }
 
     const above = this.theme.bodySize * 1.1;
     const below = this.theme.bodySize * 1.1;

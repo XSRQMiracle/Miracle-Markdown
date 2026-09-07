@@ -262,10 +262,12 @@ class RecordingContext {
   const { liteAdaptor } = require("mathjax-full/js/adaptors/liteAdaptor.js");
   const { RegisterHTMLHandler } = require("mathjax-full/js/handlers/html.js");
   require("mathjax-full/js/input/tex/color/ColorConfiguration.js");
+  require("mathjax-full/js/input/tex/ams/AmsConfiguration.js");
+  require("mathjax-full/js/input/tex/newcommand/NewcommandConfiguration.js");
   const adaptor = liteAdaptor();
   RegisterHTMLHandler(adaptor);
   const document = mathjax.document("", {
-    InputJax: new TeX({ packages: ["base", "color"] }),
+    InputJax: new TeX({ packages: ["base", "color", "ams", "newcommand"], tags: "none" }),
     OutputJax: new SVG({ fontCache: "none" }),
   });
   const adapt = (node: LiteElement): FakeElement => element(
@@ -287,6 +289,24 @@ class RecordingContext {
   eq(generated.slice(-2).map((command) => [command.fill, command.stroke]),
     [["currentColor", "currentColor"], ["currentColor", "currentColor"]],
     "leaving the colored array restores the surrounding formula color");
+
+  for (const tex of [String.raw`x\tag{A.1}`, String.raw`x\tag*{A}`,
+    String.raw`\begin{align}x&=1\tag{A}\\y&=2\tag{B}\end{align}`]) {
+    document.inputJax[0].reset();
+    const native = adapt(adaptor.firstChild(document.convert(tex, {
+      display: true, em: 16, ex: 8, containerWidth: 640,
+    })));
+    eq(native.getAttribute("width"), "100%", "real tagged SVG uses a percentage viewport");
+    eq(native.getAttribute("viewBox"), null, "the percentage root has no viewBox");
+    const tagged = geometryFromSvg(native as unknown as SVGSVGElement, { widthEx: 80, exPx: 8 });
+    eq(tagged.hasTags, true, "actual labelled rows identify native tag ownership");
+    eq(tagged.widthEx, 80, "tagged geometry uses the available measure");
+    eq(tagged.viewBoxWidth, 640, "percentage geometry normalizes its native pixel units");
+    eq(tagged.commands!.every(({ transform: [a, b, c, d] }) => Math.abs(a * d - b * c) > 1e-10),
+      true, "body and tag paths retain nonzero viewport transforms");
+    eq(tagged.commands!.some(({ transform }) => transform[4] > 400), true,
+      "the tag viewport reaches the right side of the measure");
+  }
 
   const context = new RecordingContext();
   const replay = (Renderer.prototype as unknown as {

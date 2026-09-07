@@ -23,15 +23,32 @@ export { DEFAULT_MATH_OPTIONS, type MathOptions } from "./math-lifecycle.js";
 
 /** The subset of MathJax's browser API we rely on. */
 interface MathJaxGlobal {
-  tex2svg(latex: string, options: { display: boolean }): Element;
+  tex2svg(latex: string, options: { display: boolean; em?: number; ex?: number; containerWidth?: number }): Element;
   config: { tex: { packages: string[]; macros: MathOptions["macros"] } };
   startup: {
     promise: Promise<void>;
+    document: { inputJax: Array<{ parseOptions?: { tags: {
+      currentTag: TeXTag; history: TeXTag[]; labels: Record<string, { tag: string; id: string }>;
+      makeTag(): unknown; notag(): void;
+    } } }> };
     getComponents(): void;
     makeMethods(): void;
   };
   texReset(): void;
 }
+
+interface TeXTag {
+  tag: string | null;
+  noTag: boolean;
+  labelId: string;
+  taggable: boolean;
+  defaultTags: boolean;
+}
+
+// Fixed conversion metrics make SVG px/ex and the resulting cached geometry
+// independent of the DOM font. Drawing scales it to the document's x-height.
+const CONVERSION_EX = 8;
+const CONVERSION_EM = 16;
 
 declare global {
   interface Window {
@@ -125,7 +142,8 @@ async function applyConfiguration(options: MathOptions): Promise<void> {
       packages: activePackages(options),
       macros: mutableMacros(options),
       // Numbering is decided by the typesetter, which knows document order;
-      // MathJax only ever sees an explicit \tag.
+      // MathJax owns all tag syntax and drawing; automatic block numbers
+      // are supplied by the document only when no explicit tag was emitted.
       tags: "none",
       processEscapes: false,
     },
@@ -173,17 +191,38 @@ function loadScript(src: string): Promise<void> {
  * Lay out one formula. Synchronous; returns an empty geometry with an error
  * set if MathJax has not finished loading or the source does not parse.
  */
-export function renderMath(latex: string, display: boolean): MathGeometry {
+export function renderMath(latex: string, display: boolean, widthEx?: number): MathGeometry {
   if (!mj) return { ...EMPTY_GEOMETRY, error: "loading" };
   if (!latex.trim()) return { ...EMPTY_GEOMETRY };
 
-  const key = `${version}|${display ? "d" : "i"}|${latex}`;
+  const key = `${version}|${display ? "d" : "i"}|${widthEx ?? "intrinsic"}|${latex}`;
   const hit = cache.get(key);
   if (hit) return hit;
 
   let geometry: MathGeometry;
   try {
-    const node = mj.tex2svg(latex, { display });
+    mj.texReset();
+    const tags = mj.startup.document.inputJax.find((jax) => jax.parseOptions)?.parseOptions?.tags;
+    const emitted: TeXTag[] = [];
+    let suppressed = false;
+    const makeTag = tags?.makeTag;
+    const notag = tags?.notag;
+    // AMS clears its current tag after each row. Observe tag creation while
+    // TeX executes, before that state disappears, rather than trying to
+    // reconstruct row tags from source or the final environment state.
+    if (tags) {
+      tags.makeTag = function () { emitted.push({ ...this.currentTag }); return makeTag!.call(this); };
+      tags.notag = function () { suppressed = true; return notag!.call(this); };
+    }
+    let node: Element;
+    try {
+      node = mj.tex2svg(latex, {
+        display, em: CONVERSION_EM, ex: CONVERSION_EX,
+        ...(widthEx === undefined ? {} : { containerWidth: widthEx * CONVERSION_EX }),
+      });
+    } finally {
+      if (tags) { tags.makeTag = makeTag!; tags.notag = notag!; }
+    }
     const svg = node.querySelector("svg");
     if (!svg) {
       geometry = { ...EMPTY_GEOMETRY, error: "no output" };
@@ -192,9 +231,22 @@ export function renderMath(latex: string, display: boolean): MathGeometry {
       // rather fall back to showing the source than draw a half-formula.
       const message =
         svg.querySelector("[data-mjx-error]")?.getAttribute("data-mjx-error") ?? "syntax error";
-      geometry = { ...geometryFromSvg(svg as unknown as SVGSVGElement), error: message };
+      geometry = { ...geometryFromSvg(svg as unknown as SVGSVGElement, { widthEx, exPx: CONVERSION_EX }), error: message };
     } else {
-      geometry = geometryFromSvg(svg as unknown as SVGSVGElement);
+      geometry = geometryFromSvg(svg as unknown as SVGSVGElement, { widthEx, exPx: CONVERSION_EX });
+      if (tags) {
+        const all = [...tags.history, tags.currentTag];
+        geometry.equation = {
+          tags: emitted.filter((tag) => tag.tag !== null && !tag.noTag).map((tag) => tag.tag!),
+          labels: Object.keys(tags.labels),
+          // A declared label without an emitted tag has an empty id and the
+          // unresolved value "???". It receives the document's automatic tag.
+          references: Object.fromEntries(Object.entries(tags.labels).filter(([, value]) => value.id)
+            .map(([key, value]) => [key, value.tag])),
+          suppressed: suppressed || all.some((tag) => tag.noTag),
+          numberedEnvironment: all.some((tag) => tag.taggable && tag.defaultTags),
+        };
+      }
     }
   } catch (err) {
     geometry = { ...EMPTY_GEOMETRY, error: err instanceof Error ? err.message : String(err) };
@@ -205,6 +257,19 @@ export function renderMath(latex: string, display: boolean): MathGeometry {
   if (cache.size > 2000) cache.clear();
   cache.set(key, geometry);
   return geometry;
+}
+
+/**
+ * TeX owns both explicit and automatic tag layout. Detect explicit tags from
+ * the parsed output, so macros and multi-row environments cannot acquire a
+ * second application-painted number. A generated block tag is added only
+ * when the unmodified formula has emitted none.
+ */
+export function renderDisplayMath(latex: string, automaticTag: string | null, widthEx: number): MathGeometry {
+  const geometry = renderMath(latex, true, widthEx);
+  if (geometry.error || geometry.hasTags || automaticTag === null) return geometry;
+  // A newline ends a possible trailing TeX comment before the generated tag.
+  return renderMath(`${latex}\n\\tag{${automaticTag}}`, true, widthEx);
 }
 
 const segmentCache = new Map<string, { geometry: MathGeometry; segments: MathSegment[] }>();
@@ -229,7 +294,8 @@ export function renderMathSegments(
 
   let segments: MathSegment[] = [];
   try {
-    const node = mj!.tex2svg(latex, { display: false });
+    mj!.texReset();
+    const node = mj!.tex2svg(latex, { display: false, em: CONVERSION_EM, ex: CONVERSION_EX });
     const svg = node.querySelector("svg");
     if (svg) {
       segments = segmentInlineMath(svg as unknown as SVGSVGElement, geometry.viewBoxWidth);

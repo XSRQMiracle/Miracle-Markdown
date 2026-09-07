@@ -135,5 +135,14 @@ eq(tag("x \\label{eq:a} \\notag", "none"), null, "but notag still wins over a la
   );
 }
 
+// Balanced tag bodies and executable command boundaries are preserved.
+eq(tag(String.raw`x\tag{A{.1}}`, "all"), "A{.1}", "nested tag arguments are not truncated");
+eq(tag("x % \\tag{ignored}", "none"), null, "commented tags do not assign numbers");
+eq(tag(String.raw`\newcommand{\unused}{\tag{ignored}}x`, "all"), "1", "unused macro definitions do not assign tags");
+eq(resolveLatex(String.raw`x\tag{A{.1}}\label{a}`, new Map()), String.raw`x\tag{A{.1}}`, "only document label metadata is removed");
+eq(resolveLatex(String.raw`\newcommand{\cite}{\eqref{a}}\cite`, new Map([["a", "7"]])),
+  String.raw`\newcommand{\cite}{(7)}\cite`, "stored macro references retain document context");
+eq(resolveLatex(String.raw`x\tag{see \ref{a}}`, new Map([["a", "7"]])), String.raw`x\tag{see 7}`, "tag text may cite another equation");
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);
