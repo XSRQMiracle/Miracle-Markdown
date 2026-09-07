@@ -5,7 +5,6 @@
 //! has to cross the IPC boundary to be laid out. What the shell owns is the
 //! things a webview cannot do: the window, the menu and the filesystem.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
@@ -35,6 +34,8 @@ fn finish_close(app: tauri::AppHandle, state: tauri::State<'_, CloseGuard>) {
     app.exit(0);
 }
 
+mod file_save;
+
 #[derive(Serialize)]
 pub struct OpenedFile {
     path: String,
@@ -50,13 +51,8 @@ fn read_file(path: String) -> Result<String, String> {
 /// Write the document back to disk.
 #[tauri::command]
 fn write_file(path: String, contents: String) -> Result<(), String> {
-    // Write to a sibling temporary file and rename, so an interrupted save
-    // cannot leave the user with a half-written document.
-    let target = PathBuf::from(&path);
-    let tmp = target.with_extension("md.tmp");
-    std::fs::write(&tmp, contents.as_bytes()).map_err(|e| format!("无法写入：{e}"))?;
-    std::fs::rename(&tmp, &target).map_err(|e| format!("无法保存 {path}：{e}"))?;
-    Ok(())
+    file_save::save_document(std::path::Path::new(&path), contents.as_bytes())
+        .map_err(|e| format!("无法保存 {path}：{e}"))
 }
 
 /// Fonts the user actually has, so the settings panel can offer real choices
