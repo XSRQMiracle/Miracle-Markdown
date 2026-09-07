@@ -150,6 +150,9 @@ export class Editor {
   onStatus: ((info: StatusInfo) => void) | null = null;
   /** Fires after every text change, including undo/redo and IME updates. */
   onChange: (() => void) | null = null;
+  /** Called when a link is followed. Opening it belongs to the host, which
+   *  knows whether it is running in a browser or in the desktop shell. */
+  onFollowLink: ((href: string) => void) | null = null;
 
   constructor(
     private host: HTMLElement,
@@ -353,9 +356,13 @@ export class Editor {
 
   /** The scrollbar thumb, or null when everything already fits. */
   private scrollbar(): Scrollbar | null {
+    const view = this.host.clientHeight;
+    // A window with no height — minimised, or a tab that is not being shown
+    // — would otherwise report a scrollbar covering the whole surface, and
+    // every click would land on it.
+    if (view <= 0) return null;
     const max = this.scrollMax;
     if (max <= 0) return null;
-    const view = this.host.clientHeight;
     const track = view - 4;
     // The thumb's length is the visible fraction of the document, floored so
     // that a very long one still leaves something to take hold of.
@@ -403,6 +410,34 @@ export class Editor {
       if (y >= best.y + l.baseline - this.theme.bodySize) line = l;
     }
     return this.positionInLine(best, line, x - best.indent);
+  }
+
+  /**
+   * The link under a point, if there is one.
+   *
+   * The destination rides on the run, so this is the same walk as placing the
+   * caret rather than a second pass over the markdown — and it deliberately
+   * asks for a hit *on the glyphs*: the run's own extent, not the nearest
+   * line, so that the space beyond the end of a line is not a link.
+   */
+  private linkAt(clientX: number, clientY: number): string | null {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = clientX - rect.left - this.gutter;
+    const y = clientY - rect.top - this.originY + this.scrollTop;
+    for (const b of this.blocks) {
+      if (y < b.y || y > b.y + b.height) continue;
+      if (b.raw) return null;
+      for (const line of b.lines) {
+        const top = b.y + line.baseline - line.height;
+        if (y < top || y > b.y + line.baseline + line.depth) continue;
+        for (const run of line.runs) {
+          if (!run.href || run.synthetic) continue;
+          const rx = x - b.indent - run.x;
+          if (rx >= 0 && rx <= this.runWidth(run)) return run.href;
+        }
+      }
+    }
+    return null;
   }
 
   private positionInLine(b: LaidBlock, line: LaidLine, x: number): CaretPosition {
@@ -931,6 +966,16 @@ export class Editor {
     canvas.addEventListener("mousedown", (e) => {
       e.preventDefault();
       if (this.beginScrollDrag(e)) return;
+      // A plain click still places the caret — the source under it has to
+      // stay editable — so following a link takes the platform's modifier,
+      // the same one that opens a link in a new tab elsewhere.
+      if (e.metaKey || e.ctrlKey) {
+        const href = this.linkAt(e.clientX, e.clientY);
+        if (href) {
+          this.onFollowLink?.(href);
+          return;
+        }
+      }
       this.finishComposition();
       this.interacted = true;
       this.focus();
@@ -967,6 +1012,11 @@ export class Editor {
     });
 
     canvas.addEventListener("mousemove", (e) => {
+      // Held modifier over a link: say so, since a click will follow it.
+      const link = (e.metaKey || e.ctrlKey) && this.linkAt(e.clientX, e.clientY) !== null;
+      const cursor = link ? "pointer" : "";
+      if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor;
+
       const over = this.overScrollbar(e.offsetX);
       if (over === this.scrollbarActive) return;
       this.scrollbarActive = over;

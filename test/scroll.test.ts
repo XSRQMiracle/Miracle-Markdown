@@ -86,6 +86,15 @@ function scrolling(docHeight: number) {
   assert.equal(s.editor.selEnd, 0, "and no caret is placed");
 }
 {
+  // A window with no height reports no scrollbar, rather than one covering
+  // the whole surface that would swallow every click.
+  const s = scrolling(3000);
+  s.editor.host.clientHeight = 0;
+  assert.equal(s.bar(), null);
+  s.press(WIDTH - 3, 0);
+  assert.equal(s.editor.selEnd, 4, "the press is ordinary text");
+}
+{
   const s = scrolling(3000);
   s.wheel(200);
   assert.equal(s.editor.scrollTop, 200);

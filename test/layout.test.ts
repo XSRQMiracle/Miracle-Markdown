@@ -224,6 +224,35 @@ assert.equal(unfinished.selEnd, 4);
 unfinished.moveVertical(1, false);
 assert.equal(unfinished.selEnd, 6, "vertical movement round-trips through the terminal line");
 
+// A link's destination rides on the run it is painted from, so finding one
+// under the pointer is the same walk as placing the caret.
+{
+  const doc = "para\n\nsee [the site](https://example.com/x) here";
+  const linked = editable(doc, 0);
+  const block = linked.blocks.find((b: any) => b.lines.some((l: any) => l.runs.some((r: any) => r.href)));
+  const line = block.lines[0];
+  const run = line.runs.find((r: any) => r.href);
+  assert.deepEqual(line.runs.map((r: any) => [r.text, r.href ?? null]),
+    [["see", null], ["the", "https://example.com/x"], ["site", "https://example.com/x"], ["here", null]],
+    "the destination reaches the runs the link is painted from, and only those");
+  const at = (x: number) => linked.linkAt(x, linked.originY + block.y + line.baseline - 4);
+  assert.equal(at(linked.gutter + block.indent + run.x + 2), "https://example.com/x",
+    "a point on the link follows it");
+  assert.equal(at(linked.gutter + block.indent + 2), null, "the text before it does not");
+  assert.equal(at(linked.gutter + block.indent + line.width + 40), null,
+    "nor the space past the end of the line");
+  assert.equal(linked.linkAt(linked.gutter + block.indent + run.x + 2, 0), null,
+    "nor a point on another line");
+  // The block holding the caret shows its source, where the destination is
+  // written out and there is nothing to hide behind.
+  const focused = editable(doc, doc.length);
+  const raw = focused.blocks.at(-1);
+  assert.equal(raw.raw, true);
+  assert.equal(focused.linkAt(linked.gutter + block.indent + run.x + 2,
+    focused.originY + raw.y + raw.lines[0].baseline - 4), null,
+    "a block being edited has no links, only text");
+}
+
 const revealEditor = editable(longSource);
 revealEditor.interacted = false;
 revealEditor.relayout();

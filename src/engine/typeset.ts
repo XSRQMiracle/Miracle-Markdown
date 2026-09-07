@@ -207,6 +207,8 @@ export interface LaidRun {
   image?: ImageRun;
   /** Present on a run that draws a footnote's raised number. */
   note?: NoteRun;
+  /** Destination of the link this run is part of, if it is part of one. */
+  href?: string;
 }
 
 export interface LaidLine {
@@ -1538,6 +1540,9 @@ export class Typesetter {
           math: object?.kind === "math" ? object : undefined,
           image: object?.kind === "image" ? object.image : undefined,
           note: object?.kind === "note" ? object.note : undefined,
+          // Carried on the run so that following a link is a hit test like
+          // any other, with no second pass over the markdown.
+          href: st.span?.kind === "link" ? st.span.href : undefined,
         });
       }
       lines.push({

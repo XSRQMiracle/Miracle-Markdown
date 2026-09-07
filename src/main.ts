@@ -6,7 +6,14 @@
 import { Editor, type StatusInfo } from "./editor/editor.js";
 import { initEngine, type TypesetOptions } from "./engine/typeset.js";
 import { SAMPLE } from "./sample.js";
-import { isDesktop, openDocument, saveDocument, installDesktopCloseHandler, finishDesktopClose } from "./platform.js";
+import {
+  finishDesktopClose,
+  installDesktopCloseHandler,
+  isDesktop,
+  openDocument,
+  openExternal,
+  saveDocument,
+} from "./platform.js";
 import { DEFAULT_MATH_OPTIONS, initMath, type MathOptions } from "./engine/mathjax.js";
 import { buildMathPanel } from "./ui/math-panel.js";
 import { onImageSettled } from "./engine/images.js";
@@ -91,6 +98,10 @@ async function main() {
     });
     toggles.appendChild(button);
   }
+
+  // ⌘/Ctrl-click on a link. The editor finds it; where it opens is the
+  // host's business, and an unopenable one is simply left alone.
+  editor.onFollowLink = (href) => void openExternal(href);
 
   // Decoding can change an image's reserved width and height. Register once
   // at startup so cached placeholder layouts are invalidated immediately.

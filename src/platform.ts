@@ -97,6 +97,28 @@ export async function saveDocument(
   return { path };
 }
 
+/**
+ * Open a link somewhere outside the editor.
+ *
+ * The destination comes from the document, which is not necessarily something
+ * the reader wrote, so only the schemes that mean "somewhere else to read"
+ * are honoured: a `javascript:` or `file:` destination in a downloaded note
+ * would otherwise be one modified click away from running. Anything else is
+ * declined, and the caller is told so.
+ */
+export async function openExternal(url: string): Promise<boolean> {
+  const target = url.trim();
+  if (!/^(https?|mailto):/i.test(target)) return false;
+  const api = tauri();
+  if (api) {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(target);
+  } else {
+    window.open(target, "_blank", "noopener,noreferrer");
+  }
+  return true;
+}
+
 /** Protect both window close and application quit through one native event. */
 export async function installDesktopCloseHandler(close: () => void): Promise<void> {
   const api = tauri();
