@@ -111,7 +111,7 @@ async function main() {
   });
   const fileAction = async (action: () => Promise<unknown>) => {
     if (session.isClosing) return;
-    try { await action(); }
+    try { editor.finishComposition(); await action(); }
     catch (error) { await showDocumentError(error); }
     if (!session.isClosing) editor.focus();
   };

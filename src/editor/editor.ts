@@ -65,10 +65,17 @@ export class Editor {
   private docHeight = 0;
   private scrollTop = 0;
 
-  private composing: { start: number; length: number } | null = null;
+  private composing: {
+    before: Snapshot;
+    affinity: CaretAffinity;
+    start: number;
+    end: number;
+    value: string;
+    updated: boolean;
+  } | null = null;
   private undoStack: Snapshot[] = [];
   private redoStack: Snapshot[] = [];
-  private lastEditAt = 0;
+  private lastEditAt = -Infinity;
 
   private caretVisible = true;
   private hasFocus = false;
@@ -137,11 +144,16 @@ export class Editor {
   }
 
   setText(text: string): void {
+    const wasComposing = this.composing !== null;
+    this.composing = null;
+    this.input.value = "";
+    if (wasComposing) this.input.blur();
     this.text = normalizeLineEndings(text);
     this.selStart = this.selEnd = 0;
     this.caretAffinity = "downstream";
     this.undoStack = [];
     this.redoStack = [];
+    this.lastEditAt = -Infinity;
     this.invalidate();
   }
 
@@ -440,7 +452,7 @@ export class Editor {
 
   private pushUndo(coalesce: boolean): void {
     const now = performance.now();
-    if (coalesce && now - this.lastEditAt < 400 && this.undoStack.length) {
+    if (coalesce && !this.redoStack.length && now - this.lastEditAt < 400 && this.undoStack.length) {
       this.lastEditAt = now;
       return;
     }
@@ -452,8 +464,9 @@ export class Editor {
 
   private replace(from: number, to: number, insert: string, coalesce = false): void {
     insert = normalizeLineEndings(insert);
-    this.pushUndo(coalesce);
-    this.text = this.text.slice(0, from) + insert + this.text.slice(to);
+    const next = this.text.slice(0, from) + insert + this.text.slice(to);
+    if (next !== this.text) this.pushUndo(coalesce);
+    this.text = next;
     this.selStart = this.selEnd = from + insert.length;
     this.caretAffinity = "downstream";
     this.preferredX = null;
@@ -469,6 +482,7 @@ export class Editor {
   }
 
   private undo(): void {
+    this.lastEditAt = -Infinity;
     const snap = this.undoStack.pop();
     if (!snap) return;
     this.redoStack.push({ text: this.text, start: this.selStart, end: this.selEnd });
@@ -481,6 +495,7 @@ export class Editor {
   }
 
   private redo(): void {
+    this.lastEditAt = -Infinity;
     const snap = this.redoStack.pop();
     if (!snap) return;
     this.undoStack.push({ text: this.text, start: this.selStart, end: this.selEnd });
@@ -495,6 +510,7 @@ export class Editor {
   // -- caret movement ----------------------------------------------------
 
   private moveTo(offset: number, extend: boolean, affinity: CaretAffinity = "downstream"): void {
+    this.lastEditAt = -Infinity;
     this.selEnd = Math.max(0, Math.min(this.text.length, offset));
     this.caretAffinity = affinity;
     if (!extend) this.selStart = this.selEnd;
@@ -543,11 +559,68 @@ export class Editor {
 
   // -- events ------------------------------------------------------------
 
+  private beginComposition(): void {
+    this.finishComposition();
+    this.interacted = true;
+    this.composing = {
+      before: { text: this.text, start: this.selStart, end: this.selEnd },
+      affinity: this.caretAffinity,
+      start: Math.min(this.selStart, this.selEnd),
+      end: Math.max(this.selStart, this.selEnd),
+      value: "", updated: false,
+    };
+  }
+
+  private updateComposition(value: string): void {
+    const composition = this.composing;
+    if (!composition) return;
+    composition.value = normalizeLineEndings(value);
+    composition.updated = true;
+    const { before, start, end } = composition;
+    this.text = before.text.slice(0, start) + composition.value + before.text.slice(end);
+    this.selStart = this.selEnd = start + composition.value.length;
+    this.caretAffinity = "downstream";
+    this.preferredX = null;
+    this.onChange?.();
+    this.invalidate();
+    this.scrollCaretIntoView();
+  }
+
+  private endComposition(value: string): void {
+    const composition = this.composing;
+    if (!composition) return;
+    this.composing = null;
+    const { before, start, end, affinity } = composition;
+    this.text = before.text;
+    this.selStart = before.start;
+    this.selEnd = before.end;
+    this.caretAffinity = affinity;
+    this.input.value = "";
+    if (value) this.replace(start, end, value, false);
+    else {
+      this.onChange?.();
+      this.invalidate();
+      this.scrollCaretIntoView();
+    }
+    // The next ordinary keystroke is a separate transaction too.
+    this.lastEditAt = -Infinity;
+  }
+
+  /** Settle the visible IME edit before saving, replacing, or leaving it. */
+  finishComposition(): void {
+    if (!this.composing) return;
+    // Let the host commit/cancel its candidate first, if it dispatches the
+    // event synchronously on blur. Otherwise commit the visible preview.
+    this.input.blur();
+    if (this.composing) this.endComposition(this.composing.updated ? this.composing.value : "");
+  }
+
   private attach(): void {
     const canvas = this.canvas;
 
     canvas.addEventListener("mousedown", (e) => {
       e.preventDefault();
+      this.finishComposition();
       this.interacted = true;
       this.focus();
       const position = this.positionAt(e.clientX, e.clientY);
@@ -574,45 +647,21 @@ export class Editor {
 
     this.input.addEventListener("keydown", (e) => this.onKeyDown(e));
 
-    // Composition: keep the in-progress text in the document so it is typeset
-    // in place, which is what a CJK writer expects to see.
-    this.input.addEventListener("compositionstart", () => {
-      this.interacted = true;
-      const lo = Math.min(this.selStart, this.selEnd);
-      const hi = Math.max(this.selStart, this.selEnd);
-      if (lo !== hi) this.replace(lo, hi, "");
-      this.composing = { start: this.selEnd, length: 0 };
-    });
+    // Provisional composition renders in place, but owns no history entry
+    // until commit. Every update is derived from the pre-composition snapshot.
+    this.input.addEventListener("compositionstart", () => this.beginComposition());
+    this.input.addEventListener("compositionupdate", (e) => this.updateComposition(e.data ?? ""));
+    this.input.addEventListener("compositionend", (e) => this.endComposition(e.data ?? ""));
 
-    this.input.addEventListener("compositionupdate", (e) => {
-      if (!this.composing) return;
-      const data = normalizeLineEndings((e as CompositionEvent).data ?? "");
-      const { start, length } = this.composing;
-      this.text = this.text.slice(0, start) + data + this.text.slice(start + length);
-      this.composing = { start, length: data.length };
-      this.selStart = this.selEnd = start + data.length;
-      this.caretAffinity = "downstream";
-      this.onChange?.();
-      this.invalidate();
-      this.scrollCaretIntoView();
-    });
-
-    this.input.addEventListener("compositionend", (e) => {
-      if (!this.composing) return;
-      const data = (e as CompositionEvent).data ?? "";
-      const { start, length } = this.composing;
-      this.composing = null;
-      // Rewind the provisional text, then apply the committed string as a
-      // single undoable edit.
-      this.text = this.text.slice(0, start) + this.text.slice(start + length);
-      this.selStart = this.selEnd = start;
-      this.input.value = "";
-      if (data) this.insert(data, false);
-      else { this.onChange?.(); this.invalidate(); }
-    });
-
-    this.input.addEventListener("input", () => {
-      if (this.composing) return;
+    this.input.addEventListener("input", (event) => {
+      const e = event as InputEvent;
+      if (this.composing || e.isComposing) return;
+      // Some hosts dispatch the final input after compositionend. The string
+      // was already committed by that event, so it must not be inserted twice.
+      if (e.inputType === "insertFromComposition" || e.inputType === "insertCompositionText") {
+        this.input.value = "";
+        return;
+      }
       this.interacted = true;
       const value = this.input.value;
       this.input.value = "";
@@ -621,6 +670,7 @@ export class Editor {
 
     this.input.addEventListener("paste", (e) => {
       e.preventDefault();
+      this.finishComposition();
       const text = e.clipboardData?.getData("text/plain") ?? "";
       if (text) this.insert(text, false);
     });
@@ -634,6 +684,7 @@ export class Editor {
 
     this.input.addEventListener("cut", (e) => {
       e.preventDefault();
+      this.finishComposition();
       const lo = Math.min(this.selStart, this.selEnd);
       const hi = Math.max(this.selStart, this.selEnd);
       e.clipboardData?.setData("text/plain", this.text.slice(lo, hi));
@@ -641,6 +692,7 @@ export class Editor {
     });
 
     this.input.addEventListener("blur", () => {
+      if (this.composing) this.endComposition(this.composing.updated ? this.composing.value : "");
       this.caretVisible = false;
       this.hasFocus = false;
       this.invalidate();
@@ -664,19 +716,20 @@ export class Editor {
   }
 
   private onKeyDown(e: KeyboardEvent): void {
-    if (this.composing) return;
+    if (this.composing || e.isComposing) return;
     if (!e.metaKey && !e.ctrlKey) this.interacted = true;
     const mod = e.metaKey || e.ctrlKey;
     const lo = Math.min(this.selStart, this.selEnd);
     const hi = Math.max(this.selStart, this.selEnd);
 
-    if (mod && e.key === "z") {
+    if (mod && e.key.toLowerCase() === "z") {
       e.preventDefault();
       e.shiftKey ? this.redo() : this.undo();
       return;
     }
     if (mod && e.key === "a") {
       e.preventDefault();
+      this.lastEditAt = -Infinity;
       this.selStart = 0;
       this.selEnd = this.text.length;
       this.invalidate();
