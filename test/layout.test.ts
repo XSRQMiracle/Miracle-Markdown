@@ -253,6 +253,19 @@ assert.equal(unfinished.selEnd, 6, "vertical movement round-trips through the te
     "a block being edited has no links, only text");
 }
 
+// A window that grows, or a document that shrinks, can leave the page
+// scrolled past its end; laying it out again puts it back.
+{
+  const clamped = editable(longSource);
+  clamped.host.clientHeight = 200;
+  clamped.relayout();
+  clamped.scrollTop = clamped.scrollMax;
+  assert.ok(clamped.scrollTop > 0, "a long document in a short window scrolls");
+  clamped.host.clientHeight = 10000;
+  clamped.relayout();
+  assert.equal(clamped.scrollTop, 0, "and stops scrolling once it all fits");
+}
+
 const revealEditor = editable(longSource);
 revealEditor.interacted = false;
 revealEditor.relayout();

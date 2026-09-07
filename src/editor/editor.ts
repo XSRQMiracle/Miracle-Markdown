@@ -283,6 +283,9 @@ export class Editor {
     this.docHeight = result.height;
     this.lastLayoutMs = performance.now() - t0;
     this.dirty = false;
+    // A shorter document, or a taller window, can leave the page scrolled
+    // past what there is left to see.
+    this.scrollTop = Math.min(this.scrollTop, this.scrollMax);
   }
 
   private render(): void {
