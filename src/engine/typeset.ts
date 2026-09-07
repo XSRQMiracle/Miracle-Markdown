@@ -485,7 +485,7 @@ export class Typesetter {
     if (doc.endsWith("\n") && parsed.at(-1)?.end !== doc.length) {
       parsed.push({
         type: "blank", start: doc.length, end: doc.length, source: "",
-        level: 0, ordered: false, marker: "", lang: "", math: "",
+        level: 0, ordered: false, marker: "", lang: "", math: "", task: "none",
       });
     }
     const focusedBlock = blockIndexAtPosition(parsed, focusedPosition);

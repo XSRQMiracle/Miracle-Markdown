@@ -37,7 +37,12 @@ export interface Block {
   lang: string;
   /** LaTeX source of a block of kind "math", delimiters already removed. */
   math: string;
+  /** Task state of a list item written as `- [ ]` or `- [x]`. */
+  task: TaskState;
 }
+
+/** Whether a list item carries a checkbox, and whether it is ticked. */
+export type TaskState = "none" | "todo" | "done";
 
 export type SpanKind = "text" | "strong" | "em" | "code" | "link" | "strike" | "math";
 
@@ -88,6 +93,8 @@ const HEADING = /^(#{1,6})\s+(.*)$/;
 const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
 const QUOTE = /^\s*>\s?(.*)$/;
 const UL = /^(\s*)([-*+])\s+(.*)$/;
+/** GFM's task marker: only valid directly after a bullet, and space-separated. */
+const TASK = /^\[([ xX])\]\s+/;
 const OL = /^(\s*)(\d+)([.)])\s+(.*)$/;
 
 interface BlockMathOpen {
@@ -302,11 +309,15 @@ counters.length = 0;
       const end = blockEnd(doc, offsets, lines.length, j, start, line);
       const indent = (ul ? ul[1] : ol![1]).length;
       const level = Math.floor(indent / 2) + 1;
+      // A checkbox belongs to a bullet. An ordered item that happens to start
+      // with "[x]" is a link label the author is still typing, not a task.
+      const task = ul ? TASK.exec(ul[3]) : null;
       blocks.push(
         block("list", doc.slice(start, end), start, end, {
           level,
           ordered: !!ol,
           marker: listMarker(counters, level, ol),
+          task: task ? (task[1] === " " ? "todo" : "done") : "none",
         }),
       );
       i = j;
@@ -442,6 +453,7 @@ function block(
     source,
     lang: extra.lang ?? "",
     math: extra.math ?? "",
+    task: extra.task ?? "none",
   };
 }
 
@@ -484,7 +496,14 @@ export function renderBlock(
     const firstLine = newline >= 0 ? b.source.slice(0, newline) : b.source;
     const m = UL.exec(firstLine) ?? OL.exec(firstLine);
     if (m) {
-      const consumed = m[0].length - m[m.length - 1].length;
+      let consumed = m[0].length - m[m.length - 1].length;
+      // The checkbox is drawn as a marker, so it is not part of the text. It
+      // has to go before inline parsing rather than after, or its bracket
+      // would be scanned as a link label.
+      if (b.task !== "none") {
+        const task = TASK.exec(b.source.slice(consumed));
+        if (task) consumed += task[0].length;
+      }
       base += consumed;
       body = b.source.slice(consumed);
     }

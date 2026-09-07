@@ -382,5 +382,41 @@ eq(parseInline("see <https://x> now", 0).text, "see https://x now", "inside a se
      "and the URL text maps past the opening bracket");
 }
 
+
+// --- task lists ------------------------------------------------------------
+const tasks = (doc: string) =>
+  parseBlocks(doc).filter((b) => b.type === "list").map((b) => b.task);
+
+eq(tasks("- [ ] open"), ["todo"], "an empty box is a pending task");
+eq(tasks("- [x] done"), ["done"], "a lowercase x ticks it");
+eq(tasks("- [X] done"), ["done"], "and so does uppercase");
+eq(tasks("- plain"), ["none"], "a bullet without a box is not a task");
+eq(tasks("- [ ]nospace"), ["none"], "GFM requires the space after the bracket");
+eq(tasks("- [y] bad"), ["none"], "only a space or an x count");
+eq(tasks("1. [x] numbered"), ["none"], "a checkbox belongs to a bullet, not a number");
+eq(tasks("- [ ] a\n- [x] b\n- c"), ["todo", "done", "none"], "mixed items in one list");
+
+// The checkbox is drawn as a marker, so it leaves the text.
+{
+  const doc = "- [x] buy milk";
+  const [b] = parseBlocks(doc);
+  const r = renderBlock(b, false);
+  eq(r.text, "buy milk", "the box and bullet are both stripped");
+  eq(r.map[0], doc.indexOf("buy"), "the first character maps past both");
+  eq(r.map.length, r.text.length + 1, "the map still covers every character");
+  eq(renderBlock(b, true).text, doc, "raw mode shows the source unchanged");
+}
+{
+  // The bracket must go before inline parsing, or it opens a link label.
+  const [b] = parseBlocks("- [ ] see [docs](x) later");
+  const r = renderBlock(b, false);
+  eq(r.text, "see docs later", "a real link in the item still parses");
+  eq(r.spans.some((s) => s.kind === "link"), true, "and keeps its link span");
+}
+{
+  const [b] = parseBlocks("- [x] **bold** text");
+  eq(renderBlock(b, false).text, "bold text", "emphasis after a checkbox still works");
+}
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

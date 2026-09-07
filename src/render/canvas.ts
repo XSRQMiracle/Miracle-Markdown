@@ -290,14 +290,66 @@ export class Renderer {
       return;
     }
 
-    if (type === "list" && b.marker && b.lines.length) {
+    if (type === "list" && b.lines.length) {
       const style = b.lines[0].runs[0]?.style;
       if (!style) return;
+      const baseline = b.y + b.lines[0].baseline;
+      if (b.block.task !== "none") {
+        this.drawCheckbox(b, style.size, baseline, b.block.task === "done", theme);
+        return;
+      }
+      if (!b.marker) return;
       this.setFont(cssFont(style));
       this.setFill(theme.mutedColor);
       const w = ctx.measureText(b.marker).width;
-      ctx.fillText(b.marker, b.indent - w - theme.bodySize * 0.45, b.y + b.lines[0].baseline);
+      ctx.fillText(b.marker, b.indent - w - theme.bodySize * 0.45, baseline);
     }
+  }
+
+  /**
+   * A task list's checkbox.
+   *
+   * Drawn rather than typeset: the obvious alternative is a ballot-box
+   * character, but whether a font has one — and how it is sized against the
+   * surrounding text — varies enough that the box would sometimes be missing
+   * and usually be the wrong weight. A rectangle is the same everywhere.
+   */
+  private drawCheckbox(
+    b: LaidBlock,
+    size: number,
+    baseline: number,
+    done: boolean,
+    theme: Theme,
+  ): void {
+    const ctx = this.ctx;
+    const box = size * 0.72;
+    // Sit the box on the text's optical centre rather than its baseline.
+    const top = baseline - box * 0.92;
+    const left = b.indent - box - theme.bodySize * 0.45;
+    const stroke = Math.max(1, size / 14);
+
+    ctx.save();
+    ctx.strokeStyle = done ? theme.accentColor : theme.mutedColor;
+    ctx.lineWidth = stroke;
+    ctx.beginPath();
+    // Half-pixel offsets keep a thin rule from straddling two device pixels.
+    const snap = stroke / 2;
+    ctx.rect(left + snap, top + snap, box - stroke, box - stroke);
+    ctx.stroke();
+
+    if (done) {
+      ctx.strokeStyle = theme.accentColor;
+      ctx.lineWidth = Math.max(1.4, size / 9);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(left + box * 0.22, top + box * 0.52);
+      ctx.lineTo(left + box * 0.43, top + box * 0.73);
+      ctx.lineTo(left + box * 0.79, top + box * 0.27);
+      ctx.stroke();
+    }
+    ctx.restore();
+    this.currentFill = "";
   }
 
   /**
