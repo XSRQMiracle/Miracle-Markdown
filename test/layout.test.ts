@@ -48,6 +48,49 @@ assert.deepEqual(runs("😀**é**z").map((r) => [r.text, r.docStart]),
   [["😀", 0], ["é", 4], ["z", 7]]);
 assert.deepEqual(runs("e\u0301**x**").map((r) => r.text), ["e\u0301", "x"]);
 assert.equal(layout("`a b`").lines[0].width, 29, "code-space measurement reaches the core");
+
+// A separate deterministic shaper makes punctuation narrower than letters
+// and kerns it against its neighbours. Exercise the real measurement -> WASM
+// -> coalescing path, including styled discretionary hyphens.
+const optical = new Typesetter({ ...DEFAULT_THEME }, {
+  ...DEFAULT_OPTIONS, inline: { ...DEFAULT_OPTIONS.inline }, justify: false,
+  protrusion: true, maxExpand: 0,
+});
+(optical as any).measurer.width = (text: string, style: { weight: number }) => {
+  const bold = style.weight === 700;
+  return Array.from(text).reduce((width, c) => width +
+    (c === '"' || c === "“" || c === "”" ? 4 : c === "." ? 2 :
+      c === "-" ? (bold ? 13 : 7) : c === " " ? 4 : (bold ? 12 : 10)), 0) -
+    (text.includes('"H') || text.includes("“H") ? 1 : 0) -
+    (text.includes("o.") ? 0.5 : 0);
+};
+for (const source of ['"Hello.', "“Hello.”", "Hello."]) {
+  const line = optical.layoutDocument(source, 1000, -1).blocks[0].lines[0];
+  assert.equal(line.runs.length, 1, "punctuation tokens rejoin to preserve platform kerning");
+  const run = line.runs[0];
+  assert.equal(run.text, source);
+  assert.equal(run.x + 0, source === "Hello." ? 0 : -2, "only half the opening quote hangs");
+  assert.ok(Math.abs(line.width - (run.x + optical.measureText(run.text, run.style, run.styleKey))) < 0.0001,
+    "kerned punctuation and text reserve precisely their drawn width");
+}
+const opticalStyled = optical.layoutDocument('"**Hello**.', 1000, -1).blocks[0].lines[0];
+assert.deepEqual(opticalStyled.runs.map((r) => [r.text, r.style.weight]),
+  [['"', 400], ["Hello", 700], [".", 400]], "punctuation cannot erase style boundaries");
+assert.equal(opticalStyled.width, 64, "separately drawn styles do not borrow punctuation kerning");
+for (const source of ["extraordinary", "**extraordinary**"]) {
+  const lines = optical.layoutDocument(source, 80, -1).blocks[0].lines;
+  const inserted = lines.filter((line) => line.runs.at(-1)?.synthetic);
+  assert.ok(inserted.length > 0, "a narrow word exercises discretionary hyphens");
+  for (const line of inserted) {
+    const hyphen = line.runs.at(-1)!;
+    const measured = optical.measureText("-", hyphen.style, hyphen.styleKey);
+    assert.equal(measured, source.startsWith("**") ? 13 : 7);
+    assert.ok(Math.abs(line.width - hyphen.x - measured * hyphen.scaleX) < 0.0001,
+      "the inserted hyphen reserves the measured width of its actual font");
+  }
+}
+assert.equal(optical.layoutDocument('"short."', 20, -1).blocks[0].lines.length, 1,
+  "measuring punctuation separately never creates punctuation-only lines");
 const math = runs("a$x$**b**");
 assert.equal(math.at(-1)?.text, "b");
 assert.equal(math.at(-1)?.style.weight, 700);

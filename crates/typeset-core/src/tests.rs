@@ -12,9 +12,9 @@ const ASCENT: f32 = EM * 0.8;
 const DESCENT: f32 = EM * 0.2;
 
 /// Measure tokens the way a real host would, but deterministically.
-/// Returns [width, height, depth, break penalty] per token.
+/// Returns [width, height, depth, break penalty, hyphen width, glyph width] per token.
 fn measure(text: &str, tokens: &[Token]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(tokens.len() * 4);
+    let mut out = Vec::with_capacity(tokens.len() * 6);
     for t in tokens {
         let s = &text[t.start as usize..t.end as usize];
         let w = match t.class {
@@ -25,7 +25,7 @@ fn measure(text: &str, tokens: &[Token]) -> Vec<f32> {
             CharClass::Space => EM / 3.0,
             _ => s.chars().count() as f32 * EM * 0.5,
         };
-        out.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN]);
+        out.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN, char_width('-'), w]);
     }
     out
 }
@@ -73,6 +73,59 @@ fn tokenizes_latin_words_whole_and_cjk_per_char() {
         .map(|t| &text[t.start as usize..t.end as usize])
         .collect();
     assert_eq!(got, vec!["hello", " ", "世", "界", " ", "ok"]);
+}
+
+#[test]
+fn western_punctuation_is_measured_without_inventing_breaks() {
+    for text in ["\"Hello.\"", "“Hello,”", "don't", "re-do"] {
+        let cfg = Config { hyphenate: false, ..test_config() };
+        let para = build(text, cfg);
+        assert!(para.atoms.iter().any(|a| a.class == CharClass::PunctWestern));
+        assert!(para.items[..para.items.len() - 3].iter().all(|it| it.kind == Kind::Box),
+            "punctuation measurement must not create a break inside {text:?}");
+        assert_eq!(lines_of(text, EM, cfg), vec![text]);
+    }
+    let text = "\"Hello.";
+    let cfg = Config { hyphenate: false, ..test_config() };
+    let tokens = tokenize(text, cfg.punct_style, false);
+    let parts: Vec<_> = tokens.iter().map(|t| &text[t.start as usize..t.end as usize]).collect();
+    assert_eq!(parts, vec!["\"", "Hello", "."]);
+    let mut metrics = measure(text, &tokens);
+    // A kerned period advances by 2px in context but its own glyph is 4px.
+    metrics[2 * 6] = 2.0;
+    metrics[2 * 6 + 5] = 4.0;
+    let para = prepare(text, &tokens, &metrics, EM / 3.0, cfg);
+    assert_eq!(para.atoms[0].protrude_left, 4.0, "half the quote, not half the word");
+    assert_eq!(para.atoms[1].protrude_left, 0.0);
+    assert!((para.atoms[2].protrude_right - 2.8).abs() < 0.001,
+        "right protrusion uses the period's own advance");
+}
+
+#[test]
+fn discretionary_hyphens_use_host_metrics_and_the_drawn_scale() {
+    let text = "a extraordinary";
+    let cfg = Config { max_expand: 0.02, ..test_config() };
+    let tokens = tokenize(text, cfg.punct_style, true);
+    let mut metrics = measure(text, &tokens);
+    for (i, _) in tokens.iter().enumerate() {
+        metrics[i * 6 + 4] = 3.0 + i as f32;
+    }
+    let para = prepare(text, &tokens, &metrics, EM / 3.0, cfg);
+    for (i, token) in tokens.iter().enumerate().filter(|(_, t)| t.hyphen_after) {
+        let position = para.items.iter().position(|it| it.kind == Kind::Box
+            && para.atoms[it.atom as usize].end == token.end).unwrap() + 1;
+        assert!(para.items[position].flagged);
+        assert_eq!(para.items[position].width, metrics[i * 6 + 4]);
+        let lines = layout_lines(&para, &[crate::linebreak::Breakpoint {
+            position, start: 0, ratio: 1.0, hyphenated: true,
+        }]);
+        let line = &lines[0];
+        let hyphen = line.runs.last().unwrap();
+        assert_eq!(hyphen.start, u32::MAX);
+        assert!(hyphen.scale_x > 1.0);
+        assert!((line.width - hyphen.x - metrics[i * 6 + 4] * hyphen.scale_x).abs() < 0.0001,
+            "the inserted glyph's drawn width must equal its reserved width");
+    }
 }
 
 #[test]
@@ -416,7 +469,7 @@ fn font_expansion_scales_glyphs_instead_of_spaces() {
 /// Per-character widths that differ sharply, so that any scheme which
 /// apportions a word's width evenly across its parts is exposed.
 fn variable_measure(text: &str, tokens: &[Token]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(tokens.len() * 4);
+    let mut out = Vec::with_capacity(tokens.len() * 6);
     for t in tokens {
         let s = &text[t.start as usize..t.end as usize];
         let w = match t.class {
@@ -427,7 +480,7 @@ fn variable_measure(text: &str, tokens: &[Token]) -> Vec<f32> {
             CharClass::Space => EM / 3.0,
             _ => s.chars().map(char_width).sum(),
         };
-        out.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN]);
+        out.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN, char_width('-'), w]);
     }
     out
 }
@@ -552,7 +605,7 @@ fn a_space_uses_its_own_measured_width() {
     let tokens = tokenize(text, cfg.punct_style, false);
     let mut metrics = measure(text, &tokens);
     let space = tokens.iter().position(|token| token.class == CharClass::Space).unwrap();
-    metrics[space * 4] = 9.0;
+    metrics[space * 6] = 9.0;
     let para = prepare(text, &tokens, &metrics, 5.0, cfg);
     let glue = para.items.iter().find(|item| item.kind == Kind::Glue && item.width > 0.0).unwrap();
     assert_eq!(glue.width, 9.0);
@@ -603,7 +656,7 @@ fn build_with_tall_token(
     cfg: Config,
 ) -> Vec<Line> {
     let tokens = tokenize(text, cfg.punct_style, cfg.hyphenate);
-    let mut metrics = Vec::with_capacity(tokens.len() * 4);
+    let mut metrics = Vec::with_capacity(tokens.len() * 6);
     for t in &tokens {
         let s = &text[t.start as usize..t.end as usize];
         let w = match t.class {
@@ -615,9 +668,9 @@ fn build_with_tall_token(
             _ => s.chars().count() as f32 * EM * 0.5,
         };
         if s == tall {
-            metrics.extend_from_slice(&[w, height, depth, f32::NAN]);
+            metrics.extend_from_slice(&[w, height, depth, f32::NAN, char_width('-'), w]);
         } else {
-            metrics.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN]);
+            metrics.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN, char_width('-'), w]);
         }
     }
     let para = prepare(text, &tokens, &metrics, EM / 3.0, cfg);
@@ -822,14 +875,14 @@ fn build_split_formula(
     text.push_str(trail);
 
     let tokens = tokenize(&text, cfg.punct_style, cfg.hyphenate);
-    let mut metrics = Vec::with_capacity(tokens.len() * 4);
+    let mut metrics = Vec::with_capacity(tokens.len() * 6);
     let mut piece = 0usize;
     for t in &tokens {
         let s = &text[t.start as usize..t.end as usize];
         if s == "\u{FFFC}" {
             let (w, penalty) = pieces[piece];
             piece += 1;
-            metrics.extend_from_slice(&[w, ASCENT, DESCENT, penalty.unwrap_or(f32::NAN)]);
+            metrics.extend_from_slice(&[w, ASCENT, DESCENT, penalty.unwrap_or(f32::NAN), char_width('-'), w]);
         } else {
             let w = match t.class {
                 CharClass::Cjk
@@ -839,7 +892,7 @@ fn build_split_formula(
                 CharClass::Space => EM / 3.0,
                 _ => s.chars().count() as f32 * EM * 0.5,
             };
-            metrics.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN]);
+            metrics.extend_from_slice(&[w, ASCENT, DESCENT, f32::NAN, char_width('-'), w]);
         }
     }
     let para = prepare(&text, &tokens, &metrics, EM / 3.0, cfg);

@@ -26,6 +26,7 @@ fn class_code(c: CharClass) -> u32 {
         CharClass::Other => 6,
         CharClass::Object => 7,
         CharClass::Break => 8,
+        CharClass::PunctWestern => 9,
     }
 }
 
@@ -103,10 +104,10 @@ impl Engine {
 
     /// Step two: hand back the measurements and build the horizontal list.
     ///
-    /// `metrics` is four floats per token — advance, height above the
-    /// baseline, depth below it, and an optional break penalty. The vertical
-    /// pair is what lets a line grow to fit something taller than the
-    /// surrounding text.
+    /// `metrics` is six floats per token — contextual advance, height above
+    /// the baseline, depth below it, an optional break penalty, the measured
+    /// hyphen width in that token's font, and its standalone glyph advance.
+    /// The last is used for punctuation protrusion independently of kerning.
     pub fn prepare(&mut self, metrics: &[f32], space_width: f32) {
         self.para =
             Some(prepare(&self.text, &self.tokens, metrics, space_width, self.config));

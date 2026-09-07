@@ -419,6 +419,10 @@ export interface Numbering {
 /** Token class codes, mirroring `CharClass` in the Rust core. */
 const CLASS_LETTER = 4;
 const CLASS_OBJECT = 7;
+const CLASS_WESTERN_PUNCT = 9;
+const METRIC_STRIDE = 6;
+const isShapedText = (tokenClass: number) =>
+  tokenClass === CLASS_LETTER || tokenClass === CLASS_WESTERN_PUNCT;
 
 /** MathJax sizes its SVG in ex, and its fonts put the x-height at this many
  *  of the thousand units per em. Used only as a fallback when a formula is so
@@ -428,7 +432,7 @@ const MATHJAX_EX_UNITS = 442;
 /** Characters the engine positions one at a time: CJK ideographs, kana, and
  *  the full-width punctuation whose empty half can be squeezed away. */
 const INDIVIDUALLY_PLACED =
-  /[\u2018\u2019\u201c\u201d\u2000-\u206f\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+  /[\s\ufffc\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef\u{20000}-\u{2a6df}\u{2a700}-\u{2ebef}\u{30000}-\u{323af}]/u;
 
 /** True for a fragment that is safe to draw joined to its neighbour. */
 export function isLatinWordPiece(text: string): boolean {
@@ -1091,17 +1095,17 @@ export class Typesetter {
 
   /**
    * Rejoin runs that are contiguous in the source, share a style and sit
-   * flush against one another — the pieces of a word that was offered a
-   * hyphenation point but not broken at it.
+   * flush against one another — word pieces split for hyphenation or Western
+   * punctuation measured separately for optical margins.
    *
    * Drawing them as one `fillText` restores the kerning across the join.
    *
-   * Restricted to Latin script, because that is the only thing coalescing is
-   * for. A CJK glyph is positioned individually — squeezed punctuation is
-   * shifted inside its own em box — and merging those into one draw call
+   * Restricted to Western shaping runs. A CJK glyph is positioned
+   * individually — squeezed punctuation is shifted inside its own em box —
+   * and merging those into one draw call
    * would hand their positions back to the platform and undo the adjustment.
    * The flush-position check below would catch most such cases, but "most" is
-   * not worth relying on when "only ever join letters" is simpler and exact.
+   * not worth relying on when the shaping boundary is known.
    */
   private coalesce(runs: LaidRun[]): LaidRun[] {
     if (runs.length < 2) return runs;
@@ -1380,9 +1384,9 @@ export class Typesetter {
     const text = rendered.text;
     const tokens = engine.tokenize(text, spanByteBoundaries(text, rendered.spans));
     const count = tokens.length / 3;
-    // Four floats per token: advance, height, depth, and the penalty for
-    // breaking after it — the last is how a split formula's pieces are joined.
-    const metrics = new Float32Array(count * 4);
+    // Contextual advance, height, depth, break penalty, measured hyphen width,
+    // and standalone glyph advance (optical margins must not use word width).
+    const metrics = new Float32Array(count * METRIC_STRIDE);
 
     // Resolve which span a byte offset falls in, so bold and code runs are
     // measured with the face they will be drawn in.
@@ -1401,17 +1405,16 @@ export class Typesetter {
       return spanStyles[0] ?? fallbackStyle;
     };
 
-    // Measure. Pieces of one hyphenated word arrive as separate tokens that
-    // touch in the source; those are measured as differences between prefixes
-    // of the whole word, so the kerning between them is counted exactly once
-    // and the pieces sum to the width the word has when it is not broken.
+    // Measure word pieces and adjacent Western punctuation as differences
+    // between prefixes of one shaping run. Their advances sum to the drawn
+    // text, preserving kerning even though punctuation has its own token.
     for (let i = 0, t = 0; i < count; ) {
       let n = 1;
       const st = styleAt(tokens[t]);
-      if (tokens[t + 2] === CLASS_LETTER) {
+      if (isShapedText(tokens[t + 2])) {
         while (
           i + n < count &&
-          tokens[t + n * 3 + 2] === CLASS_LETTER &&
+          isShapedText(tokens[t + n * 3 + 2]) &&
           tokens[t + n * 3] === tokens[t + (n - 1) * 3 + 1] &&
           styleAt(tokens[t + n * 3]).key === st.key &&
           styleAt(tokens[t + n * 3]).id === st.id
@@ -1426,10 +1429,10 @@ export class Typesetter {
       // size, and it brings a height and a depth that the line must respect.
       if (tokens[t + 2] === CLASS_OBJECT) {
         const piece = pieces.get(toChar(tokens[t]));
-        metrics[i * 4] = piece?.width ?? 0;
-        metrics[i * 4 + 1] = Math.max(piece?.height ?? 0, v.ascent * 0.2);
-        metrics[i * 4 + 2] = piece?.depth ?? 0;
-        metrics[i * 4 + 3] = piece?.penaltyAfter ?? NaN;
+        metrics[i * METRIC_STRIDE] = piece?.width ?? 0;
+        metrics[i * METRIC_STRIDE + 1] = Math.max(piece?.height ?? 0, v.ascent * 0.2);
+        metrics[i * METRIC_STRIDE + 2] = piece?.depth ?? 0;
+        metrics[i * METRIC_STRIDE + 3] = piece?.penaltyAfter ?? NaN;
         i += 1;
         t += 3;
         continue;
@@ -1437,21 +1440,25 @@ export class Typesetter {
 
       if (n === 1) {
         const slice = text.slice(toChar(tokens[t]), toChar(tokens[t + 1]));
-        metrics[i * 4] = this.measurer.width(slice, st.style, st.key);
+        metrics[i * METRIC_STRIDE] = this.measurer.width(slice, st.style, st.key);
       } else {
         const from = toChar(tokens[t]);
         let previous = 0;
         for (let k = 0; k < n; k++) {
           const upto = toChar(tokens[t + k * 3 + 1]);
           const cumulative = this.measurer.width(text.slice(from, upto), st.style, st.key);
-          metrics[(i + k) * 4] = cumulative - previous;
+          metrics[(i + k) * METRIC_STRIDE] = cumulative - previous;
           previous = cumulative;
         }
       }
       for (let k = 0; k < n; k++) {
-        metrics[(i + k) * 4 + 1] = v.ascent;
-        metrics[(i + k) * 4 + 2] = v.descent;
-        metrics[(i + k) * 4 + 3] = NaN;
+        metrics[(i + k) * METRIC_STRIDE + 1] = v.ascent;
+        metrics[(i + k) * METRIC_STRIDE + 2] = v.descent;
+        metrics[(i + k) * METRIC_STRIDE + 3] = NaN;
+        metrics[(i + k) * METRIC_STRIDE + 4] = this.measurer.width("-", st.style, st.key);
+        metrics[(i + k) * METRIC_STRIDE + 5] = tokens[t + k * 3 + 2] === CLASS_WESTERN_PUNCT
+          ? this.measurer.width(text.slice(toChar(tokens[t + k * 3]), toChar(tokens[t + k * 3 + 1])), st.style, st.key)
+          : metrics[(i + k) * METRIC_STRIDE];
       }
       i += n;
       t += n * 3;

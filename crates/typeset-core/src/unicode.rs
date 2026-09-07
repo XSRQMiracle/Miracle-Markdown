@@ -32,6 +32,9 @@ pub enum CharClass {
     PunctCenter,
     /// Latin/Greek/Cyrillic letter or digit.
     Letter,
+    /// Western punctuation: measured separately for optical margins, but
+    /// shaped together with adjacent word pieces and not a new breakpoint.
+    PunctWestern,
     /// Space.
     Space,
     /// U+FFFC OBJECT REPLACEMENT CHARACTER: something the text stream cannot
@@ -151,6 +154,11 @@ pub fn classify(c: char, style: PunctStyle, full_width: bool) -> CharClass {
     }
     if c.is_alphanumeric() {
         return CharClass::Letter;
+    }
+    if c.is_ascii_punctuation()
+        || matches!(c, '\u{2010}'..='\u{2027}' | '\u{2030}'..='\u{205E}')
+    {
+        return CharClass::PunctWestern;
     }
     CharClass::Other
 }
