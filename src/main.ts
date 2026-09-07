@@ -86,14 +86,14 @@ async function main() {
     button.addEventListener("click", () => {
       t.set(editor, !t.get(editor));
       sync();
-      // An image's size is only known once it has decoded, and the box the
-  // typesetter reserved was the alt text's. Re-typeset when that changes.
-  onImageSettled(() => editor.invalidateMath());
-
-  editor.focus();
+      editor.focus();
     });
     toggles.appendChild(button);
   }
+
+  // Decoding can change an image's reserved width and height. Register once
+  // at startup so cached placeholder layouts are invalidated immediately.
+  onImageSettled(() => editor.invalidateMath());
 
   let sessionReady = false;
   const syncSession = () => {

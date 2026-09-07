@@ -47,12 +47,18 @@ export class Renderer {
 
   resize(cssWidth: number, cssHeight: number): void {
     this.dpr = window.devicePixelRatio || 1;
-    this.canvas.width = Math.round(cssWidth * this.dpr);
-    this.canvas.height = Math.round(cssHeight * this.dpr);
-    this.canvas.style.width = `${cssWidth}px`;
-    this.canvas.style.height = `${cssHeight}px`;
-    this.currentFont = "";
-    this.currentFill = "";
+    const width = Math.round(cssWidth * this.dpr);
+    const height = Math.round(cssHeight * this.dpr);
+    // Setting either dimension reallocates and clears the backing store and
+    // resets all context state, even when the assigned value is unchanged.
+    if (this.canvas.width !== width || this.canvas.height !== height) {
+      if (this.canvas.width !== width) this.canvas.width = width;
+      if (this.canvas.height !== height) this.canvas.height = height;
+      this.currentFont = "";
+      this.currentFill = "";
+    }
+    if (this.canvas.style.width !== `${cssWidth}px`) this.canvas.style.width = `${cssWidth}px`;
+    if (this.canvas.style.height !== `${cssHeight}px`) this.canvas.style.height = `${cssHeight}px`;
   }
 
   private setFont(font: string): void {
@@ -161,6 +167,10 @@ export class Renderer {
     }
 
     ctx.restore();
+    // The frame's restore also restores font/fill, whereas the memoized
+    // values describe the last run we painted. Start the next frame fresh.
+    this.currentFont = "";
+    this.currentFill = "";
   }
 
   /**

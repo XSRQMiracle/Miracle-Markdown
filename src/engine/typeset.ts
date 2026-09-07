@@ -277,9 +277,12 @@ function labelsIn(latex: string): string[] {
   return [...latex.matchAll(new RegExp(LABEL_SOURCE, "g"))].map((m) => m[1].trim());
 }
 
-/** Whether a block might contain a citation worth re-resolving. */
-function citesAnything(block: Block): boolean {
-  return block.source.includes("\\ref") || block.source.includes("\\eqref");
+/** Whether this block depends on document-wide equation/footnote numbering. */
+function usesNumbering(block: Block): boolean {
+  // Detect commands, not their raw argument text: stripping quote markers
+  // can change a multiline argument before the formula resolves its label.
+  return block.type === "footnote" || block.source.includes("[^") ||
+    block.source.includes("\\ref") || block.source.includes("\\eqref");
 }
 
 /**
@@ -439,6 +442,18 @@ export function isLatinWordPiece(text: string): boolean {
   return text.length > 0 && !INDIVIDUALLY_PLACED.test(text);
 }
 
+/** First span whose end follows this character; spans are ordered/disjoint. */
+function spanIndexAt(spans: readonly Span[], position: number): number {
+  let lo = 0;
+  let hi = spans.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (spans[mid].end <= position) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 /**
  * UTF-8 byte boundaries at which token measurement or paint style changes.
  *
@@ -545,6 +560,45 @@ function spaceAbove(block: Block, theme: Theme, previous: Block | null): number 
   }
 }
 
+/** Build cached geometry in source coordinates local to its own block. */
+function localBlock(block: Block): Block {
+  return {
+    ...block,
+    start: 0,
+    end: block.end - block.start,
+    rows: block.rows.map((row) => row.map((cell) => ({
+      ...cell, start: cell.start - block.start, end: cell.end - block.start,
+    }))),
+  };
+}
+
+/** Every occurrence owns its placement and source maps, even for equal text. */
+function placeCachedBlock(cached: LaidBlock, block: Block): LaidBlock {
+  const offset = block.start;
+  return {
+    ...cached,
+    block,
+    y: 0,
+    rendered: {
+      ...cached.rendered,
+      spans: cached.rendered.spans.map((span) => ({ ...span })),
+      map: cached.rendered.map.map((position) => position + offset),
+    },
+    lines: cached.lines.map((line) => ({
+      ...line,
+      docStart: line.docStart + offset,
+      docEnd: line.docEnd + offset,
+      runs: line.runs.map((run) => ({
+        ...run, docStart: run.docStart + offset, docEnd: run.docEnd + offset,
+      })),
+    })),
+    table: cached.table && {
+      ...cached.table,
+      x: [...cached.table.x], widths: [...cached.table.widths], rowStarts: [...cached.table.rowStarts],
+    },
+  };
+}
+
 export class Typesetter {
   private measurer = new Measurer();
   private cache = new Map<string, LaidBlock>();
@@ -609,6 +663,7 @@ export class Typesetter {
     const focusedBlock = blockIndexAtPosition(parsed, focusedPosition);
     const numbering = numberEquations(parsed, this.options.numbering);
     const out: LaidBlock[] = [];
+    const usedKeys = new Set<string>();
     let y = 0;
     for (let i = 0; i < parsed.length; i++) {
       const b = parsed[i];
@@ -619,10 +674,18 @@ export class Typesetter {
         out.at(-1)?.block ?? null,
         numbering.tags.get(i) ?? null,
         numbering,
+        usedKeys,
       );
       laid.y = y + laid.spaceBefore;
       y = laid.y + laid.height - laid.spaceBefore;
       out.push(laid);
+    }
+    // Keep the current document's working set even when it exceeds the
+    // history budget. Clearing mid-layout would evict its beginning and
+    // cause the entire next layout of a long document to miss again.
+    for (const key of this.cache.keys()) {
+      if (this.cache.size <= 4000) break;
+      if (!usedKeys.has(key)) this.cache.delete(key);
     }
     return { blocks: out, height: y };
   }
@@ -634,21 +697,25 @@ export class Typesetter {
     previous: Block | null,
     tag: string | null,
     numbering: Numbering,
+    usedKeys: Set<string>,
   ): LaidBlock {
-    // A block that cites an equation has to be re-laid-out when that
-    // equation's number moves, and only then; one that cites nothing is
-    // untouched by an edit elsewhere in the document.
-    const cites = citesAnything(block) ? numbering.version : "";
-    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${previous?.type ?? ""}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${cites}|${block.source}`;
-    const hit = this.cache.get(key);
-    if (hit) return hit;
-
-    const laid = this.buildBlock(block, width, raw, previous, tag, numbering);
-    // A cache that grows without bound would outlive its usefulness on a long
-    // document; the working set is the visible screen plus a little.
-    if (this.cache.size > 4000) this.cache.clear();
-    this.cache.set(key, laid);
-    return laid;
+    // Absolute offsets and document y never change a block's typography.
+    // Derived list markers and resolved references do, even when the source
+    // is identical. JSON framing prevents separators in source/labels from
+    // colliding, and preserves the exact available width.
+    const key = JSON.stringify([
+      this.version, width, raw, previous?.type ?? null,
+      block.type, block.level, block.ordered, block.marker, block.task,
+      block.lang, block.math, block.align, block.label, block.source,
+      raw ? null : tag, !raw && usesNumbering(block) ? numbering.version : null,
+    ]);
+    usedKeys.add(key);
+    let laid = this.cache.get(key);
+    if (!laid) {
+      laid = this.buildBlock(localBlock(block), width, raw, previous, tag, numbering);
+      this.cache.set(key, laid);
+    }
+    return placeCachedBlock(laid, block);
   }
 
   private buildBlock(
@@ -1174,7 +1241,7 @@ export class Typesetter {
         map.push(rendered.map[i]);
         continue;
       }
-      const span = rendered.spans.find((s) => i >= s.start && i < s.end);
+      const span = rendered.spans[spanIndexAt(rendered.spans, i)];
       const built: ObjectPiece[] = span?.kind === "image"
         ? [this.buildImagePiece(span, style, measure)]
         : span?.kind === "note"
@@ -1206,9 +1273,8 @@ export class Typesetter {
     key: string,
     numbering: Numbering,
   ): MathPiece[] {
-    const span = rendered.spans.find(
-      (s) => s.kind === "math" && charIndex >= s.start && charIndex < s.end,
-    );
+    const found = rendered.spans[spanIndexAt(rendered.spans, charIndex)];
+    const span = found?.kind === "math" ? found : undefined;
     // References are resolved before the cache key is built, so a formula
     // whose citation now points at a different number is a different entry.
     const latex = resolveLatex(span?.math ?? "", numbering.labels);
@@ -1399,9 +1465,10 @@ export class Typesetter {
     const fallbackStyle = { span: null, id: -1, ...base };
     const styleAt = (byteOffset: number) => {
       const ch = toChar(byteOffset);
-      for (const s of spanStyles) {
-        if (ch >= s.span.start && ch < s.span.end) return s;
-      }
+      // Spans are disjoint and ordered. A full scan per token would make a
+      // paragraph with many Markdown styles quadratic again after parsing.
+      const found = spanStyles[spanIndexAt(rendered.spans, ch)];
+      if (found && ch >= found.span.start && ch < found.span.end) return found;
       return spanStyles[0] ?? fallbackStyle;
     };
 

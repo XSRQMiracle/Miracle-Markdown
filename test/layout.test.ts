@@ -6,6 +6,8 @@ import { initSync } from "../crates/typeset-wasm/pkg/typeset_wasm.js";
 import { DEFAULT_OPTIONS, DEFAULT_THEME, initEngine, Typesetter } from "../src/engine/typeset.js";
 import { Editor } from "../src/editor/editor.js";
 import { EMPTY_GEOMETRY } from "../src/engine/math.js";
+import { Renderer } from "../src/render/canvas.js";
+import { cssFont } from "../src/engine/measure.js";
 
 Object.defineProperty(globalThis, "document", {
   configurable: true,
@@ -167,28 +169,28 @@ for (let position = 0; position <= longSource.length; position++) {
 const visualLines = wrappedEditor.blocks[0].lines;
 for (let i = 1; i < visualLines.length; i++) {
   wrappedEditor.moveVertical(1, false);
-  assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i],
+  assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i],
     "ArrowDown reaches the following visual line, including shared source offsets");
 }
 for (let i = visualLines.length - 2; i >= 0; i--) {
   wrappedEditor.moveVertical(-1, false);
-  assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i], "ArrowUp returns through every visual line");
+  assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i], "ArrowUp returns through every visual line");
 }
 const firstLine = visualLines[0];
 const endHit = wrappedEditor.positionAt(48 + firstLine.width + 1, 56 + firstLine.baseline - 5);
 wrappedEditor.moveTo(endHit.offset, false, endHit.affinity);
-assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, firstLine, "clicking the wrapped line end stays on that line");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, firstLine, "clicking the wrapped line end stays on that line");
 const nextLine = visualLines[1];
 const startHit = wrappedEditor.positionAt(48, 56 + nextLine.baseline - 5);
 wrappedEditor.moveTo(startHit.offset, false, startHit.affinity);
-assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "clicking the shared offset on the next line stays there");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "clicking the shared offset on the next line stays there");
 const key = (name: string) => wrappedEditor.onKeyDown({ key: name, preventDefault() {} });
 key("End");
 assert.equal(wrappedEditor.selEnd, nextLine.docEnd);
-assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "End uses the upstream side of a wrap");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "End uses the upstream side of a wrap");
 key("Home");
 assert.equal(wrappedEditor.selEnd, nextLine.docStart);
-assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "Home uses the downstream side of a wrap");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "Home uses the downstream side of a wrap");
 wrappedEditor.selStart = 0;
 wrappedEditor.selEnd = longSource.length;
 assert.equal(wrappedEditor.selectionRects().length, visualLines.length, "selection covers every wrapped source line");
@@ -376,5 +378,133 @@ console.log("ok   tables break each cell in its own column and keep their source
     "a line carrying a mark is no shorter than one without");
 }
 console.log("ok   footnotes number by first reference and sit in their own margin");
+
+// Cache geometry is block-local: prefix edits may move a hundred source
+// ranges, but only the changed block needs parsing, measurement and breaking.
+const cached = new Typesetter({ ...DEFAULT_THEME }, {
+  ...DEFAULT_OPTIONS, inline: { ...DEFAULT_OPTIONS.inline }, justify: false,
+});
+let builds = 0;
+const buildBlock = (cached as any).buildBlock;
+(cached as any).buildBlock = function (...args: unknown[]) {
+  builds++;
+  return buildBlock.apply(this, args);
+};
+const longDoc = Array.from({ length: 20 }, (_, i) => `paragraph ${i} with **style**`).join("\n\n");
+const oldBlocks = cached.layoutDocument(longDoc, 400, -1).blocks;
+const initialBuilds = builds;
+cached.layoutDocument(longDoc, 400, -1);
+assert.equal(builds, initialBuilds, "unchanged layout builds no blocks");
+const shiftedBlocks = cached.layoutDocument("x" + longDoc, 400, -1).blocks;
+assert.equal(builds - initialBuilds, 1, "a prefix edit rebuilds only the changed paragraph");
+for (let i = 1; i < oldBlocks.length; i++) {
+  const old = oldBlocks[i];
+  const shifted = shiftedBlocks[i];
+  assert.notEqual(old, shifted, "placement belongs to an occurrence, not the cache");
+  assert.equal(shifted.block.start, old.block.start + 1);
+  assert.deepEqual([...shifted.rendered.map], [...old.rendered.map].map((p) => p + 1));
+  assert.deepEqual(shifted.lines.map((l) => [l.docStart, l.docEnd]),
+    old.lines.map((l) => [l.docStart + 1, l.docEnd + 1]));
+  assert.deepEqual(shifted.lines.flatMap((l) => l.runs).map((r) => [r.docStart, r.docEnd]),
+    old.lines.flatMap((l) => l.runs).map((r) => [r.docStart + 1, r.docEnd + 1]));
+}
+const duplicates = cached.layoutDocument("same\n\nsame\n\nsame", 400, -1).blocks;
+assert.notEqual(duplicates[2], duplicates[4]);
+assert.notEqual(duplicates[2].lines[0], duplicates[4].lines[0]);
+assert.notEqual(duplicates[2].lines[0].runs[0], duplicates[4].lines[0].runs[0]);
+assert.notEqual(duplicates[2].rendered.map, duplicates[4].rendered.map);
+assert.ok(duplicates[4].y > duplicates[2].y, "duplicate text keeps distinct document placement");
+duplicates[2].lines[0].runs[0].docStart = -100;
+duplicates[2].rendered.map[0] = -100;
+assert.equal(cached.layoutDocument("same\n\nsame\n\nsame", 400, -1).blocks[2].lines[0].runs[0].docStart, 6,
+  "a returned source map cannot corrupt the reusable layout");
+
+// Reusing a shifted layout must match a cold layout for every current block
+// shape, including table cell maps, objects, raw source, and derived markers.
+Object.defineProperty(globalThis, "window", { configurable: true, value: { devicePixelRatio: 1 } });
+Object.defineProperty(globalThis, "Image", {
+  configurable: true, value: class { addEventListener() {} },
+});
+const cacheFixtures = [
+  "lead\n\n| a | b |\n| - | - |\n| 中文 | **wide** |",
+  "lead\n\n```\ncode\n```\n\n> a\n> b\n\n---",
+  "lead\n\n$$\nx\\label{x}\n$$\n\nsee $\\eqref{x}$",
+  "lead\n\n![fallback](https://example.test/picture.png) text",
+  "lead\n\n- [x] done\n- [ ] pending\n\n## heading",
+];
+for (const doc of cacheFixtures) {
+  for (const raw of [false, true]) {
+    const hot = new Typesetter({ ...DEFAULT_THEME }, {
+      ...DEFAULT_OPTIONS, inline: { ...DEFAULT_OPTIONS.inline }, justify: false,
+    });
+    hot.layoutDocument(doc, 240, raw ? doc.length : -1);
+    const shifted = "x" + doc;
+    const warmResult = hot.layoutDocument(shifted, 240, raw ? shifted.length : -1);
+    const cold = new Typesetter({ ...DEFAULT_THEME }, {
+      ...DEFAULT_OPTIONS, inline: { ...DEFAULT_OPTIONS.inline }, justify: false,
+    }).layoutDocument(shifted, 240, raw ? shifted.length : -1);
+    assert.deepEqual(warmResult, cold, "all shifted source maps match a fresh layout");
+  }
+}
+const listBefore = cached.layoutDocument("1. alpha\n1. beta\n1. gamma", 400, -1);
+const listAfter = cached.layoutDocument("5. alpha\n1. beta\n1. gamma", 400, -1);
+assert.deepEqual(listBefore.blocks.map((b) => b.marker), ["1.", "2.", "3."]);
+assert.deepEqual(listAfter.blocks.map((b) => b.marker), ["5.", "6.", "7."],
+  "derived list counters participate in cache identity");
+const notesBefore = "lead[^a] then[^b]\n\nref[^a]\n\n[^a]: alpha\n\n[^b]: beta";
+cached.layoutDocument(notesBefore, 400, -1);
+const notesAfter = cached.layoutDocument(notesBefore.replace("lead[^a] then[^b]", "lead[^b] then[^a]"), 400, -1);
+assert.equal(notesAfter.blocks.find((b) => b.block.source === "ref[^a]")!.lines[0].runs.find((r) => r.note)!.note!.text, "2");
+assert.equal(notesAfter.blocks.find((b) => b.block.label === "a")!.note!.text, "2",
+  "footnote references and definition markers track reordered numbers");
+const headingWithGap = cached.layoutDocument("before\n# heading", 400, -1).blocks.at(-1)!;
+const headingWithoutGap = cached.layoutDocument("before\n\n# heading", 400, -1).blocks.at(-1)!;
+assert.ok(headingWithGap.spaceBefore > headingWithoutGap.spaceBefore,
+  "the previous block's type remains a layout dependency");
+console.log("ok   block-local cache reuses shifted geometry without aliasing source maps or stale context");
+
+// Canvas dimension setters reset the entire context, while restore restores
+// font/fill. A context double with those semantics exposes stale memoization
+// that resetting the backing store on every frame previously concealed.
+const paints: Array<[string, string, string]> = [];
+const states: Array<[string, string]> = [];
+const ctx = {
+  font: "10px default", fillStyle: "#000000", textBaseline: "alphabetic",
+  save() { states.push([this.font, this.fillStyle]); },
+  restore() { [this.font, this.fillStyle] = states.pop()!; },
+  scale() {}, translate() {}, fillRect() {},
+  fillText(text: string) { paints.push([text, this.font, this.fillStyle]); },
+};
+let backingWidth = 0;
+let backingHeight = 0;
+let allocations = 0;
+const canvas = {
+  style: { width: "", height: "" },
+  getContext: () => ctx,
+  get width() { return backingWidth; },
+  set width(value: number) { backingWidth = value; allocations++; ctx.font = "10px default"; ctx.fillStyle = "#000000"; },
+  get height() { return backingHeight; },
+  set height(value: number) { backingHeight = value; allocations++; ctx.font = "10px default"; ctx.fillStyle = "#000000"; },
+};
+const renderer = new Renderer(canvas as unknown as HTMLCanvasElement);
+const painted = layout("hello");
+const view = { scrollTop: 0, width: 400, height: 200, originX: 0, originY: 0 };
+renderer.resize(400, 200);
+assert.equal(allocations, 2);
+for (let frame = 0; frame < 3; frame++) {
+  renderer.resize(400, 200);
+  renderer.draw([painted], view, DEFAULT_THEME, [], null, false, false);
+}
+assert.equal(allocations, 2, "unchanged frames do not reallocate or clear backing storage");
+assert.deepEqual(paints, Array.from({ length: 3 }, () =>
+  ["hello", cssFont(painted.lines[0].runs[0].style), DEFAULT_THEME.color]),
+  "font and fill stay correct across save/restore on consecutive frames");
+renderer.resize(401, 200);
+assert.equal(allocations, 3, "only the changed dimension is assigned");
+(window as unknown as { devicePixelRatio: number }).devicePixelRatio = 2;
+renderer.resize(401, 200);
+assert.deepEqual([canvas.width, canvas.height], [802, 400]);
+assert.equal(allocations, 5, "a DPR change resizes the physical backing store");
+console.log("ok   renderer retains backing storage and resets restored paint-state caches");
 
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");
