@@ -1,9 +1,10 @@
-// Word and block selection.
+// Selection and word-wise movement.
 //
 // The interesting half is 中文: a double-click has to find a boundary that no
 // pattern over code points can see, which is why this goes through
-// Intl.Segmenter. The rest pins down the gesture — what one, two and three
-// clicks select, and that dragging afterwards keeps that granularity.
+// Intl.Segmenter. The rest pins down the gestures — what one, two and three
+// clicks select, that dragging afterwards keeps that granularity, and which
+// modifier moves by word on which platform.
 import assert from "node:assert/strict";
 import { Editor } from "../src/editor/editor.js";
 import { wordAt, wordBoundary } from "../src/editor/words.js";
@@ -48,6 +49,9 @@ assert.equal(stop("word   \n\n", 4, 1), 9, "trailing whitespace is crossed to th
 // --- the click gesture ----------------------------------------------------
 // positionAt is stubbed so a click's clientX *is* the source offset: this
 // exercises the gesture, not the hit testing, which layout.test.ts covers.
+const platform = (value: string) =>
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { platform: value } });
+
 function gestures(text: string, ranges: Array<[number, number]>) {
   const input = Object.assign(new EventTarget(), { value: "", focus() {}, blur() {} });
   const canvas = new EventTarget();
@@ -65,6 +69,8 @@ function gestures(text: string, ranges: Array<[number, number]>) {
     target.dispatchEvent(Object.assign(new Event(type), { clientX: offset, clientY: 0, ...props }));
   return {
     editor,
+    key: (name: string, mods: Record<string, boolean> = {}) =>
+      input.dispatchEvent(Object.assign(new Event("keydown"), { key: name, preventDefault() {}, ...mods })),
     click: (offset: number, detail: number, shiftKey = false) =>
       at("mousedown", canvas, offset, { detail, shiftKey }),
     drag: (offset: number) => at("mousemove", (globalThis as any).window, offset),
@@ -117,6 +123,49 @@ function gestures(text: string, ranges: Array<[number, number]>) {
   g.drag(11);
   assert.deepEqual(g.selection(), [4, 11], "and dragging with it does not snap to words");
   g.release();
+}
+
+// --- keyboard movement ----------------------------------------------------
+{
+  platform("MacIntel");
+  const g = gestures(latin, [[0, latin.length]]);
+  const caret = (offset: number) => { g.editor.selStart = g.editor.selEnd = offset; };
+
+  caret(0);
+  g.key("ArrowRight", { altKey: true });
+  assert.deepEqual(g.selection(), [3, 3], "⌥→ moves past the word ahead");
+  g.key("ArrowRight", { altKey: true });
+  assert.deepEqual(g.selection(), [9, 9], "and then past the next");
+  g.key("ArrowLeft", { altKey: true });
+  assert.deepEqual(g.selection(), [4, 4], "⌥← moves to the start of the word behind");
+  g.key("ArrowLeft", { altKey: true, shiftKey: true });
+  assert.deepEqual(g.selection(), [0, 4], "⇧⌥← extends by word");
+  g.key("ArrowRight", { altKey: true });
+  assert.deepEqual(g.selection(), [9, 9],
+    "an unextended word move leaves a selection from its leading edge");
+
+  caret(5);
+  g.key("ArrowDown", { metaKey: true });
+  assert.deepEqual(g.selection(), [19, 19], "⌘↓ goes to the end of the document");
+  g.key("ArrowUp", { metaKey: true, shiftKey: true });
+  assert.deepEqual(g.selection(), [0, 19], "⇧⌘↑ selects back to its start");
+
+  caret(5);
+  g.key("ArrowRight", { ctrlKey: true });
+  assert.deepEqual(g.selection(), [6, 6], "Ctrl is not the word modifier on a Mac keyboard");
+}
+{
+  platform("Win32");
+  const g = gestures(latin, [[0, latin.length]]);
+  g.editor.selStart = g.editor.selEnd = 0;
+  g.key("ArrowRight", { ctrlKey: true });
+  assert.deepEqual(g.selection(), [3, 3], "Ctrl→ moves by word off a Mac");
+  g.key("ArrowRight", { altKey: true });
+  assert.deepEqual(g.selection(), [4, 4], "and Alt is an ordinary step there");
+  g.key("End", { ctrlKey: true });
+  assert.deepEqual(g.selection(), [19, 19], "Ctrl+End goes to the end of the document");
+  g.key("Home", { ctrlKey: true, shiftKey: true });
+  assert.deepEqual(g.selection(), [0, 19], "and Ctrl+Shift+Home selects back to its start");
 }
 
 console.log("all passing");

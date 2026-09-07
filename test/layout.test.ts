@@ -184,13 +184,26 @@ const nextLine = visualLines[1];
 const startHit = wrappedEditor.positionAt(48, 56 + nextLine.baseline - 5);
 wrappedEditor.moveTo(startHit.offset, false, startHit.affinity);
 assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "clicking the shared offset on the next line stays there");
-const key = (name: string) => wrappedEditor.onKeyDown({ key: name, preventDefault() {} });
+const key = (name: string, mods: Record<string, boolean> = {}) =>
+  wrappedEditor.onKeyDown({ key: name, preventDefault() {}, ...mods });
 key("End");
 assert.equal(wrappedEditor.selEnd, nextLine.docEnd);
 assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "End uses the upstream side of a wrap");
 key("Home");
 assert.equal(wrappedEditor.selEnd, nextLine.docStart);
 assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "Home uses the downstream side of a wrap");
+
+// ⌘←/→ work on the visual line, so a soft wrap is a line like any other.
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: { platform: "MacIntel" } });
+key("ArrowRight", { metaKey: true });
+assert.equal(wrappedEditor.selEnd, nextLine.docEnd, "⌘→ goes to the end of the wrapped line");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "and stays on it");
+key("ArrowLeft", { metaKey: true, shiftKey: true });
+assert.deepEqual([wrappedEditor.selStart, wrappedEditor.selEnd], [nextLine.docEnd, nextLine.docStart],
+  "⇧⌘← selects back to the start of that line");
+key("ArrowLeft", { altKey: true });
+assert.ok(wrappedEditor.selEnd < nextLine.docStart && wrappedEditor.selStart === wrappedEditor.selEnd,
+  "⌥← moves out of the line by word");
 wrappedEditor.selStart = 0;
 wrappedEditor.selEnd = longSource.length;
 assert.equal(wrappedEditor.selectionRects().length, visualLines.length, "selection covers every wrapped source line");

@@ -18,7 +18,7 @@
 import { Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
 import { sourceRangeOwnsPosition, type BlockType } from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
-import { wordAt } from "./words.js";
+import { wordAt, wordBoundary } from "./words.js";
 import {
   DEFAULT_OPTIONS,
   DEFAULT_THEME,
@@ -37,6 +37,22 @@ const MIN_GUTTER = 48;
 const MIN_MEASURE = 240;
 /** Space above the first block. */
 const PAGE_TOP = 56;
+
+/**
+ * Whether the keyboard follows Apple's conventions.
+ *
+ * The two platforms disagree about which modifier does what: macOS moves by
+ * word with ⌥ and to the ends of a line or document with ⌘, while Windows and
+ * Linux move by word with Ctrl. Binding one of them everywhere would leave the
+ * other's ⌘←/Ctrl← doing nothing recognisable, so the bindings follow the host.
+ *
+ * Read per keystroke rather than cached, so a test can state which keyboard it
+ * means; the cost is a regex over a short string.
+ */
+function applePlatform(): boolean {
+  const nav = globalThis.navigator as { platform?: string; userAgent?: string } | undefined;
+  return /Mac|iPhone|iPad/.test(nav?.platform || nav?.userAgent || "");
+}
 
 interface Snapshot {
   text: string;
@@ -788,34 +804,56 @@ export class Editor {
       return;
     }
 
+    const apple = applePlatform();
+    const byWord = apple ? e.altKey : e.ctrlKey && !e.altKey;
+    const byLine = apple && e.metaKey;
+    const byDocument = apple ? e.metaKey : e.ctrlKey;
+
     switch (e.key) {
       case "ArrowLeft":
+      case "ArrowRight": {
         e.preventDefault();
         this.preferredX = null;
-        this.moveTo(lo === hi ? this.stepBack(this.selEnd) : e.shiftKey ? this.stepBack(this.selEnd) : lo, e.shiftKey);
+        const forward = e.key === "ArrowRight";
+        // An unextended move out of a selection starts from the edge it is
+        // heading towards, so ⌥→ passes the word after the selection rather
+        // than the one it already covers.
+        const from = lo !== hi && !e.shiftKey ? (forward ? hi : lo) : this.selEnd;
+        if (byLine) {
+          const bounds = this.lineBounds(from);
+          this.moveTo(forward ? bounds.end : bounds.start, e.shiftKey,
+            forward ? "upstream" : "downstream");
+        } else if (byWord) {
+          this.moveTo(wordBoundary(this.text, from, forward ? 1 : -1), e.shiftKey);
+        } else if (from !== this.selEnd) {
+          this.moveTo(from, false);
+        } else {
+          this.moveTo(forward ? this.stepForward(from) : this.stepBack(from), e.shiftKey);
+        }
         return;
-      case "ArrowRight":
-        e.preventDefault();
-        this.preferredX = null;
-        this.moveTo(lo === hi ? this.stepForward(this.selEnd) : e.shiftKey ? this.stepForward(this.selEnd) : hi, e.shiftKey);
-        return;
+      }
       case "ArrowUp":
+      case "ArrowDown": {
         e.preventDefault();
-        this.moveVertical(-1, e.shiftKey);
+        const down = e.key === "ArrowDown";
+        if (byDocument) {
+          this.preferredX = null;
+          this.moveTo(down ? this.text.length : 0, e.shiftKey);
+        } else {
+          this.moveVertical(down ? 1 : -1, e.shiftKey);
+        }
         return;
-      case "ArrowDown":
-        e.preventDefault();
-        this.moveVertical(1, e.shiftKey);
-        return;
+      }
       case "Home":
         e.preventDefault();
         this.preferredX = null;
-        this.moveTo(this.lineBounds(this.selEnd).start, e.shiftKey);
+        this.moveTo(byDocument ? 0 : this.lineBounds(this.selEnd).start, e.shiftKey);
         return;
       case "End":
         e.preventDefault();
         this.preferredX = null;
-        this.moveTo(this.lineBounds(this.selEnd).end, e.shiftKey, "upstream");
+        this.moveTo(byDocument ? this.text.length : this.lineBounds(this.selEnd).end,
+          e.shiftKey, "upstream");
         return;
       case "Backspace":
         e.preventDefault();
