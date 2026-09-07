@@ -79,6 +79,16 @@ export type SpanKind =
  */
 export const OBJECT_REPLACEMENT = "\uFFFC";
 
+/**
+ * The character standing in for a break the author asked for.
+ *
+ * Unicode defines U+2028 LINE SEPARATOR for exactly this: a line ending
+ * within a paragraph, as distinct from the paragraph ending. Carrying it in
+ * the text means the line breaker sees a forced break rather than needing a
+ * separate channel to be told about one.
+ */
+export const LINE_SEPARATOR = "\u2028";
+
 export interface Span {
   kind: SpanKind;
   /** LaTeX source, on spans of kind "math". */
@@ -830,6 +840,8 @@ export function parseInline(
   const swaps: Array<{ from: number; to: number }> = [];
   /** Source positions that are literal because a backslash escaped them. */
   const escaped = new Set<number>();
+  /** Newlines the author marked as breaks, by backslash or trailing spaces. */
+  const hardBreaks = new Set<number>();
   /** Label-local scan boundaries, including the emphasis stack they own. */
   const linkLabels: Array<{ start: number; close: number; end: number; openStart: number }> = [];
 
@@ -870,12 +882,10 @@ export function parseInline(
     }
 
     if (c === "\\" && body[i + 1] === "\n") {
-      // CommonMark gives backslash-newline forced-break semantics. The layout
-      // model cannot carry that distinction yet, so retain the existing soft
-      // break fallback explicitly instead of either showing or losing the
-      // slash accidentally. A future hard-break span/penalty can replace this
-      // branch without broadening ordinary backslash escapes again.
+      // CommonMark's other spelling of a hard break. The slash itself is not
+      // content; the newline that follows becomes the break.
       drops.push([i, i + 1]);
+      hardBreaks.add(i + 1);
       i += 2;
       continue;
     }
@@ -1028,6 +1038,24 @@ export function parseInline(
   // Code content is opaque to emphasis, so drop any emphasis that
   // strayed inside one.
   const opaque = formats.filter((f) => f.kind === "code");
+  const insideCode = (at: number) => opaque.some((o) => at >= o.from && at < o.to);
+
+  // Two or more spaces at the end of a line are CommonMark's original hard
+  // break. The spaces themselves are not content — they exist only to carry
+  // the instruction — so they are dropped along with being noted. Inside a
+  // code span they are content and mean nothing, which is why this runs after
+  // the opaque ranges are known rather than during the scan.
+  for (let k = 0; k < body.length; k++) {
+    if (body[k] !== "\n" || insideCode(k)) continue;
+    let run = k;
+    while (run > 0 && body[run - 1] === " ") run--;
+    if (k - run >= 2) {
+      drops.push([run, k]);
+      hardBreaks.add(k);
+    }
+  }
+  for (const at of [...hardBreaks]) if (insideCode(at)) hardBreaks.delete(at);
+
   const live = formats.filter(
     (f) => f.kind === "code" || !opaque.some((o) => f.from >= o.from && f.to <= o.to),
   );
@@ -1079,6 +1107,19 @@ export function parseInline(
     }
     while (d < liveDrops.length && liveDrops[d][1] <= k) d++;
     if (d < liveDrops.length && k >= liveDrops[d][0] && k < liveDrops[d][1]) continue;
+
+    if (body[k] === "\n" && hardBreaks.has(k) && text.length) {
+      // A break the author asked for holds wherever it falls, so it survives
+      // the soft-break rules entirely — including the CJK one, which exists to
+      // discard breaks the author did *not* intend.
+      text += LINE_SEPARATOR;
+      map.push(src(k));
+      active.push([]);
+      let j = k + 1;
+      while (j < body.length && (body[j] === " " || body[j] === "\t")) j++;
+      k = j - 1;
+      continue;
+    }
 
     if (body[k] === "\n") {
       // A continuation line's leading whitespace is not content; CommonMark

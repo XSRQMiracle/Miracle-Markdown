@@ -25,6 +25,7 @@ fn class_code(c: CharClass) -> u32 {
         CharClass::Space => 5,
         CharClass::Other => 6,
         CharClass::Object => 7,
+        CharClass::Break => 8,
     }
 }
 

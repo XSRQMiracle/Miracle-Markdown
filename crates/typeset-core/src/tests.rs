@@ -997,3 +997,72 @@ fn an_infinite_penalty_between_pieces_forbids_the_break() {
         "an infinite penalty must keep the pieces together, were {counts:?}"
     );
 }
+
+#[test]
+fn a_line_separator_ends_its_line_wherever_it_falls() {
+    // U+2028 is a break the author asked for, not one the optimiser chose, so
+    // it holds even where the line had room to spare.
+    let cfg = test_config();
+    let text = "alpha\u{2028}beta gamma";
+    let para = build(text, cfg);
+    let breaks = break_lines(&para, EM * 40.0);
+    let lines = layout_lines(&para, &breaks);
+    assert_eq!(lines.len(), 2, "the separator must start a new line");
+
+    let content: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            l.runs
+                .iter()
+                .filter(|r| r.start != u32::MAX)
+                .map(|r| text[r.start as usize..r.end as usize].to_string())
+                .collect()
+        })
+        .collect();
+    assert_eq!(content[0], "alpha");
+    assert_eq!(content[1], "betagamma");
+}
+
+#[test]
+fn a_line_separator_paints_nothing() {
+    let cfg = test_config();
+    let text = "a\u{2028}b";
+    let para = build(text, cfg);
+    assert!(
+        !para.atoms.iter().any(|a| a.class == CharClass::Break),
+        "a forced break carries no ink, so it contributes no box"
+    );
+    let breaks = break_lines(&para, EM * 20.0);
+    let lines = layout_lines(&para, &breaks);
+    let drawn: String = lines
+        .iter()
+        .flat_map(|l| l.runs.iter())
+        .filter(|r| r.start != u32::MAX)
+        .map(|r| text[r.start as usize..r.end as usize].to_string())
+        .collect();
+    assert_eq!(drawn, "ab", "the separator itself is never drawn");
+}
+
+#[test]
+fn a_forced_break_costs_the_optimiser_nothing() {
+    // LaTeX's `\\` is `\hfil\break`. Without the `\hfil` the short line before
+    // the break is charged its full badness, and the optimiser pays for a
+    // decision it never made — pulling text up into earlier lines to fill a
+    // line it cannot lengthen.
+    let cfg = test_config();
+    let text = "one two three\u{2028}four five six seven eight nine ten eleven twelve";
+    let para = build(text, cfg);
+    let breaks = break_lines(&para, EM * 30.0);
+    assert!(breaks.len() >= 2);
+
+    // The line ending at the forced break must be free, however short it is.
+    let forced = breaks
+        .iter()
+        .find(|b| para.items[b.position].is_forced_break())
+        .expect("a forced break among the chosen breakpoints");
+    assert!(
+        forced.ratio.abs() < 1e-3,
+        "a forced break should need no stretching, ratio was {}",
+        forced.ratio
+    );
+}

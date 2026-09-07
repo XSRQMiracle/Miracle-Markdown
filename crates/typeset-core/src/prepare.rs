@@ -218,6 +218,22 @@ pub fn prepare(
             None => continue,
         };
 
+        // A break the author wrote is not a breakpoint the optimiser may
+        // decline: an infinitely negative penalty ends the line here whatever
+        // it costs. It carries no ink, so it contributes no box.
+        if tok.class == CharClass::Break {
+            // LaTeX's `\\` is `\hfil\break`, and the `\hfil` is not
+            // decoration: without it the short line before a forced break is
+            // charged its full badness, and the optimiser pays for something
+            // it had no choice about — distorting the lines before it as it
+            // tries to fill a line it cannot lengthen. Infinite stretch makes
+            // the break free, exactly as the paragraph's own ending is.
+            items.push(Item::penalty(0.0, INFINITE_PENALTY, false));
+            items.push(Item::glue(0.0, 1.0e6, 0.0));
+            items.push(Item::penalty(0.0, crate::FORCED_BREAK, false));
+            continue;
+        }
+
         if tok.class == CharClass::Space {
             // TeX's interword glue: for a typical serif, w ± w/2 ∓ w/3.
             // Use this token's measured style: code and heading spaces need

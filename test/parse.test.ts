@@ -1,4 +1,4 @@
-import { parseBlocks, renderBlock, parseInline } from "../src/markdown/parse.js";
+import { parseBlocks, renderBlock, parseInline, LINE_SEPARATOR } from "../src/markdown/parse.js";
 
 let failures = 0;
 function eq(actual: unknown, expected: unknown, label: string) {
@@ -166,7 +166,8 @@ eq(
   eq(rendered, literal.map((c) => "\\" + c), "non-punctuation characters keep the slash");
 }
 eq(parseInline("`\\*`", 0).text, "\\*", "code span content is opaque to escapes");
-eq(parseInline("a\\\nb", 0).text, "a b", "backslash-newline keeps the legacy soft-break fallback");
+eq(parseInline("a\\\nb", 0).text, "a" + LINE_SEPARATOR + "b",
+   "backslash-newline is a hard break, and the slash itself is not content");
 
 // --- the source map --------------------------------------------------------
 {
@@ -543,6 +544,39 @@ eq(parseBlocks("no pipes here\n---").map((b) => b.type), ["paragraph", "rule"],
   }
   eq(t.source, doc, "the block covers the whole table");
 }
+
+
+// --- hard line breaks ------------------------------------------------------
+// A break the author asked for is not a breakpoint the optimiser may decline,
+// so it is carried as U+2028 rather than as the space a soft break becomes.
+const SEP = LINE_SEPARATOR;
+
+eq(parseInline("a  \nb", 0).text, "a" + SEP + "b", "two trailing spaces make a hard break");
+eq(parseInline("a   \nb", 0).text, "a" + SEP + "b", "so do more than two");
+eq(parseInline("a\\\nb", 0).text, "a" + SEP + "b", "and so does a trailing backslash");
+eq(parseInline("a \nb", 0).text, "a b", "one trailing space is still a soft break");
+eq(parseInline("a\nb", 0).text, "a b", "and so is none");
+
+// The spaces exist only to carry the instruction, so they are not content.
+eq(parseInline("a  \nb", 0).text.indexOf("  "), -1, "the trailing run is dropped");
+{
+  const body = "a  \nb";
+  const r = parseInline(body, 0);
+  eq(r.map.length, r.text.length + 1, "the source map still covers every character");
+  eq(r.map[r.text.indexOf("b")], body.indexOf("b"), "text after the break maps correctly");
+}
+
+// A hard break holds where a soft one would have been discarded.
+eq(parseInline("中文  \n继续", 0).text, "中文" + SEP + "继续",
+   "a hard break survives the CJK soft-break rule");
+eq(parseInline("中文\n继续", 0).text, "中文继续", "which still discards an unasked-for one");
+
+// Not breaks.
+eq(parseInline("`a  \nb`", 0).text.includes(SEP), false,
+   "trailing spaces inside a code span are content, not an instruction");
+eq(parseInline("a  \n`b`", 0).text.includes(SEP), true,
+   "but a break before a code span still holds");
+eq(parseInline("  \na", 0).text, "a", "a break with nothing before it is dropped");
 
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);
