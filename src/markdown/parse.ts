@@ -21,6 +21,7 @@ export type BlockType =
   | "math"
   | "frontmatter"
   | "table"
+  | "footnote"
   | "blank";
 
 export interface Block {
@@ -45,6 +46,8 @@ export interface Block {
   rows: TableCell[][];
   /** One entry per column, from the delimiter row. */
   align: ColumnAlign[];
+  /** The label of a footnote definition, or of nothing. */
+  label: string;
 }
 
 /** A table cell, carrying the document offsets its text came from. */
@@ -61,6 +64,7 @@ export type TaskState = "none" | "todo" | "done";
 
 export type SpanKind =
   | "text"
+  | "note"
   | "strong"
   | "em"
   | "code"
@@ -97,6 +101,8 @@ export interface Span {
   display?: boolean;
   /** Alternative text, on spans of kind "image". */
   alt?: string;
+  /** The label a footnote reference points at, on spans of kind "note". */
+  label?: string;
   /** Range within the block's *rendered* text. */
   start: number;
   end: number;
@@ -136,6 +142,10 @@ const UL = /^(\s*)([-*+])\s+(.*)$/;
 const TASK = /^\[([ xX])\]\s+/;
 /** A table's delimiter row: dashes per column, with optional alignment colons. */
 const DELIMITER_CELL = /^:?-+:?$/;
+/** A footnote definition: a labelled paragraph that belongs at the foot. */
+const FOOTNOTE_DEF = /^\[\^([^\]\s]+)\]:\s?/;
+/** A footnote reference within running text. */
+const FOOTNOTE_REF = /^\[\^([^\]\s]+)\]/;
 const OL = /^(\s*)(\d+)([.)])\s+(.*)$/;
 
 interface BlockMathOpen {
@@ -197,6 +207,7 @@ function interruptsParagraph(
     (next !== undefined && tableStartsAt([line, next], 0, 2) !== null) ||
     HEADING.test(line) ||
     FENCE.test(line) ||
+    FOOTNOTE_DEF.test(line) ||
     matchBlockMathOpen(line, options) !== null ||
     RULE.test(line) ||
     QUOTE.test(line) ||
@@ -428,6 +439,21 @@ counters.length = 0;
       continue;
     }
 
+    const note = FOOTNOTE_DEF.exec(line);
+    if (note) {
+      // A definition runs on like a paragraph, so an author can write more
+      // than one line without indenting a continuation.
+      let j = i + 1;
+      while (j < count && !interruptsParagraph(lines[j], options, lines[j + 1])) j++;
+      const end = blockEnd(doc, offsets, lines.length, j, start, line);
+      counters.length = 0;
+      blocks.push(
+        block("footnote", doc.slice(start, end), start, end, { label: note[1] }),
+      );
+      i = j;
+      continue;
+    }
+
     const align = tableStartsAt(lines, i, count);
     if (align) {
       const rows: TableCell[][] = [splitRow(line, start)];
@@ -600,6 +626,7 @@ function block(
     task: extra.task ?? "none",
     rows: extra.rows ?? [],
     align: extra.align ?? [],
+    label: extra.label ?? "",
   };
 }
 
@@ -634,6 +661,12 @@ export function renderBlock(
     }
   } else if (b.type === "quote") {
     return stripPerLine(b, /^\s*>\s?/, options);
+  } else if (b.type === "footnote") {
+    const m = FOOTNOTE_DEF.exec(b.source);
+    if (m) {
+      base += m[0].length;
+      body = b.source.slice(m[0].length);
+    }
   } else if (b.type === "list") {
     // UL and OL deliberately match a complete source line. Match only the
     // first one here so a lazy continuation does not prevent the list marker
@@ -773,6 +806,8 @@ interface Format {
   display?: boolean;
   /** Alternative text, on image formats. */
   alt?: string;
+  /** Footnote label, on note formats. */
+  label?: string;
 }
 
 /**
@@ -924,6 +959,22 @@ export function parseInline(
       }
       i = code.end;
       continue;
+    }
+
+    if (c === "[" && body[i + 1] === "^") {
+      const ref = FOOTNOTE_REF.exec(body.slice(i, limit));
+      if (ref) {
+        swaps.push({ from: i, to: i + ref[0].length });
+        formats.push({
+          kind: "note",
+          from: i,
+          to: i + ref[0].length,
+          href: "",
+          label: ref[1],
+        });
+        i += ref[0].length;
+        continue;
+      }
     }
 
     // An image is a link that resolves to a picture rather than to text, so
@@ -1099,7 +1150,9 @@ export function parseInline(
       map.push(src(k));
       active.push(
         live.filter(
-          (f) => f.from === swaps[w].from && (f.kind === "math" || f.kind === "image"),
+          (f) =>
+            f.from === swaps[w].from &&
+            (f.kind === "math" || f.kind === "image" || f.kind === "note"),
         ),
       );
       k = swaps[w].to - 1;
@@ -1176,6 +1229,20 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
   const link = fs.find((f) => f.kind === "link");
   const math = fs.find((f) => f.kind === "math");
   const image = fs.find((f) => f.kind === "image");
+  const note = fs.find((f) => f.kind === "note");
+  if (note) {
+    return {
+      kind: "note",
+      label: note.label ?? "",
+      start,
+      end,
+      strong: false,
+      em: false,
+      code: false,
+      strike: false,
+      href: "",
+    };
+  }
   if (image) {
     return {
       kind: "image",

@@ -117,6 +117,13 @@ export class Renderer {
 
           // A formula draws as outlines rather than text: MathJax laid it out,
           // we own where it goes. One fill call, whatever its complexity.
+          if (run.note) {
+            this.setFont(cssFont(run.note.style));
+            this.setFill(run.style.color);
+            ctx.fillText(run.note.text, x, y - run.note.raise);
+            continue;
+          }
+
           if (run.image) {
             this.drawImage(run, x, y);
             continue;
@@ -292,6 +299,16 @@ export class Renderer {
         view.width - view.originX * 2 + pad * 2,
         b.height - b.spaceBefore + pad * 1.2,
       );
+      return;
+    }
+
+    if (type === "footnote" && b.note && b.lines.length) {
+      // The number sits in the margin the definition's text was indented for,
+      // so a note reads as an aside rather than as another paragraph.
+      const line = b.lines[0];
+      this.setFont(cssFont(b.note.style));
+      this.setFill(theme.mutedColor);
+      ctx.fillText(b.note.text, b.indent, b.y + line.baseline - b.note.raise);
       return;
     }
 

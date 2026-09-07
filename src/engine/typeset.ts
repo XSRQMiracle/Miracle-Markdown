@@ -172,7 +172,20 @@ interface ImagePiece extends ObjectBox {
   image: ImageRun;
 }
 
-type ObjectPiece = MathPiece | ImagePiece;
+/** A footnote's raised number, at the reference or before its definition. */
+export interface NoteRun {
+  text: string;
+  style: TextStyle;
+  /** How far above the baseline the number sits. */
+  raise: number;
+}
+
+interface NotePiece extends ObjectBox {
+  kind: "note";
+  note: NoteRun;
+}
+
+type ObjectPiece = MathPiece | ImagePiece | NotePiece;
 
 export interface LaidRun {
   x: number;
@@ -191,6 +204,8 @@ export interface LaidRun {
   math?: MathRun;
   /** Present on a run that draws a picture rather than text. */
   image?: ImageRun;
+  /** Present on a run that draws a footnote's raised number. */
+  note?: NoteRun;
 }
 
 export interface LaidLine {
@@ -225,6 +240,8 @@ export interface LaidBlock {
   raw: boolean;
   /** Column geometry, so the renderer can draw the rules a table needs. */
   table?: TableLayout;
+  /** A footnote definition's own number, drawn before its text. */
+  note?: NoteRun;
 }
 
 /** Where a table's columns sit, and which lines begin each row. */
@@ -324,8 +341,35 @@ mode: TypesetOptions["numbering"],
   // Derived from the resolved values, so a block holding a reference
   // re-typesets exactly when the number it cites moves — and not when some
   // unrelated paragraph is edited.
-  const version = [...labels].map(([k, v]) => k + "=" + v).join(",");
-  return { tags, labels, version };
+  const notes = numberFootnotes(parsed);
+  const version = [...labels].map(([k, v]) => k + "=" + v).join(",") +
+    "|" + [...notes].map(([k, v]) => k + "=" + v).join(",");
+  return { tags, labels, notes, version };
+}
+
+/**
+ * Number the footnotes.
+ *
+ * By first reference rather than by where the definitions sit, which is the
+ * convention every typesetter follows: a reader meets the marks in reading
+ * order, so 1 must be the first one they see. A definition nobody cites still
+ * earns a number, at the end, so that editing it is not confusing.
+ */
+function numberFootnotes(parsed: Block[]): Map<string, string> {
+  const notes = new Map<string, string>();
+  const reference = new RegExp(String.raw`\[\^([^\]\s]+)\]`, "g");
+  for (const block of parsed) {
+    if (block.type === "footnote") continue;
+    for (const match of block.source.matchAll(reference)) {
+      if (!notes.has(match[1])) notes.set(match[1], String(notes.size + 1));
+    }
+  }
+  for (const block of parsed) {
+    if (block.type === "footnote" && block.label && !notes.has(block.label)) {
+      notes.set(block.label, String(notes.size + 1));
+    }
+  }
+  return notes;
 }
 
 /**
@@ -366,6 +410,8 @@ export interface Numbering {
   tags: Map<number, string>;
   /** Label to the number it resolves to. */
   labels: Map<string, string>;
+  /** Footnote label to its number, in order of first reference. */
+  notes: Map<string, string>;
   /** Changes exactly when some label's number changes. */
   version: string;
 }
@@ -431,6 +477,10 @@ function styleForSpan(
     size = Math.round(theme.bodySize * scale);
   } else if (code) {
     size = Math.round(theme.bodySize * 0.88);
+  } else if (block.type === "footnote") {
+    // A note is an aside. Sizing it here rather than shrinking the finished
+    // runs means a formula inside one is measured at the size it is drawn.
+    size = Math.round(theme.bodySize * 0.86);
   }
 
   const family = code
@@ -444,7 +494,7 @@ function styleForSpan(
     ? theme.accentColor
     // Front matter is the document's metadata rather than its prose, so it is
     // set back like a quotation instead of competing with the opening line.
-    : block.type === "quote" || block.type === "frontmatter"
+    : block.type === "quote" || block.type === "frontmatter" || block.type === "footnote"
       ? theme.mutedColor
       : theme.color;
 
@@ -545,7 +595,7 @@ export class Typesetter {
       parsed.push({
         type: "blank", start: doc.length, end: doc.length, source: "",
         level: 0, ordered: false, marker: "", lang: "", math: "", task: "none",
-        rows: [], align: [],
+        rows: [], align: [], label: "",
       });
     }
     const focusedBlock = blockIndexAtPosition(parsed, focusedPosition);
@@ -619,6 +669,11 @@ export class Typesetter {
           ? theme.bodySize * 1.6 * block.level
           : 0;
     const measure = Math.max(width - indent, theme.bodySize * 4);
+
+    if (block.type === "footnote") {
+      const laid = this.buildFootnote(block, rendered, spaceBefore, measure, indent, numbering);
+      if (laid) return laid;
+    }
 
     if (block.type === "table") {
       return this.buildTable(block, rendered, spaceBefore, measure, indent, raw, numbering);
@@ -901,6 +956,57 @@ export class Typesetter {
     };
   }
 
+  /**
+   * A footnote definition: its text, indented, with its number in the margin.
+   *
+   * The definition stays where the author wrote it rather than being gathered
+   * at the foot of the document. Moving blocks would break the one invariant
+   * the editor rests on — that a block's source range is contiguous and covers
+   * the caret — and in a live editor a note that leaps away as you type it is
+   * worse than one that sits in place.
+   */
+  private buildFootnote(
+    block: Block,
+    rendered: RenderedBlock,
+    spaceBefore: number,
+    measure: number,
+    indent: number,
+    numbering: Numbering,
+  ): LaidBlock | null {
+    const theme = this.theme;
+    const base = styleForSpan(theme, block, null);
+    const marker = this.buildNotePiece(numbering.notes.get(block.label) ?? "?", base.style);
+    const gutter = theme.bodySize * 1.4;
+    const lines = this.breakParagraph(
+      block,
+      rendered,
+      Math.max(measure - gutter, theme.bodySize * 4),
+      indent,
+      numbering,
+    );
+    if (!lines.length) return null;
+
+    // Only the horizontal shift is applied here; the size and colour came
+    // from the style resolver, so every run already agrees with its box.
+    const shifted = lines.map((line) => ({
+      ...line,
+      runs: line.runs.map((run) => ({ ...run, x: run.x + gutter })),
+    }));
+    const last = shifted[shifted.length - 1];
+    return {
+      block,
+      lines: shifted,
+      height: spaceBefore + last.baseline + last.depth,
+      spaceBefore,
+      y: 0,
+      rendered,
+      indent,
+      marker: "",
+      raw: false,
+      note: marker.note,
+    };
+  }
+
   /** Preserve physical source lines; focused source also wraps to the measure. */
   private buildPreformatted(
     block: Block,
@@ -1063,7 +1169,9 @@ export class Typesetter {
       const span = rendered.spans.find((s) => i >= s.start && i < s.end);
       const built: ObjectPiece[] = span?.kind === "image"
         ? [this.buildImagePiece(span, style, measure)]
-        : this.buildMathPieces(rendered, i, style, key, numbering);
+        : span?.kind === "note"
+          ? [this.buildNotePiece(numbering.notes.get(span.label ?? "") ?? "?", style)]
+          : this.buildMathPieces(rendered, i, style, key, numbering);
       for (const piece of built) {
         pieces.set(text.length, piece);
         text += OBJECT_REPLACEMENT;
@@ -1130,6 +1238,28 @@ export class Typesetter {
   }
 
   private pieceCache = new Map<string, MathPiece[]>();
+
+  /**
+   * A footnote's raised number.
+   *
+   * Set smaller and lifted rather than drawn at full size on the baseline: a
+   * mark that reads as part of the sentence would be mistaken for content.
+   * The box reserves the lifted height, so the line above stays clear.
+   */
+  private buildNotePiece(text: string, style: TextStyle): NotePiece {
+    const raised: TextStyle = { ...style, size: Math.max(8, style.size * 0.68) };
+    const key = cssFont(raised);
+    const raise = style.size * 0.36;
+    const v = this.vmetrics(raised, key);
+    return {
+      kind: "note",
+      width: this.measurer.width(text, raised, key),
+      height: v.ascent + raise,
+      depth: Math.max(0, v.descent - raise),
+      penaltyAfter: NaN,
+      note: { text, style: raised, raise },
+    };
+  }
 
   /**
    * Lay out a picture.
@@ -1379,6 +1509,7 @@ export class Typesetter {
           synthetic: false,
           math: object?.kind === "math" ? object : undefined,
           image: object?.kind === "image" ? object.image : undefined,
+          note: object?.kind === "note" ? object.note : undefined,
         });
       }
       lines.push({

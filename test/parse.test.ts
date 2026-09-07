@@ -578,5 +578,53 @@ eq(parseInline("a  \n`b`", 0).text.includes(SEP), true,
    "but a break before a code span still holds");
 eq(parseInline("  \na", 0).text, "a", "a break with nothing before it is dropped");
 
+
+// --- footnotes -------------------------------------------------------------
+const OBJ2 = "￼";
+const noteSpan = (body: string) =>
+  parseInline(body, 0).spans.find((s) => s.kind === "note");
+
+eq(parseInline("text[^1] more", 0).text, "text" + OBJ2 + " more",
+   "a reference has no textual form of its own");
+eq(noteSpan("text[^1]")?.label, "1", "the label is carried on the span");
+eq(noteSpan("text[^note-a]")?.label, "note-a", "labels may be words");
+eq(noteSpan("text[^1]"), noteSpan("text[^1]") ? noteSpan("text[^1]") : undefined, "stable");
+eq(parseInline("[link](x)", 0).spans.some((s) => s.kind === "note"), false,
+   "an ordinary link is not a footnote");
+eq(parseInline("[^ bad]", 0).text, "[^ bad]", "a label may not contain spaces");
+eq(parseInline("`[^1]`", 0).text, "[^1]", "a code span keeps it literal");
+
+// Definitions are their own blocks and shed their label.
+{
+  const doc = "body text[^a]\n\n[^a]: the note itself";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["paragraph", "blank", "footnote"],
+     "a definition is its own block");
+  const def = blocks.find((b) => b.type === "footnote")!;
+  eq(def.label, "a", "carrying its label");
+  const r = renderBlock(def, false);
+  eq(r.text, "the note itself", "and shedding it from the text");
+  eq(r.map[0], doc.indexOf("the note"), "the first character maps past the label");
+  eq(renderBlock(def, true).text, "[^a]: the note itself", "raw mode shows the label");
+}
+{
+  const doc = "[^a]: first line\ncontinued here\n\nafter";
+  const blocks = parseBlocks(doc);
+  eq(blocks[0].type, "footnote", "a definition runs on like a paragraph");
+  eq(renderBlock(blocks[0], false).text, "first line continued here",
+     "over a lazy continuation");
+}
+{
+  eq(parseBlocks("para\n[^a]: note").map((b) => b.type), ["paragraph", "footnote"],
+     "a definition interrupts the paragraph above it");
+}
+{
+  const body = "see[^x] here";
+  const r = parseInline(body, 30);
+  const at = r.text.indexOf(OBJ2);
+  eq(r.map[at], 30 + body.indexOf("[^x]"), "the placeholder maps to the opening bracket");
+  eq(r.map.length, r.text.length + 1, "the source map still covers every character");
+}
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

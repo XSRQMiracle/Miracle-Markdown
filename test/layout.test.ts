@@ -295,4 +295,43 @@ const TABLE = "| head | second column |\n|:---|---:|\n| a | b |\n| a much longer
 }
 console.log("ok   tables break each cell in its own column and keep their source offsets");
 
+
+// --- footnotes -------------------------------------------------------------
+// Numbered by first reference rather than by where the definitions sit: a
+// reader meets the marks in reading order, so 1 must be the first one seen.
+{
+  const doc = "cites[^b] then[^a] again[^b].\n\n[^a]: note a\n\n[^b]: note b";
+  const laid = typesetter.layoutDocument(doc, 1000, -1).blocks;
+  const marks = laid[0].lines.flatMap((l) => l.runs).filter((r) => r.note).map((r) => r.note!.text);
+  assert.deepEqual(marks, ["1", "2", "1"], "references number by first appearance");
+
+  const defs = laid.filter((b) => b.block.type === "footnote");
+  assert.deepEqual(defs.map((b) => b.block.label), ["a", "b"]);
+  assert.deepEqual(defs.map((b) => b.note!.text), ["2", "1"],
+    "a definition wears the number its reference earned, not its own position");
+  assert.ok(defs[0].lines[0].runs[0].x > 0, "definition text is indented past its number");
+  assert.ok(defs[0].note!.raise > 0, "the number is lifted off the baseline");
+}
+{
+  // A definition nobody cites still earns a number, so editing it is not
+  // confusing.
+  const laid = typesetter.layoutDocument("text\n\n[^lonely]: nobody cites me", 1000, -1).blocks;
+  const def = laid.find((b) => b.block.type === "footnote")!;
+  assert.equal(def.note!.text, "1");
+}
+{
+  // The mark reserves its lifted height, so the line above stays clear.
+  const laid = typesetter.layoutDocument("one\n\ntwo[^a] three\n\n[^a]: n", 1000, -1).blocks;
+  const withMark = laid.find((b) => b.lines.some((l) => l.runs.some((r) => r.note)) &&
+    b.block.type === "paragraph")!;
+  const line = withMark.lines[0];
+  const mark = line.runs.find((r) => r.note)!;
+  assert.ok(mark.note!.raise > 0, "the mark is lifted");
+  assert.ok(line.height >= mark.note!.raise, "and the line reserves room for it");
+  const plain = laid.find((b) => b.block.source === "one")!;
+  assert.ok(line.height >= plain.lines[0].height,
+    "a line carrying a mark is no shorter than one without");
+}
+console.log("ok   footnotes number by first reference and sit in their own margin");
+
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");
