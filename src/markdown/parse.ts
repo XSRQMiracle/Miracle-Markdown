@@ -22,6 +22,7 @@ export type BlockType =
   | "frontmatter"
   | "table"
   | "footnote"
+  | "html"
   | "blank";
 
 export interface Block {
@@ -146,6 +147,61 @@ const DELIMITER_CELL = /^:?-+:?$/;
 const FOOTNOTE_DEF = /^\[\^([^\]\s]+)\]:\s?/;
 /** A footnote reference within running text. */
 const FOOTNOTE_REF = /^\[\^([^\]\s]+)\]/;
+
+/**
+ * HTML blocks, in CommonMark's terms.
+ *
+ * Only the kinds an author actually writes are recognised. The distinction
+ * that matters here is how each one ends, since that is what decides how much
+ * of the document the block swallows.
+ */
+const HTML_RAW_TEXT = /^\s{0,3}<(script|pre|style|textarea)(\s|>|$)/i;
+const HTML_RAW_CLOSE = /<\/(script|pre|style|textarea)>/i;
+/** A comment, a processing instruction, a declaration, or CDATA. */
+const HTML_SPECIAL: Array<[RegExp, RegExp]> = [
+  [/^\s{0,3}<!--/, /-->/],
+  [/^\s{0,3}<\?/, /\?>/],
+  [/^\s{0,3}<![A-Za-z]/, />/],
+  [/^\s{0,3}<!\[CDATA\[/, /\]\]>/],
+];
+/** The block-level tag names CommonMark lists; these end at a blank line. */
+const HTML_BLOCK_TAG = new RegExp(
+  "^\\s{0,3}</?(address|article|aside|base|basefont|blockquote|body|caption|center|col|" +
+  "colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|" +
+  "frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|" +
+  "noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|" +
+  "thead|title|tr|track|ul)(\\s|/?>|$)",
+  "i",
+);
+/**
+ * A complete open or close tag alone on its line.
+ *
+ * Deliberately strict, because this is what stands between an HTML block and
+ * an autolink: `<https://example.com>` is not a tag, since a name cannot be
+ * followed by a colon, and must stay a link.
+ */
+const HTML_LONE_TAG =
+  /^\s{0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)\s*$/;
+
+/**
+ * Where an HTML block starts, and how it ends.
+ *
+ * `interrupts` follows CommonMark: every kind but the lone-tag one may break
+ * into a paragraph. Excluding that one is what keeps an `<em>` opening a
+ * continuation line from splitting the sentence it belongs to.
+ */
+function htmlBlockStart(
+  line: string,
+): { closer: RegExp | null; interrupts: boolean } | null {
+  if (!line.includes("<")) return null;
+  if (HTML_RAW_TEXT.test(line)) return { closer: HTML_RAW_CLOSE, interrupts: true };
+  for (const [opener, closer] of HTML_SPECIAL) {
+    if (opener.test(line)) return { closer, interrupts: true };
+  }
+  if (HTML_BLOCK_TAG.test(line)) return { closer: null, interrupts: true };
+  if (HTML_LONE_TAG.test(line)) return { closer: null, interrupts: false };
+  return null;
+}
 const OL = /^(\s*)(\d+)([.)])\s+(.*)$/;
 
 interface BlockMathOpen {
@@ -208,6 +264,7 @@ function interruptsParagraph(
     HEADING.test(line) ||
     FENCE.test(line) ||
     FOOTNOTE_DEF.test(line) ||
+    htmlBlockStart(line)?.interrupts === true ||
     matchBlockMathOpen(line, options) !== null ||
     RULE.test(line) ||
     QUOTE.test(line) ||
@@ -439,6 +496,26 @@ counters.length = 0;
       continue;
     }
 
+    // HTML is shown as written. Rendering it would mean implementing a second
+    // layout engine on the canvas; showing the source is both honest and what
+    // an author editing markup wants to see.
+    const html = htmlBlockStart(line);
+    if (html) {
+      let j = i;
+      if (html.closer) {
+        while (j < count && !html.closer.test(lines[j])) j++;
+        j = Math.min(j + 1, count);
+      } else {
+        j = i + 1;
+        while (j < count && lines[j].trim() !== "") j++;
+      }
+      const end = j > i ? offsets[j - 1] + lines[j - 1].length : start + line.length;
+      counters.length = 0;
+      blocks.push(block("html", doc.slice(start, end), start, end));
+      i = j;
+      continue;
+    }
+
     const note = FOOTNOTE_DEF.exec(line);
     if (note) {
       // A definition runs on like a paragraph, so an author can write more
@@ -644,7 +721,7 @@ export function renderBlock(
   raw: boolean,
   options: InlineOptions = DEFAULT_INLINE_OPTIONS,
 ): RenderedBlock {
-  if (raw || b.type === "code" || b.type === "frontmatter") {
+  if (raw || b.type === "code" || b.type === "frontmatter" || b.type === "html") {
     const map = identityMap(b.source.length, b.start);
     return { text: b.source, spans: [plainSpan(0, b.source.length)], map };
   }

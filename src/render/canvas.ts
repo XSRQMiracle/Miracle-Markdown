@@ -290,7 +290,7 @@ export class Renderer {
       return;
     }
 
-    if (type === "code" || type === "frontmatter") {
+    if (type === "code" || type === "frontmatter" || type === "html") {
       this.setFill(theme.codeBackground);
       const pad = theme.bodySize * 0.5;
       ctx.fillRect(

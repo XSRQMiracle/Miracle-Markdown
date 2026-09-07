@@ -626,5 +626,54 @@ eq(parseInline("`[^1]`", 0).text, "[^1]", "a code span keeps it literal");
   eq(r.map.length, r.text.length + 1, "the source map still covers every character");
 }
 
+
+// --- HTML blocks -----------------------------------------------------------
+// Shown as written. What matters here is where a block starts and stops, and
+// above all that an autolink is not mistaken for a tag.
+const htmlOf = (doc: string) => parseBlocks(doc).find((b) => b.type === "html");
+const types = (doc: string) => parseBlocks(doc).map((b) => b.type);
+
+eq(htmlOf("<div>\nhello\n</div>")?.source, "<div>\nhello\n</div>",
+   "a block tag runs to the blank line");
+eq(types("<div>\nx\n</div>\n\nafter"), ["html", "blank", "paragraph"],
+   "and the document continues after it");
+eq(htmlOf("<!-- a comment -->")?.source, "<!-- a comment -->", "a comment is a block");
+eq(htmlOf("<!--\nspanning\nlines\n-->")?.source, "<!--\nspanning\nlines\n-->",
+   "a comment ends at its own terminator, not at a blank line");
+eq(htmlOf("<script>\nlet x = 1;\n\nlet y = 2;\n</script>")?.source,
+   "<script>\nlet x = 1;\n\nlet y = 2;\n</script>",
+   "raw text runs through blank lines to its close tag");
+eq(htmlOf("<br />")?.source, "<br />", "a self-closing tag alone on a line");
+eq(htmlOf("<span class=\"a\">")?.source, "<span class=\"a\">", "attributes are allowed");
+
+// The case that must not regress: an autolink is not a tag.
+eq(htmlOf("<https://example.com>"), undefined, "a URL in angle brackets is not HTML");
+eq(parseInline("<https://example.com>", 0).spans.find((s) => s.kind === "link")?.href,
+   "https://example.com", "it is still an autolink");
+eq(htmlOf("<user@example.com>"), undefined, "nor is an email address");
+eq(htmlOf("2 < 3 and 4 > 1"), undefined, "nor is arithmetic");
+
+// Rendering is verbatim, with an exact map.
+{
+  const doc = "<div class=\"note\">\n  <b>bold</b>\n</div>";
+  const b = htmlOf(doc)!;
+  const r = renderBlock(b, false);
+  eq(r.text, doc, "the markup is shown exactly as written");
+  eq(r.map.length, r.text.length + 1, "with a complete source map");
+  eq(r.spans.some((s) => s.kind === "strong"), false, "and no inline parsing inside it");
+}
+
+// Interrupting a paragraph: every kind but a lone tag may.
+eq(types("text\n<div>\nx"), ["paragraph", "html"], "a block tag interrupts a paragraph");
+// A block tag and a lone tag reach the same branch by different routes, and
+// only the first may break into a paragraph; check the classification itself
+// rather than trusting the outcome to distinguish them.
+eq(types("text\n<table>\nx"), ["paragraph", "html"], "including one that is also a markdown word");
+eq(types("text\n<custom-element>\nx"), ["paragraph"],
+   "an unknown tag is the lone-tag kind, which does not interrupt");
+eq(types("text\n<!-- c -->"), ["paragraph", "html"], "and so does a comment");
+eq(types("text\n<em>emphasis</em>"), ["paragraph"],
+   "but a lone inline tag stays in the paragraph it continues");
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

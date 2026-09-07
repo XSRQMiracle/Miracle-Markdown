@@ -469,7 +469,11 @@ function styleForSpan(
   span: Span | null,
 ): { style: TextStyle; key: string } {
   const heading = block.type === "heading";
-  const code = block.type === "code" || block.type === "frontmatter" || span?.code;
+  const code =
+    block.type === "code" ||
+    block.type === "frontmatter" ||
+    block.type === "html" ||
+    span?.code;
 
   let size = theme.bodySize;
   if (heading) {
@@ -709,7 +713,7 @@ export class Typesetter {
     // actively wrong.
     // Both keep their own line structure: breaking either optimally would be
     // actively wrong.
-    if (block.type === "code" || block.type === "frontmatter") {
+    if (block.type === "code" || block.type === "frontmatter" || block.type === "html") {
       return this.buildPreformatted(block, rendered, spaceBefore, indent, raw);
     }
 
