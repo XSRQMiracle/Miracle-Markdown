@@ -507,4 +507,67 @@ assert.deepEqual([canvas.width, canvas.height], [802, 400]);
 assert.equal(allocations, 5, "a DPR change resizes the physical backing store");
 console.log("ok   renderer retains backing storage and resets restored paint-state caches");
 
+
+// --- forced line breaks ----------------------------------------------------
+// A bare newline is a soft break: markdown joins the lines, and the CJK rule
+// discards it outright. Shift+Enter has to write a marker or the break the
+// author asked for simply disappears.
+{
+  const at = (source: string, position: number) => {
+    const editor = Object.create(Editor.prototype) as any;
+    editor.typesetter = typesetter;
+    editor.text = source;
+    editor.selEnd = position;
+    editor.blocks = typesetter.layoutDocument(source, 1000, position).blocks;
+    return editor.hardBreak();
+  };
+
+  assert.equal(at("plain text", 5), "\\\n", "a paragraph takes the backslash spelling");
+  assert.equal(at("- an item", 5), "\\\n",
+    "a list item needs nothing more: an unmarked line is already its continuation");
+
+  // A quotation is recognised line by line, so the marker has to come along
+  // or the break leaves the block instead of breaking inside it — and the
+  // backslash, left as the last character of a one-line quote, becomes
+  // visible content.
+  assert.equal(at("> quoted text", 5), "\\\n> ", "a quote carries its marker across");
+  assert.equal(at(">quoted", 4), "\\\n>", "including when written without the space");
+  assert.equal(at("  > indented", 6), "\\\n  > ", "and keeps the indent it was written with");
+
+  // Verbatim blocks have no forced break to write: their line structure is
+  // already literal, and a backslash there would become content.
+  assert.equal(at("```\ncode here\n```", 6), "\n", "code takes a bare newline");
+  assert.equal(at("$$\nx = 1\n$$", 5), "\n", "and so does display math");
+  assert.equal(at("---\ntitle: x\n---", 6), "\n", "and front matter");
+  assert.equal(at("<div>\nmarkup\n</div>", 8), "\n", "and HTML");
+  assert.equal(at("| a |\n|---|\n| b |", 14), "\n", "and a table, whose rows are its lines");
+}
+{
+  // What the editor writes must be what the parser reads back as a break.
+  const editor = Object.create(Editor.prototype) as any;
+  editor.typesetter = typesetter;
+  editor.text = "第一行第二行";
+  editor.selEnd = 3;
+  editor.blocks = typesetter.layoutDocument(editor.text, 1000, 3).blocks;
+  const written = editor.text.slice(0, 3) + editor.hardBreak() + editor.text.slice(3);
+  const lines = typesetter.layoutDocument(written, 1000, -1).blocks[0].lines;
+  assert.equal(lines.length, 2, "the break the editor writes actually breaks the line");
+  assert.deepEqual(lines.map((l) => l.runs.map((r) => r.text).join("")), ["第一行", "第二行"]);
+}
+{
+  // The same round trip inside a quote, where the marker matters and a stray
+  // backslash would otherwise show.
+  const editor = Object.create(Editor.prototype) as any;
+  editor.typesetter = typesetter;
+  editor.text = "> 第一行第二行";
+  editor.selEnd = 5;
+  editor.blocks = typesetter.layoutDocument(editor.text, 1000, 5).blocks;
+  const written = editor.text.slice(0, 5) + editor.hardBreak() + editor.text.slice(5);
+  const laid = typesetter.layoutDocument(written, 1000, -1).blocks;
+  assert.deepEqual(laid.map((b) => b.block.type), ["quote"], "the quote is still one block");
+  assert.deepEqual(laid[0].lines.map((l) => l.runs.map((r) => r.text).join("")),
+    ["第一行", "第二行"], "broken in two, with no backslash left over");
+}
+console.log("ok   Shift+Enter writes a break the parser reads back");
+
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");

@@ -775,12 +775,23 @@ function stripPerLine(b: Block, marker: RegExp, options: InlineOptions): Rendere
   lines.forEach((line, n) => {
     const m = marker.exec(line);
     const skip = m ? m[0].length : 0;
-    for (let i = skip; i < line.length; i++) {
+    // This function joins the lines itself, so the newline that would have
+    // carried a hard break never reaches the inline scanner. The marker has
+    // to be read — and consumed — here instead, or a quoted line ending in a
+    // backslash keeps it as content and the break is lost either way.
+    const forced = n + 1 < lines.length ? hardBreakMarker(line, skip) : null;
+    const content = forced === null ? line.length : forced;
+    for (let i = skip; i < content; i++) {
       text += line[i];
       map.push(at + i);
     }
     at += line.length + 1;
     if (n + 1 < lines.length) {
+      if (forced !== null) {
+        text += LINE_SEPARATOR;
+        map.push(at - 1);
+        return;
+      }
       // The same rule the running text follows: a break between wide
       // characters is how the author wrapped the file, not a space.
       const next = lines[n + 1].replace(marker, "");
@@ -797,6 +808,26 @@ function stripPerLine(b: Block, marker: RegExp, options: InlineOptions): Rendere
   // and keep the map that comes back, since emphasis removal shortens it
   // further.
   return parseInline(text, -1, map, options);
+}
+
+/**
+ * Where a line's content stops because the author asked for a break, or null
+ * if it did not.
+ *
+ * Both of CommonMark's spellings: a trailing backslash, or two or more
+ * trailing spaces. The returned index excludes the marker, which is an
+ * instruction rather than content.
+ */
+function hardBreakMarker(line: string, from: number): number | null {
+  if (line.length > from && line.endsWith("\\")) {
+    // An even run of backslashes is escaped literals, not a break.
+    let slashes = 0;
+    for (let i = line.length - 1; i >= from && line[i] === "\\"; i--) slashes++;
+    return slashes % 2 === 1 ? line.length - 1 : null;
+  }
+  let end = line.length;
+  while (end > from && line[end - 1] === " ") end--;
+  return line.length - end >= 2 ? end : null;
 }
 
 function identityMap(length: number, base: number): Int32Array {

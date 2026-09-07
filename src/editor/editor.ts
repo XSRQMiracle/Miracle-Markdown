@@ -16,7 +16,7 @@
  */
 
 import { Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
-import { sourceRangeOwnsPosition } from "../markdown/parse.js";
+import { sourceRangeOwnsPosition, type BlockType } from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
 import {
   DEFAULT_OPTIONS,
@@ -777,13 +777,61 @@ export class Editor {
         return;
       case "Enter":
         e.preventDefault();
-        this.insert("\n", false);
+        this.insert(e.shiftKey ? this.hardBreak() : "\n", false);
         return;
       case "Tab":
         e.preventDefault();
         this.insert("  ", false);
         return;
     }
+  }
+
+  /**
+   * The source a forced line break is written as.
+   *
+   * A bare newline is a *soft* break — markdown joins the lines, and the CJK
+   * rule discards it outright — so Shift+Enter has to write a marker or the
+   * break the author asked for simply disappears.
+   *
+   * Of CommonMark's two spellings this uses the backslash rather than two
+   * trailing spaces. The editor reveals the source of the block holding the
+   * caret, and an invisible marker is one the author can neither verify nor
+   * deliberately remove; trailing whitespace is also stripped by many
+   * formatters and editors, which destroys the break silently. Documents
+   * written with two spaces still read correctly — the parser accepts both.
+   *
+   * Verbatim blocks have no forced break to write: their line structure is
+   * already literal, and a backslash there would become content.
+   */
+  private hardBreak(): string {
+    const type = this.blockTypeAtCaret();
+    const verbatim: BlockType[] = ["code", "frontmatter", "html", "math", "table"];
+    if (type && verbatim.includes(type)) return "\n";
+
+    // A quotation is recognised line by line, so a continuation without the
+    // marker leaves the block rather than breaking inside it — and the
+    // backslash, now the last character of a one-line quote, is read as
+    // content. A list item needs nothing: an unmarked line is already a lazy
+    // continuation of it.
+    return "\\\n" + (type === "quote" ? this.quotePrefixAtCaret() : "");
+  }
+
+  /** The `>` marker opening the caret's line, so a break stays in the quote. */
+  private quotePrefixAtCaret(): string {
+    const lineStart = this.text.lastIndexOf("\n", Math.max(0, this.selEnd - 1)) + 1;
+    return /^\s*>\s?/.exec(this.text.slice(lineStart, this.selEnd))?.[0] ?? "> ";
+  }
+
+  /** The kind of block the caret sits in, by the same ownership rule as
+   *  `locate` — a shared boundary belongs to the block that follows. */
+  private blockTypeAtCaret(): BlockType | null {
+    for (let i = 0; i < this.blocks.length; i++) {
+      const b = this.blocks[i];
+      if (sourceRangeOwnsPosition(b.block, this.blocks[i + 1]?.block, this.selEnd)) {
+        return b.block.type;
+      }
+    }
+    return null;
   }
 
   /** Move by one grapheme, so surrogate pairs are not split. */

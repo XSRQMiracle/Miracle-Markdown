@@ -715,5 +715,35 @@ eq(types("text\n<em>emphasis</em>"), ["paragraph"],
     "nested link style transitions preserve code opacity");
 }
 
+
+// --- hard breaks in blockquotes --------------------------------------------
+// A quote joins its own lines, so the newline that would have carried the
+// break never reaches the inline scanner; the marker has to be read there.
+const quoted = (doc: string) => renderBlock(parseBlocks(doc)[0], false).text;
+
+eq(quoted("> first  \n> second"), "first" + LINE_SEPARATOR + "second",
+   "two trailing spaces break a quoted line");
+eq(quoted("> first\\\n> second"), "first" + LINE_SEPARATOR + "second",
+   "and so does a trailing backslash");
+eq(quoted("> first\n> second"), "first second",
+   "an ordinary wrap is still joined with a space");
+eq(quoted("> 中文\n> 继续"), "中文继续",
+   "and the CJK rule still discards an unasked-for break");
+eq(quoted("> 中文  \n> 继续"), "中文" + LINE_SEPARATOR + "继续",
+   "while a hard break survives it");
+
+// The marker is an instruction, not content: neither spelling may leak.
+eq(quoted("> first\\\n> second").includes("\\"), false, "the backslash is consumed");
+eq(quoted("> a  \n> b").includes("  "), false, "and so is the space run");
+eq(quoted("> ends with a slash\\\\\n> next"), "ends with a slash\\ next",
+   "an escaped backslash at the end is content, not a break");
+
+{
+  const doc = "> first  \n> second";
+  const r = renderBlock(parseBlocks(doc)[0], false);
+  eq(r.map.length, r.text.length + 1, "the source map still covers every character");
+  eq(doc[r.map[r.text.indexOf("second")]], "s", "text after the break maps correctly");
+}
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);
