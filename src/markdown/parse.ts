@@ -632,6 +632,52 @@ function listMarker(
 }
 
 /**
+ * A list item's marker, as the author wrote it.
+ *
+ * The `marker` on a Block is the *rendered* one — a bullet, or the number the
+ * item takes in sequence — which is what the typesetter draws but not what the
+ * editor must write to continue the list. This reads the source instead, and
+ * does it with the parser's own patterns so that what the editor writes is
+ * exactly what the parser will read back as another item.
+ */
+export interface ListItemMarker {
+  /** Indent, marker, its trailing space, and a task box if there is one. */
+  prefix: string;
+  /** Whether the item holds nothing but its marker. */
+  empty: boolean;
+  /** The prefix that continues the list on the following line. */
+  next: string;
+  /** The same item one level further out, or null at the outermost level. */
+  outdented: string | null;
+}
+
+export function listItemMarker(line: string): ListItemMarker | null {
+  const ul = UL.exec(line);
+  const ol = ul ? null : OL.exec(line);
+  if (!ul && !ol) return null;
+
+  const indent = ul ? ul[1] : ol![1];
+  const body = ul ? ul[3] : ol![4];
+  // A checkbox is part of the marker: continuing a task list gives another
+  // task, and an item holding only an empty box is still an empty item.
+  const box = ul ? TASK.exec(body)?.[0] ?? "" : "";
+  const prefix = line.slice(0, line.length - body.length + box.length);
+  // A ticked box never carries over — the new item is a new task, not a
+  // finished one.
+  const carried = box ? "[ ] " : "";
+  const bullet = ul ? `${ul[2]} ` : `${Number.parseInt(ol![2], 10) + 1}${ol![3]} `;
+
+  return {
+    prefix,
+    empty: body.slice(box.length).trim() === "",
+    next: indent + bullet + carried,
+    // Written numbering only sets where a list starts; the rest is counted by
+    // position, so carrying the marker out one level needs no renumbering.
+    outdented: /^ {2}/.test(prefix) ? prefix.slice(2) : null,
+  };
+}
+
+/**
  * Locate a caret position in an ordered block list.
  *
  * Block source ranges are half-open, while a caret may also sit just after a

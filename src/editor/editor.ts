@@ -16,7 +16,7 @@
  */
 
 import { Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
-import { sourceRangeOwnsPosition, type BlockType } from "../markdown/parse.js";
+import { listItemMarker, sourceRangeOwnsPosition, type BlockType } from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
 import { wordAt, wordBoundary } from "./words.js";
 import {
@@ -867,13 +867,49 @@ export class Editor {
         return;
       case "Enter":
         e.preventDefault();
-        this.insert(e.shiftKey ? this.hardBreak() : "\n", false);
+        if (e.shiftKey) this.insert(this.hardBreak(), false);
+        else if (!this.continueList()) this.insert("\n", false);
         return;
       case "Tab":
         e.preventDefault();
         this.insert("  ", false);
         return;
     }
+  }
+
+  /**
+   * Enter inside a list: carry the marker onto the next line.
+   *
+   * Typing the marker again by hand is the sort of work the machine should be
+   * doing, but only where it is certain: the caret has to be in a block the
+   * parser reads as a list, so that "- x" inside a code fence or a table stays
+   * literal text. An item holding nothing but its marker is how an author
+   * leaves a list, so there Enter withdraws the marker instead — one level
+   * outwards if the item is nested, and out of the list at the outer level.
+   *
+   * Returns whether it handled the key.
+   */
+  private continueList(): boolean {
+    // Blocks are laid out on the next frame, so a fast typist can arrive here
+    // before the previous keystroke's parse.
+    if (this.dirty) this.relayout();
+    const at = Math.min(this.selStart, this.selEnd);
+    if (this.blockTypeAt(at) !== "list") return false;
+
+    const lineStart = this.text.lastIndexOf("\n", at - 1) + 1;
+    const lineEnd = this.text.indexOf("\n", at);
+    const item = listItemMarker(this.text.slice(lineStart, lineEnd < 0 ? this.text.length : lineEnd));
+    // Within the marker itself Enter is an ordinary break: the author is
+    // pushing the item down, not adding another.
+    if (!item || at < lineStart + item.prefix.length) return false;
+
+    if (item.empty) {
+      if (this.selStart !== this.selEnd) return false;
+      this.replace(lineStart, lineStart + item.prefix.length, item.outdented ?? "", false);
+      return true;
+    }
+    this.insert("\n" + item.next, false);
+    return true;
   }
 
   /**
@@ -894,7 +930,7 @@ export class Editor {
    * already literal, and a backslash there would become content.
    */
   private hardBreak(): string {
-    const type = this.blockTypeAtCaret();
+    const type = this.blockTypeAt(this.selEnd);
     const verbatim: BlockType[] = ["code", "frontmatter", "html", "math", "table"];
     if (type && verbatim.includes(type)) return "\n";
 
@@ -912,12 +948,12 @@ export class Editor {
     return /^\s*>\s?/.exec(this.text.slice(lineStart, this.selEnd))?.[0] ?? "> ";
   }
 
-  /** The kind of block the caret sits in, by the same ownership rule as
+  /** The kind of block a position sits in, by the same ownership rule as
    *  `locate` — a shared boundary belongs to the block that follows. */
-  private blockTypeAtCaret(): BlockType | null {
+  private blockTypeAt(offset: number): BlockType | null {
     for (let i = 0; i < this.blocks.length; i++) {
       const b = this.blocks[i];
-      if (sourceRangeOwnsPosition(b.block, this.blocks[i + 1]?.block, this.selEnd)) {
+      if (sourceRangeOwnsPosition(b.block, this.blocks[i + 1]?.block, offset)) {
         return b.block.type;
       }
     }
