@@ -18,6 +18,7 @@
 import { Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
 import { sourceRangeOwnsPosition, type BlockType } from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
+import { wordAt } from "./words.js";
 import {
   DEFAULT_OPTIONS,
   DEFAULT_THEME,
@@ -44,6 +45,8 @@ interface Snapshot {
 }
 
 type CaretAffinity = "upstream" | "downstream";
+/** How much text one step of a mouse gesture selects. */
+type Granularity = "char" | "word" | "block";
 interface CaretPosition {
   offset: number;
   /** Which visual line owns a source offset shared by a soft wrap. */
@@ -510,14 +513,46 @@ export class Editor {
   // -- caret movement ----------------------------------------------------
 
   private moveTo(offset: number, extend: boolean, affinity: CaretAffinity = "downstream"): void {
+    this.select(extend ? this.selStart : offset, offset, affinity);
+  }
+
+  /** Place both ends of the selection; `focus` is the end the caret sits at. */
+  private select(anchor: number, focus: number, affinity: CaretAffinity = "downstream"): void {
+    const clamp = (n: number) => Math.max(0, Math.min(this.text.length, n));
     this.lastEditAt = -Infinity;
-    this.selEnd = Math.max(0, Math.min(this.text.length, offset));
+    this.selStart = clamp(anchor);
+    this.selEnd = clamp(focus);
     this.caretAffinity = affinity;
-    if (!extend) this.selStart = this.selEnd;
     this.caretVisible = true;
     this.invalidate();
     // Reveal the target block before measuring where its caret must scroll.
     this.scrollCaretIntoView();
+  }
+
+  /**
+   * The span one click of the given granularity selects around `offset`.
+   *
+   * Word boundaries come from `Intl.Segmenter`, so a double-click inside
+   * 中文排版 selects a word rather than the whole run of Han — no pattern over
+   * code points could find that boundary.
+   */
+  private granuleAt(offset: number, grain: Granularity): { start: number; end: number } {
+    if (grain === "word") return wordAt(this.text, offset);
+    if (grain === "block") return this.blockRangeAt(offset);
+    return { start: offset, end: offset };
+  }
+
+  /** The source range of the block at `offset`, without its trailing blank
+   *  line — a triple-click selects the text, not the separator after it. */
+  private blockRangeAt(offset: number): { start: number; end: number } {
+    for (let i = 0; i < this.blocks.length; i++) {
+      const b = this.blocks[i].block;
+      if (!sourceRangeOwnsPosition(b, this.blocks[i + 1]?.block, offset)) continue;
+      let end = b.end;
+      while (end > b.start && /\s/.test(this.text[end - 1])) end--;
+      return { start: b.start, end };
+    }
+    return { start: offset, end: offset };
   }
 
   private moveVertical(dir: -1 | 1, extend: boolean): void {
@@ -625,10 +660,27 @@ export class Editor {
       this.focus();
       const position = this.positionAt(e.clientX, e.clientY);
       this.preferredX = null;
-      this.moveTo(position.offset, e.shiftKey, position.affinity);
+
+      // A repeated click widens the unit the gesture works in: a word, then
+      // the whole block. The platform counts the clicks for us, applying its
+      // own timing and travel thresholds.
+      const grain: Granularity = e.detail >= 3 ? "block" : e.detail === 2 ? "word" : "char";
+      const anchor = this.granuleAt(position.offset, grain);
+      if (grain === "char") this.moveTo(position.offset, e.shiftKey, position.affinity);
+      else this.select(anchor.start, anchor.end);
+
+      // Dragging keeps the granularity it started in: the selection always
+      // covers whole words, or whole blocks, and grows from whichever end of
+      // the first one the pointer has passed.
       const move = (ev: MouseEvent) => {
-        const position = this.positionAt(ev.clientX, ev.clientY);
-        this.moveTo(position.offset, true, position.affinity);
+        const to = this.positionAt(ev.clientX, ev.clientY);
+        if (grain === "char") {
+          this.moveTo(to.offset, true, to.affinity);
+          return;
+        }
+        const reached = this.granuleAt(to.offset, grain);
+        if (reached.start < anchor.start) this.select(anchor.end, reached.start);
+        else this.select(anchor.start, Math.max(anchor.end, reached.end));
       };
       const up = () => {
         window.removeEventListener("mousemove", move);
