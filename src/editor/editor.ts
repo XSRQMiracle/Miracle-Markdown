@@ -83,7 +83,7 @@ export class Editor {
   /** Last measured typesetting time, surfaced in the status bar. */
   lastLayoutMs = 0;
   onStatus: ((info: StatusInfo) => void) | null = null;
-  /** Fires on the first edit after the document was loaded or saved. */
+  /** Fires after every text change, including undo/redo and IME updates. */
   onChange: (() => void) | null = null;
 
   constructor(
@@ -453,11 +453,11 @@ export class Editor {
   private replace(from: number, to: number, insert: string, coalesce = false): void {
     insert = normalizeLineEndings(insert);
     this.pushUndo(coalesce);
-    this.onChange?.();
     this.text = this.text.slice(0, from) + insert + this.text.slice(to);
     this.selStart = this.selEnd = from + insert.length;
     this.caretAffinity = "downstream";
     this.preferredX = null;
+    this.onChange?.();
     this.invalidate();
     this.scrollCaretIntoView();
   }
@@ -476,6 +476,7 @@ export class Editor {
     this.selStart = snap.start;
     this.selEnd = snap.end;
     this.caretAffinity = "downstream";
+    this.onChange?.();
     this.invalidate();
   }
 
@@ -487,6 +488,7 @@ export class Editor {
     this.selStart = snap.start;
     this.selEnd = snap.end;
     this.caretAffinity = "downstream";
+    this.onChange?.();
     this.invalidate();
   }
 
@@ -590,6 +592,7 @@ export class Editor {
       this.composing = { start, length: data.length };
       this.selStart = this.selEnd = start + data.length;
       this.caretAffinity = "downstream";
+      this.onChange?.();
       this.invalidate();
       this.scrollCaretIntoView();
     });
@@ -605,7 +608,7 @@ export class Editor {
       this.selStart = this.selEnd = start;
       this.input.value = "";
       if (data) this.insert(data, false);
-      else this.invalidate();
+      else { this.onChange?.(); this.invalidate(); }
     });
 
     this.input.addEventListener("input", () => {

@@ -30,7 +30,7 @@ export interface OpenResult {
 }
 
 /** Ask the user for a markdown file and return its contents. */
-export async function openDocument(): Promise<OpenResult | null> {
+export async function openDocument(): Promise<(() => Promise<OpenResult>) | null> {
   const api = tauri();
   if (api) {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -39,20 +39,24 @@ export async function openDocument(): Promise<OpenResult | null> {
       filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
     });
     if (typeof picked !== "string") return null;
-    const source = await api.invoke<string>("read_file", { path: picked });
-    const decoded = decodeDocumentText(source);
-    return { path: picked, contents: decoded.text, lineEnding: decoded.lineEnding };
+    return async () => {
+      const source = await api.invoke<string>("read_file", { path: picked });
+      const decoded = decodeDocumentText(source);
+      return { path: picked, contents: decoded.text, lineEnding: decoded.lineEnding };
+    };
   }
 
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".md,.markdown,.txt,text/markdown,text/plain";
-    input.addEventListener("change", async () => {
+    input.addEventListener("change", () => {
       const file = input.files?.[0];
       if (!file) return resolve(null);
-      const decoded = decodeDocumentText(await file.text());
-      resolve({ path: file.name, contents: decoded.text, lineEnding: decoded.lineEnding });
+      resolve(async () => {
+        const decoded = decodeDocumentText(await file.text());
+        return { path: file.name, contents: decoded.text, lineEnding: decoded.lineEnding };
+      });
     });
     input.addEventListener("cancel", () => resolve(null));
     input.click();
@@ -64,7 +68,7 @@ export async function saveDocument(
   path: string | null,
   contents: string,
   lineEnding: LineEnding = "\n",
-): Promise<string | null> {
+): Promise<{ path: string | null } | null> {
   const encoded = encodeDocumentText(contents, lineEnding);
   const api = tauri();
   if (api) {
@@ -79,7 +83,7 @@ export async function saveDocument(
       target = picked;
     }
     await api.invoke("write_file", { path: target, contents: encoded });
-    return target;
+    return { path: target };
   }
 
   // In the browser, hand the file to the download path instead.
@@ -90,5 +94,18 @@ export async function saveDocument(
   a.download = path ?? "untitled.md";
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  return path;
+  return { path };
+}
+
+/** Protect both window close and application quit through one native event. */
+export async function installDesktopCloseHandler(close: () => void): Promise<void> {
+  const api = tauri();
+  if (!api) return;
+  const { listen } = await import("@tauri-apps/api/event");
+  await listen("document-close-requested", close);
+  await api.invoke("protect_document");
+}
+
+export async function finishDesktopClose(): Promise<void> {
+  await tauri()!.invoke("finish_close");
 }
