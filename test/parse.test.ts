@@ -418,5 +418,35 @@ eq(tasks("- [ ] a\n- [x] b\n- c"), ["todo", "done", "none"], "mixed items in one
   eq(renderBlock(b, false).text, "bold text", "emphasis after a checkbox still works");
 }
 
+
+// --- YAML front matter -----------------------------------------------------
+// Three dashes are a thematic break everywhere except the very first line of
+// a document, and even there only when something closes them.
+const kinds = (doc: string) => parseBlocks(doc).map((b) => b.type);
+
+eq(kinds("---\ntitle: x\n---\n\nbody"),
+   ["frontmatter", "blank", "paragraph"], "front matter opens a document");
+eq(kinds("---\ntitle: x\n...\n\nbody"),
+   ["frontmatter", "blank", "paragraph"], "YAML's other terminator closes it too");
+eq(kinds("---\nno terminator\n\nbody"),
+   ["rule", "paragraph", "blank", "paragraph"], "without a closer it stays a rule");
+eq(kinds("intro\n\n---\ntitle: x\n---"),
+   ["paragraph", "blank", "rule", "paragraph", "rule"],
+   "dashes below the first line are still a break");
+eq(kinds("---"), ["rule"], "a lone divider is a rule");
+
+{
+  const doc = "---\ntitle: 排版\ntags: [a, b]\n---\nbody";
+  const [front] = parseBlocks(doc);
+  eq(front.source, "---\ntitle: 排版\ntags: [a, b]\n---",
+     "the block covers the fences and everything between");
+  eq(front.start, 0, "starting at the document's first character");
+  eq(doc.slice(front.end), "\nbody", "and ending at its closing fence");
+  const r = renderBlock(front, false);
+  eq(r.text, front.source, "metadata is shown verbatim, brackets and all");
+  eq(r.map.length, r.text.length + 1, "with a complete source map");
+  eq(kinds(doc)[1], "paragraph", "the document continues normally after it");
+}
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

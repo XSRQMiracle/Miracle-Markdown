@@ -374,7 +374,7 @@ function styleForSpan(
   span: Span | null,
 ): { style: TextStyle; key: string } {
   const heading = block.type === "heading";
-  const code = block.type === "code" || span?.code;
+  const code = block.type === "code" || block.type === "frontmatter" || span?.code;
 
   let size = theme.bodySize;
   if (heading) {
@@ -393,7 +393,9 @@ function styleForSpan(
   const italic = !!span?.em;
   const color = span?.href
     ? theme.accentColor
-    : block.type === "quote"
+    // Front matter is the document's metadata rather than its prose, so it is
+    // set back like a quotation instead of competing with the opening line.
+    : block.type === "quote" || block.type === "frontmatter"
       ? theme.mutedColor
       : theme.color;
 
@@ -588,7 +590,9 @@ export class Typesetter {
 
     // Code keeps its own line structure: breaking it optimally would be
     // actively wrong.
-    if (block.type === "code") {
+    // Both keep their own line structure: breaking either optimally would be
+    // actively wrong.
+    if (block.type === "code" || block.type === "frontmatter") {
       return this.buildPreformatted(block, rendered, spaceBefore, indent, raw);
     }
 

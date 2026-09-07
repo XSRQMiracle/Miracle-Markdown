@@ -19,6 +19,7 @@ export type BlockType =
   | "list"
   | "rule"
   | "math"
+  | "frontmatter"
   | "blank";
 
 export interface Block {
@@ -91,6 +92,10 @@ export function fenceCloser(openingLine: string): RegExp | null {
 const MATH_OPEN = /^\s*(\$\$|\\\[)/;
 const HEADING = /^(#{1,6})\s+(.*)$/;
 const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+/** Front matter opens with exactly three dashes on the document's first line. */
+const FRONT_MATTER_OPEN = /^---\s*$/;
+/** YAML permits either fence as a terminator. */
+const FRONT_MATTER_CLOSE = /^(?:---|\.\.\.)\s*$/;
 const QUOTE = /^\s*>\s?(.*)$/;
 const UL = /^(\s*)([-*+])\s+(.*)$/;
 /** GFM's task marker: only valid directly after a bullet, and space-separated. */
@@ -187,7 +192,22 @@ export function parseBlocks(
   // the outer one must resume where it left off.
   const counters: ListCounter[] = [];
 
+  // Front matter, if the document opens with it. This must be decided before
+  // the rule branch, which would otherwise claim the opening dashes, and only
+  // at the very first line: three dashes anywhere else are a thematic break.
+  // Without a terminator it stays a rule, so a document that merely begins
+  // with a divider is not swallowed whole.
   let i = 0;
+  if (count > 1 && FRONT_MATTER_OPEN.test(lines[0])) {
+    let j = 1;
+    while (j < count && !FRONT_MATTER_CLOSE.test(lines[j])) j++;
+    if (j < count) {
+      const end = offsets[j] + lines[j].length;
+      blocks.push(block("frontmatter", doc.slice(0, end), 0, end));
+      i = j + 1;
+    }
+  }
+
   while (i < count) {
     const line = lines[i];
     const start = offsets[i];
@@ -471,7 +491,7 @@ export function renderBlock(
   raw: boolean,
   options: InlineOptions = DEFAULT_INLINE_OPTIONS,
 ): RenderedBlock {
-  if (raw || b.type === "code") {
+  if (raw || b.type === "code" || b.type === "frontmatter") {
     const map = identityMap(b.source.length, b.start);
     return { text: b.source, spans: [plainSpan(0, b.source.length)], map };
   }
