@@ -24,6 +24,7 @@ import { sourceLineEnds } from "./source-layout.js";
 import type { MathGeometry, MathSegment } from "./math.js";
 import {
   parseBlocks,
+  parseInline,
   blockIndexAtPosition,
   fenceCloser,
   renderBlock,
@@ -33,6 +34,7 @@ import {
   type Block,
   type RenderedBlock,
   type Span,
+  type ColumnAlign,
 } from "../markdown/parse.js";
 
 export interface Theme {
@@ -221,6 +223,19 @@ export interface LaidBlock {
   indent: number;
   marker: string;
   raw: boolean;
+  /** Column geometry, so the renderer can draw the rules a table needs. */
+  table?: TableLayout;
+}
+
+/** Where a table's columns sit, and which lines begin each row. */
+export interface TableLayout {
+  columns: number;
+  /** Left edge of each column, relative to the block's indent. */
+  x: number[];
+  widths: number[];
+  /** Index into `lines` at which each row starts. */
+  rowStarts: number[];
+  padding: number;
 }
 
 // These are kept as sources rather than as shared RegExp objects on purpose.
@@ -444,6 +459,14 @@ function styleForSpan(
   return { style, key: cssFont(style) };
 }
 
+/** How far into its column a line sits, given the column's alignment. */
+function alignmentOffset(align: ColumnAlign, lineWidth: number, columnWidth: number): number {
+  const slack = Math.max(0, columnWidth - lineWidth);
+  if (align === "right") return slack;
+  if (align === "center") return slack / 2;
+  return 0;
+}
+
 /** Extra space above a block, in pixels. TeX's vertical glue. */
 function spaceAbove(block: Block, theme: Theme, previous: Block | null): number {
   if (!previous || previous.type === "blank") return 0;
@@ -522,6 +545,7 @@ export class Typesetter {
       parsed.push({
         type: "blank", start: doc.length, end: doc.length, source: "",
         level: 0, ordered: false, marker: "", lang: "", math: "", task: "none",
+        rows: [], align: [],
       });
     }
     const focusedBlock = blockIndexAtPosition(parsed, focusedPosition);
@@ -595,6 +619,10 @@ export class Typesetter {
           ? theme.bodySize * 1.6 * block.level
           : 0;
     const measure = Math.max(width - indent, theme.bodySize * 4);
+
+    if (block.type === "table") {
+      return this.buildTable(block, rendered, spaceBefore, measure, indent, raw, numbering);
+    }
 
     if (block.type === "math") {
       return this.buildDisplayMath(
@@ -741,6 +769,135 @@ export class Typesetter {
       indent,
       marker: "",
       raw: false,
+    };
+  }
+
+  /**
+   * Lay out a table.
+   *
+   * Each cell is broken as a paragraph of its own at its column's width, so
+   * everything the engine already does inside a paragraph — optimal breaking,
+   * mixed-script spacing, formulas — works inside a cell without a second
+   * implementation. A row is then as tall as its deepest cell, and the row's
+   * lines are ordinary lines whose runs happen to sit at column offsets. Hit
+   * testing, selection and the caret need no special case.
+   */
+  private buildTable(
+    block: Block,
+    rendered: RenderedBlock,
+    spaceBefore: number,
+    measure: number,
+    indent: number,
+    raw: boolean,
+    numbering: Numbering,
+  ): LaidBlock {
+    const theme = this.theme;
+    const columns = block.align.length;
+    if (!columns || !block.rows.length) {
+      return this.buildPreformatted(block, rendered, spaceBefore, indent, raw);
+    }
+
+    const base = styleForSpan(theme, block, null);
+    const padding = theme.bodySize * 0.7;
+    const cells = block.rows.map((row, r) =>
+      Array.from({ length: columns }, (_, c) => {
+        const cell = row[c];
+        if (!cell) return null;
+        const inline = parseInline(cell.text, cell.start, undefined, this.options.inline);
+        // The header is set bold. Marking the spans rather than the block
+        // keeps one style resolver for every kind of run.
+        return r === 0
+          ? { ...inline, spans: inline.spans.map((span) => ({ ...span, strong: true })) }
+          : inline;
+      }),
+    );
+
+    // A column is as wide as its widest cell wants to be, then every column
+    // is scaled back together if the table overflows. Scaling proportionally
+    // rather than clipping keeps a wide column wide.
+    // The header is set bold, so it has to be measured bold: sizing a column
+    // from the lighter face makes the heading it was sized for wrap.
+    const header = styleForSpan(theme, block, {
+      kind: "text", start: 0, end: 0,
+      strong: true, em: false, code: false, strike: false, href: "",
+    });
+    const natural = Array.from({ length: columns }, (_, c) =>
+      Math.max(
+        ...cells.map((row, r) => {
+          const cell = row[c];
+          if (!cell) return 0;
+          const style = r === 0 ? header : base;
+          return this.measurer.width(cell.text, style.style, style.key);
+        }),
+        theme.bodySize,
+      ),
+    );
+    const available = Math.max(measure - padding * (columns - 1), theme.bodySize * columns);
+    const total = natural.reduce((a, b) => a + b, 0);
+    const widths = total <= available
+      ? natural
+      : natural.map((w) => (w / total) * available);
+
+    const x: number[] = [];
+    for (let c = 0, at = 0; c < columns; c++) {
+      x.push(at);
+      at += widths[c] + padding;
+    }
+
+    const lines: LaidLine[] = [];
+    const rowStarts: number[] = [];
+    let y = 0;
+    for (let r = 0; r < cells.length; r++) {
+      rowStarts.push(lines.length);
+      const broken = cells[r].map((cell, c) =>
+        cell && cell.text
+          ? this.breakParagraph(block, cell, widths[c], 0, numbering)
+          : [],
+      );
+      const depth = Math.max(1, ...broken.map((l) => l.length));
+      for (let k = 0; k < depth; k++) {
+        const runs: LaidRun[] = [];
+        let height = base.style.size * 0.8;
+        let lineDepth = base.style.size * 0.2;
+        for (let c = 0; c < columns; c++) {
+          const line = broken[c][k];
+          if (!line) continue;
+          height = Math.max(height, line.height);
+          lineDepth = Math.max(lineDepth, line.depth);
+          const shift = x[c] + alignmentOffset(block.align[c], line.width, widths[c]);
+          for (const run of line.runs) runs.push({ ...run, x: run.x + shift });
+        }
+        // Rows stack on their own rhythm rather than the paragraph breaker's,
+        // since each cell was broken in isolation and knows nothing of its
+        // neighbours' depth.
+        y += k === 0 ? height : height + theme.bodySize * 0.25;
+        lines.push({
+          docStart: lines.length ? lines[lines.length - 1].docEnd : block.start,
+          docEnd: block.end,
+          baseline: y,
+          height,
+          depth: lineDepth,
+          runs,
+          ratio: 0,
+          width: measure,
+          indent,
+        });
+        y += lineDepth;
+      }
+      y += theme.bodySize * 0.55;
+    }
+
+    return {
+      block,
+      lines,
+      height: spaceBefore + y,
+      spaceBefore,
+      y: 0,
+      rendered,
+      indent,
+      marker: "",
+      raw,
+      table: { columns, x, widths, rowStarts, padding },
     };
   }
 

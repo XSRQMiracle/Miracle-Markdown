@@ -225,4 +225,74 @@ assert.equal(formulaPresentation({ ...EMPTY_GEOMETRY, error: "loading" }, "").wi
 const invisibleFormula = formulaPresentation({ ...EMPTY_GEOMETRY, widthEx: 2 }, "\\hphantom{x}");
 assert.equal(invisibleFormula.fallback, undefined, "valid inkless formulas do not turn into source text");
 assert.ok(invisibleFormula.width > 0, "valid inkless formulas retain their advance");
+
+// --- tables ----------------------------------------------------------------
+// Each cell is broken as a paragraph of its own at its column's width, so a
+// table is ordinary lines whose runs happen to sit at column offsets.
+const TABLE = "| head | second column |\n|:---|---:|\n| a | b |\n| a much longer cell here | c |";
+{
+  const t = typesetter.layoutDocument(TABLE, 1000, -1).blocks[0];
+  assert.equal(t.block.type, "table");
+  assert.ok(t.table, "a table block carries its column geometry");
+  assert.equal(t.table!.columns, 2);
+  assert.equal(t.lines.length, 3, "three rows, none of them wrapped at this measure");
+  assert.deepEqual(t.table!.rowStarts, [0, 1, 2]);
+
+  const weights = (i: number) => [...new Set(t.lines[i].runs.map((r) => r.style.weight))];
+  assert.deepEqual(weights(0), [700], "the header row is bold");
+  assert.ok(t.table!.widths[1] >= 148,
+    "a bold header sizes its column from the face it is drawn in");
+  assert.deepEqual(weights(1), [400], "and the body is not");
+
+  // Columns do not overlap, and nothing strays past the table's own width.
+  const width = t.table!.x[1] + t.table!.widths[1];
+  for (const line of t.lines) {
+    for (const run of line.runs) {
+      assert.ok(run.x >= 0 && run.x <= width, "every run sits inside the table");
+    }
+  }
+  assert.ok(t.table!.x[1] >= t.table!.widths[0], "the second column starts after the first");
+
+  // Every run still maps to the source it was written from.
+  for (const line of t.lines) {
+    for (const run of line.runs) {
+      if (run.synthetic || run.math || run.image) continue;
+      assert.equal(TABLE.slice(run.docStart, run.docEnd), run.text,
+        `run ${JSON.stringify(run.text)} maps to its own source`);
+    }
+  }
+}
+{
+  // A right-aligned column pushes its content to the column's far edge.
+  const t = typesetter.layoutDocument(TABLE, 1000, -1).blocks[0];
+  const rightColumnRuns = t.lines[1].runs.filter((r) => r.x >= t.table!.x[1]);
+  const rightEdge = t.table!.x[1] + t.table!.widths[1];
+  const last = rightColumnRuns[rightColumnRuns.length - 1];
+  assert.ok(last && last.x + 10 <= rightEdge + 1, "a right-aligned cell ends at its column edge");
+  assert.ok(last!.x > t.table!.x[1], "and does not start at its left edge");
+}
+{
+  // Narrowing the measure wraps cells rather than overflowing them.
+  const wide = typesetter.layoutDocument(TABLE, 1000, -1).blocks[0];
+  const narrow = typesetter.layoutDocument(TABLE, 200, -1).blocks[0];
+  assert.ok(narrow.lines.length > wide.lines.length, "a narrow table wraps its cells");
+  assert.ok(narrow.height > wide.height, "and grows taller for them");
+  const width = narrow.table!.x[1] + narrow.table!.widths[1];
+  assert.ok(width <= 200 + 1, "the table never exceeds the measure");
+  for (let i = 1; i < narrow.lines.length; i++) {
+    const gap = (narrow.lines[i].baseline - narrow.lines[i].height) -
+      (narrow.lines[i - 1].baseline + narrow.lines[i - 1].depth);
+    assert.ok(gap >= -0.01, `wrapped table lines must not overlap, gap was ${gap}`);
+  }
+}
+{
+  // A ragged row is padded, not misaligned: a missing cell leaves its column
+  // empty rather than shifting the ones after it.
+  const ragged = typesetter.layoutDocument("| a | b |\n|---|---|\n| only |", 1000, -1).blocks[0];
+  assert.equal(ragged.block.type, "table");
+  assert.equal(ragged.table!.columns, 2, "the delimiter row fixes the column count");
+  assert.equal(ragged.lines.length, 2);
+}
+console.log("ok   tables break each cell in its own column and keep their source offsets");
+
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");

@@ -295,6 +295,34 @@ export class Renderer {
       return;
     }
 
+    if (type === "table" && b.table && b.lines.length) {
+      // Booktabs' rules rather than a grid: a heavy rule above and below, a
+      // light one under the header, and nothing vertical. A ruled box makes
+      // the reader trace lines instead of reading rows.
+      const table = b.table;
+      const width = table.x[table.columns - 1] + table.widths[table.columns - 1];
+      const top = b.y + b.lines[0].baseline - b.lines[0].height - theme.bodySize * 0.35;
+      const last = b.lines[b.lines.length - 1];
+      const bottom = b.y + last.baseline + last.depth + theme.bodySize * 0.3;
+
+      this.setFill(theme.color);
+      ctx.fillRect(b.indent, top, width, 1);
+      ctx.fillRect(b.indent, bottom, width, 1);
+
+      const headerEnd = table.rowStarts[1];
+      if (headerEnd !== undefined && headerEnd > 0) {
+        const line = b.lines[headerEnd - 1];
+        this.setFill(theme.ruleColor);
+        ctx.fillRect(
+          b.indent,
+          b.y + line.baseline + line.depth + theme.bodySize * 0.28,
+          width,
+          1,
+        );
+      }
+      return;
+    }
+
     if (type === "list" && b.lines.length) {
       const style = b.lines[0].runs[0]?.style;
       if (!style) return;

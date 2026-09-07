@@ -20,6 +20,7 @@ export type BlockType =
   | "rule"
   | "math"
   | "frontmatter"
+  | "table"
   | "blank";
 
 export interface Block {
@@ -40,7 +41,20 @@ export interface Block {
   math: string;
   /** Task state of a list item written as `- [ ]` or `- [x]`. */
   task: TaskState;
+  /** Rows of a table block; the first is the header. */
+  rows: TableCell[][];
+  /** One entry per column, from the delimiter row. */
+  align: ColumnAlign[];
 }
+
+/** A table cell, carrying the document offsets its text came from. */
+export interface TableCell {
+  text: string;
+  start: number;
+  end: number;
+}
+
+export type ColumnAlign = "left" | "center" | "right";
 
 /** Whether a list item carries a checkbox, and whether it is ticked. */
 export type TaskState = "none" | "todo" | "done";
@@ -110,6 +124,8 @@ const QUOTE = /^\s*>\s?(.*)$/;
 const UL = /^(\s*)([-*+])\s+(.*)$/;
 /** GFM's task marker: only valid directly after a bullet, and space-separated. */
 const TASK = /^\[([ xX])\]\s+/;
+/** A table's delimiter row: dashes per column, with optional alignment colons. */
+const DELIMITER_CELL = /^:?-+:?$/;
 const OL = /^(\s*)(\d+)([.)])\s+(.*)$/;
 
 interface BlockMathOpen {
@@ -158,9 +174,17 @@ function matchBlockMathOpen(line: string, options: InlineOptions): BlockMathOpen
   return { opener, closer, openAt, sameLineClose };
 }
 
-function interruptsParagraph(line: string, options: InlineOptions): boolean {
+function interruptsParagraph(
+  line: string,
+  options: InlineOptions,
+  next?: string,
+): boolean {
   return (
     line.trim() === "" ||
+    // A table's header row is indistinguishable from a paragraph line until
+    // the delimiter row beneath it is seen, so an interrupting table can only
+    // be recognised with the following line in hand.
+    (next !== undefined && tableStartsAt([line, next], 0, 2) !== null) ||
     HEADING.test(line) ||
     FENCE.test(line) ||
     matchBlockMathOpen(line, options) !== null ||
@@ -169,6 +193,71 @@ function interruptsParagraph(line: string, options: InlineOptions): boolean {
     UL.test(line) ||
     OL.test(line)
   );
+}
+
+/**
+ * Split a row into cells, keeping each one's document offsets.
+ *
+ * A pipe escaped with a backslash is content. The outer pipes are optional in
+ * GFM, so a leading or trailing empty cell created by one is dropped — but
+ * only when the row actually began or ended with a pipe, since `a || b` has a
+ * genuinely empty cell in the middle.
+ */
+function splitRow(line: string, offset: number): TableCell[] {
+  const cells: TableCell[] = [];
+  let from = 0;
+  for (let i = 0; i <= line.length; i++) {
+    if (i < line.length) {
+      if (line[i] === "\\" && line[i + 1] === "|") {
+        i++;
+        continue;
+      }
+      if (line[i] !== "|") continue;
+    }
+    const raw = line.slice(from, i);
+    const leading = raw.length - raw.trimStart().length;
+    const text = raw.trim();
+    cells.push({
+      text,
+      start: offset + from + leading,
+      end: offset + from + leading + text.length,
+    });
+    from = i + 1;
+  }
+  if (cells.length && line.trimStart().startsWith("|")) cells.shift();
+  if (cells.length && line.trimEnd().endsWith("|") && cells[cells.length - 1].text === "") {
+    cells.pop();
+  }
+  return cells;
+}
+
+/** Column alignments, or null when the line is not a delimiter row. */
+function delimiterAlignments(line: string): ColumnAlign[] | null {
+  if (!line.includes("-")) return null;
+  const cells = splitRow(line, 0);
+  if (!cells.length) return null;
+  const align: ColumnAlign[] = [];
+  for (const cell of cells) {
+    if (!DELIMITER_CELL.test(cell.text)) return null;
+    const left = cell.text.startsWith(":");
+    const right = cell.text.endsWith(":");
+    align.push(left && right ? "center" : right ? "right" : "left");
+  }
+  return align;
+}
+
+/**
+ * Whether a table begins on this line.
+ *
+ * A header row looks exactly like a paragraph until the delimiter row below
+ * it is seen, so the decision needs both lines. GFM also requires the two to
+ * agree on how many columns there are.
+ */
+function tableStartsAt(lines: string[], i: number, count: number): ColumnAlign[] | null {
+  if (i + 1 >= count || !lines[i].includes("|")) return null;
+  const align = delimiterAlignments(lines[i + 1]);
+  if (!align) return null;
+  return splitRow(lines[i], 0).length === align.length ? align : null;
 }
 
 /**
@@ -257,7 +346,7 @@ export function parseBlocks(
             // continuation lines so the split does not invent a hard break.
             end = closeEnd;
             let k = j + 1;
-            while (k < count && !interruptsParagraph(lines[k], options)) k++;
+            while (k < count && !interruptsParagraph(lines[k], options, lines[k + 1])) k++;
             const suffixEnd = blockEnd(doc, offsets, lines.length, k, closeEnd, tail);
             suffix = block("paragraph", doc.slice(closeEnd, suffixEnd), closeEnd, suffixEnd);
             i = k;
@@ -329,13 +418,28 @@ counters.length = 0;
       continue;
     }
 
+    const align = tableStartsAt(lines, i, count);
+    if (align) {
+      const rows: TableCell[][] = [splitRow(line, start)];
+      let j = i + 2;
+      while (j < count && lines[j].includes("|") && lines[j].trim() !== "") {
+        rows.push(splitRow(lines[j], offsets[j]));
+        j++;
+      }
+      const end = offsets[j - 1] + lines[j - 1].length;
+      counters.length = 0;
+      blocks.push(block("table", doc.slice(start, end), start, end, { rows, align }));
+      i = j;
+      continue;
+    }
+
     const ul = UL.exec(line);
     const ol = OL.exec(line);
     if (ul || ol) {
       // A list item continues over ordinary lazy continuation lines, but a
       // block opener starts a new block just as it would after a paragraph.
       let j = i + 1;
-      while (j < count && !interruptsParagraph(lines[j], options)) j++;
+      while (j < count && !interruptsParagraph(lines[j], options, lines[j + 1])) j++;
       const end = blockEnd(doc, offsets, lines.length, j, start, line);
       const indent = (ul ? ul[1] : ol![1]).length;
       const level = Math.floor(indent / 2) + 1;
@@ -366,7 +470,7 @@ counters.length = 0;
 
     // Paragraph: run on until a blank line or a block that interrupts.
     let j = i + 1;
-    while (j < count && !interruptsParagraph(lines[j], options)) j++;
+    while (j < count && !interruptsParagraph(lines[j], options, lines[j + 1])) j++;
     const end = blockEnd(doc, offsets, lines.length, j, start, line);
 counters.length = 0;
     blocks.push(block("paragraph", doc.slice(start, end), start, end));
@@ -484,6 +588,8 @@ function block(
     lang: extra.lang ?? "",
     math: extra.math ?? "",
     task: extra.task ?? "none",
+    rows: extra.rows ?? [],
+    align: extra.align ?? [],
   };
 }
 

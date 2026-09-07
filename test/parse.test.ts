@@ -492,5 +492,57 @@ eq(parseInline("![unclosed](x", 0).text, "![unclosed](x", "an unterminated image
   eq(parseInline("![**bold** alt](x.png)", 0).text, OBJ_CHAR, "and produces no extra text");
 }
 
+
+// --- tables ----------------------------------------------------------------
+// A header row is indistinguishable from a paragraph until the delimiter row
+// beneath it is read, so the decision needs both lines.
+const tableOf = (doc: string) => parseBlocks(doc).find((b) => b.type === "table");
+const grid = (doc: string) =>
+  tableOf(doc)?.rows.map((row) => row.map((c) => c.text));
+
+eq(grid("| a | b |\n|---|---|\n| 1 | 2 |"),
+   [["a", "b"], ["1", "2"]], "the delimiter row is structure, not content");
+eq(tableOf("| a | b |\n|---|---|")?.align, ["left", "left"], "plain dashes align left");
+eq(tableOf("| a | b | c |\n|:--|:-:|--:|")?.align, ["left", "center", "right"],
+   "colons choose the alignment");
+eq(grid("a | b\n--- | ---\n1 | 2"),
+   [["a", "b"], ["1", "2"]], "the outer pipes are optional");
+eq(grid("| a || b |\n|---|---|---|"), [["a", "", "b"]], "an empty middle cell is kept");
+eq(grid("| a \\| b |\n|---|"), [["a \\| b"]], "an escaped pipe stays inside its cell");
+
+// Not tables.
+eq(tableOf("| a | b |"), undefined, "a header row alone is not a table");
+eq(tableOf("| a | b |\n| c | d |"), undefined, "without a delimiter row it is a paragraph");
+eq(tableOf("| a | b |\n|---|"), undefined, "the two rows must agree on the column count");
+eq(tableOf("no pipes here\n---"), undefined,
+   "a delimiter row needs pipes above it to make a table");
+eq(parseBlocks("no pipes here\n---").map((b) => b.type), ["paragraph", "rule"],
+   "the dashes stay a thematic break");
+
+// A table interrupts a paragraph, and the paragraph keeps its own lines.
+{
+  const doc = "intro text\n\n| a |\n|---|\n| 1 |\n\nafter";
+  eq(parseBlocks(doc).map((b) => b.type),
+     ["paragraph", "blank", "table", "blank", "paragraph"], "a table is its own block");
+}
+{
+  const doc = "lead line\n| a |\n|---|\n| 1 |";
+  eq(parseBlocks(doc).map((b) => b.type), ["paragraph", "table"],
+     "a table interrupts the paragraph above it");
+  eq(parseBlocks(doc)[0].source, "lead line", "and the paragraph keeps only its own line");
+}
+
+// Cells carry the offsets their text came from, which is what the caret needs.
+{
+  const doc = "| alpha | beta |\n|---|---|\n| one | two |";
+  const t = tableOf(doc)!;
+  for (const row of t.rows) {
+    for (const cell of row) {
+      eq(doc.slice(cell.start, cell.end), cell.text, `cell ${JSON.stringify(cell.text)} maps to its source`);
+    }
+  }
+  eq(t.source, doc, "the block covers the whole table");
+}
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);
