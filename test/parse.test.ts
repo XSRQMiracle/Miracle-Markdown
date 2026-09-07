@@ -448,5 +448,49 @@ eq(kinds("---"), ["rule"], "a lone divider is a rule");
   eq(kinds(doc)[1], "paragraph", "the document continues normally after it");
 }
 
+
+// --- images ----------------------------------------------------------------
+// An image is a link that resolves to a picture, so it becomes a placeholder
+// like a formula: the alt text is a fallback, not content.
+const OBJ_CHAR = "￼";
+const imageSpan = (body: string) =>
+  parseInline(body, 0).spans.find((s) => s.kind === "image");
+
+eq(parseInline("![cat](cat.png)", 0).text, OBJ_CHAR, "an image collapses to one placeholder");
+eq(imageSpan("![cat](cat.png)")?.href, "cat.png", "the destination becomes the source");
+eq(imageSpan("![cat](cat.png)")?.alt, "cat", "and the label becomes the alt text");
+eq(imageSpan("![](x.png)")?.alt, "", "an empty label is allowed");
+eq(imageSpan('![a](x.png "title")')?.href, "x.png", "a title does not leak into the source");
+eq(imageSpan("![a](<my file.png>)")?.href, "my file.png", "an angle destination may hold spaces");
+
+eq(parseInline("before ![x](y.png) after", 0).text, "before " + OBJ_CHAR + " after",
+   "an image inside a sentence");
+eq(parseInline("[link](y)", 0).text, "link", "a link without the bang is still a link");
+eq(imageSpan("[link](y)"), undefined, "and produces no image span");
+// CommonMark keeps the escaped bang as literal text and links the rest.
+eq(parseInline("\\![x](y)", 0).text, "!x", "an escaped bang leaves a literal ! and a link");
+eq(imageSpan("\\![x](y)"), undefined, "which is not an image");
+eq(parseInline("\\![x](y)", 0).spans.some((s) => s.kind === "link"), true,
+   "the link after it still parses");
+eq(parseInline("`![x](y)`", 0).text, "![x](y)", "a code span keeps it literal");
+eq(parseInline("![unclosed](x", 0).text, "![unclosed](x", "an unterminated image stays literal");
+
+{
+  const body = "see ![cat](cat.png) here";
+  const r = parseInline(body, 50);
+  const at = r.text.indexOf(OBJ_CHAR);
+  eq(r.map[at], 50 + body.indexOf("!"), "the placeholder maps to the opening bang");
+  eq(r.map.length, r.text.length + 1, "the source map still covers every character");
+  const span = r.spans.find((s) => s.kind === "image");
+  eq(span ? [span.start, span.end] : null, [at, at + 1],
+     "the image span covers just the placeholder");
+}
+{
+  // Alt text is opaque: it is a fallback string, never markdown to render.
+  const span = imageSpan("![**bold** alt](x.png)");
+  eq(span?.alt, "**bold** alt", "alt text keeps its markers");
+  eq(parseInline("![**bold** alt](x.png)", 0).text, OBJ_CHAR, "and produces no extra text");
+}
+
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

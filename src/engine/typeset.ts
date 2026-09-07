@@ -19,6 +19,7 @@ import {
   type TextStyle,
 } from "./measure.js";
 import { renderMath, renderMathSegments } from "./mathjax.js";
+import { fitImage, requestImage, type ImageStatus } from "./images.js";
 import { sourceLineEnds } from "./source-layout.js";
 import type { MathGeometry, MathSegment } from "./math.js";
 import {
@@ -134,11 +135,42 @@ export interface MathRun {
   segment?: MathSegment;
 }
 
-/** One placeholder's worth of formula: its box and how it may break. */
-interface MathPiece extends MathRun {
+/** A picture, ready to draw. */
+export interface ImageRun {
+  source: CanvasImageSource | null;
+  /** Drawn size in CSS pixels, already fitted to the measure. */
+  width: number;
+  height: number;
+  status: ImageStatus;
+  src: string;
+  alt: string;
+  /** Measured alt-text presentation while loading or after a failure. */
+  fallback?: { text: string; style: TextStyle };
+}
+
+/**
+ * One placeholder's worth of content: its box, how it may break, and which
+ * kind of object it stands for. The line breaker reads only the box; the
+ * discriminator is for the renderer.
+ */
+interface ObjectBox {
+  width: number;
+  height: number;
+  depth: number;
   /** TeX's penalty for breaking after this piece; NaN when it may not. */
   penaltyAfter: number;
 }
+
+interface MathPiece extends MathRun, ObjectBox {
+  kind: "math";
+}
+
+interface ImagePiece extends ObjectBox {
+  kind: "image";
+  image: ImageRun;
+}
+
+type ObjectPiece = MathPiece | ImagePiece;
 
 export interface LaidRun {
   x: number;
@@ -155,6 +187,8 @@ export interface LaidRun {
   synthetic: boolean;
   /** Present on a run that draws a formula rather than text. */
   math?: MathRun;
+  /** Present on a run that draws a picture rather than text. */
+  image?: ImageRun;
 }
 
 export interface LaidLine {
@@ -845,17 +879,18 @@ export class Typesetter {
    * clicking anywhere in a formula puts the caret at its opening delimiter and
    * reveals the source, however the formula happens to be split at the time.
    */
-  private expandMath(
+  private expandObjects(
     rendered: RenderedBlock,
     style: TextStyle,
     key: string,
     numbering: Numbering,
-  ): { rendered: RenderedBlock; pieces: Map<number, MathPiece> } {
+    measure: number,
+  ): { rendered: RenderedBlock; pieces: Map<number, ObjectPiece> } {
     if (!rendered.text.includes(OBJECT_REPLACEMENT)) {
       return { rendered, pieces: new Map() };
     }
 
-    const pieces = new Map<number, MathPiece>();
+    const pieces = new Map<number, ObjectPiece>();
     let text = "";
     const map: number[] = [];
     // Where each original character ended up, so spans can be moved with it.
@@ -868,7 +903,10 @@ export class Typesetter {
         map.push(rendered.map[i]);
         continue;
       }
-      const built = this.buildMathPieces(rendered, i, style, key, numbering);
+      const span = rendered.spans.find((s) => i >= s.start && i < s.end);
+      const built: ObjectPiece[] = span?.kind === "image"
+        ? [this.buildImagePiece(span, style, measure)]
+        : this.buildMathPieces(rendered, i, style, key, numbering);
       for (const piece of built) {
         pieces.set(text.length, piece);
         text += OBJECT_REPLACEMENT;
@@ -913,7 +951,7 @@ export class Typesetter {
     const common = this.mathRun(geometry, latex, display, style);
     let built: MathPiece[];
     if (common.fallback || segments.length < 2) {
-      built = [{ ...common, penaltyAfter: NaN }];
+      built = [{ ...common, kind: "math", penaltyAfter: NaN }];
     } else {
       // Every piece is given the whole formula's height and depth. That is
       // conservative — a piece with no tall part gets more leading than it
@@ -922,6 +960,7 @@ export class Typesetter {
       // anyway.
       built = segments.map((segment) => ({
         ...common,
+        kind: "math" as const,
         segment,
         width: segment.width * common.scale,
         penaltyAfter: segment.penaltyAfter ?? NaN,
@@ -934,6 +973,55 @@ export class Typesetter {
   }
 
   private pieceCache = new Map<string, MathPiece[]>();
+
+  /**
+   * Lay out a picture.
+   *
+   * The intrinsic size arrives asynchronously, so the box is whatever is known
+   * now: the alt text while the file decodes or after it fails, the fitted
+   * picture once it is there. `onImageSettled` re-typesets when that changes,
+   * which is the same handshake the math bridge uses while MathJax loads.
+   *
+   * An image sits on the baseline rather than straddling it, as a browser
+   * places one, so the line above is never encroached upon.
+   */
+  private buildImagePiece(span: Span, style: TextStyle, measure: number): ImagePiece {
+    const src = span.href ?? "";
+    const alt = span.alt ?? "";
+    const loaded = requestImage(src);
+    const key = cssFont(style);
+
+    if (loaded.status !== "ready" || loaded.width <= 0) {
+      const text = alt || (loaded.status === "error" ? "\u26a0 " + src : src);
+      const v = this.vmetrics(style, key);
+      return {
+        kind: "image",
+        width: this.measurer.width(text, style, key),
+        height: v.ascent,
+        depth: v.descent,
+        penaltyAfter: NaN,
+        image: {
+          source: null,
+          width: 0,
+          height: 0,
+          status: loaded.status,
+          src,
+          alt,
+          fallback: { text, style },
+        },
+      };
+    }
+
+    const fitted = fitImage(loaded.width, loaded.height, measure);
+    return {
+      kind: "image",
+      width: fitted.width,
+      height: fitted.height,
+      depth: 0,
+      penaltyAfter: NaN,
+      image: { source: loaded.source, ...fitted, status: "ready", src, alt },
+    };
+  }
 
   /** Resolve the painted representation before anyone consumes its metrics. */
   private mathRun(
@@ -981,7 +1069,7 @@ export class Typesetter {
     if (!rendered.text.length) return [];
 
     const base = styleForSpan(this.theme, block, null);
-    const expanded = this.expandMath(rendered, base.style, base.key, numbering);
+    const expanded = this.expandObjects(rendered, base.style, base.key, numbering, measure);
     rendered = expanded.rendered;
     const pieces = expanded.pieces;
     engine.configure(
@@ -1121,6 +1209,7 @@ export class Typesetter {
         const ce = toChar(e);
         const st = styleAt(s);
         const slice = text.slice(cs, ce);
+        const object = slice === OBJECT_REPLACEMENT ? pieces.get(cs) : undefined;
         runs.push({
           x,
           text: slice,
@@ -1131,7 +1220,8 @@ export class Typesetter {
           spanId: st.id,
           scaleX,
           synthetic: false,
-          math: slice === OBJECT_REPLACEMENT ? pieces.get(cs) : undefined,
+          math: object?.kind === "math" ? object : undefined,
+          image: object?.kind === "image" ? object.image : undefined,
         });
       }
       lines.push({

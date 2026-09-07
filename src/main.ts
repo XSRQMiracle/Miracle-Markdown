@@ -9,6 +9,7 @@ import { SAMPLE } from "./sample.js";
 import { isDesktop, openDocument, saveDocument } from "./platform.js";
 import { DEFAULT_MATH_OPTIONS, initMath, type MathOptions } from "./engine/mathjax.js";
 import { buildMathPanel } from "./ui/math-panel.js";
+import { onImageSettled } from "./engine/images.js";
 import type { LineEnding } from "./markdown/document.js";
 
 const stage = document.getElementById("stage") as HTMLElement;
@@ -81,7 +82,11 @@ async function main() {
     button.addEventListener("click", () => {
       t.set(editor, !t.get(editor));
       sync();
-      editor.focus();
+      // An image's size is only known once it has decoded, and the box the
+  // typesetter reserved was the alt text's. Re-typeset when that changes.
+  onImageSettled(() => editor.invalidateMath());
+
+  editor.focus();
     });
     toggles.appendChild(button);
   }

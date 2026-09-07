@@ -45,7 +45,15 @@ export interface Block {
 /** Whether a list item carries a checkbox, and whether it is ticked. */
 export type TaskState = "none" | "todo" | "done";
 
-export type SpanKind = "text" | "strong" | "em" | "code" | "link" | "strike" | "math";
+export type SpanKind =
+  | "text"
+  | "strong"
+  | "em"
+  | "code"
+  | "link"
+  | "strike"
+  | "math"
+  | "image";
 
 /**
  * The character standing in for an inline formula in a block's rendered text.
@@ -63,6 +71,8 @@ export interface Span {
   math?: string;
   /** Whether a math span is set in display style. */
   display?: boolean;
+  /** Alternative text, on spans of kind "image". */
+  alt?: string;
   /** Range within the block's *rendered* text. */
   start: number;
   end: number;
@@ -645,6 +655,8 @@ interface Format {
   /** LaTeX source, on math formats. */
   latex?: string;
   display?: boolean;
+  /** Alternative text, on image formats. */
+  alt?: string;
 }
 
 /**
@@ -798,6 +810,28 @@ export function parseInline(
       continue;
     }
 
+    // An image is a link that resolves to a picture rather than to text, so
+    // it becomes a placeholder like a formula: its alt text is a fallback,
+    // not content, and the typesetter needs a box rather than characters.
+    if (c === "!" && body[i + 1] === "[") {
+      const close = matchBracket(body, i + 1, limit);
+      if (close > 0 && close < limit && body[close + 1] === "(") {
+        const target = matchLinkDestination(body, close + 1, limit);
+        if (target) {
+          swaps.push({ from: i, to: target.end });
+          formats.push({
+            kind: "image",
+            from: i,
+            to: target.end,
+            href: target.href,
+            alt: body.slice(i + 2, close),
+          });
+          i = target.end;
+          continue;
+        }
+      }
+    }
+
     // An autolink is only a link when it is not already inside one: CommonMark
     // forbids a link within a link, and letting both formats cover the same
     // characters would leave the span builder to choose arbitrarily.
@@ -929,7 +963,11 @@ export function parseInline(
     if (w < swaps.length && k === swaps[w].from) {
       text += OBJECT_REPLACEMENT;
       map.push(src(k));
-      active.push(live.filter((f) => f.from === swaps[w].from && f.kind === "math"));
+      active.push(
+        live.filter(
+          (f) => f.from === swaps[w].from && (f.kind === "math" || f.kind === "image"),
+        ),
+      );
       k = swaps[w].to - 1;
       continue;
     }
@@ -990,6 +1028,20 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
   const has = (k: Format["kind"]) => fs.some((f) => f.kind === k);
   const link = fs.find((f) => f.kind === "link");
   const math = fs.find((f) => f.kind === "math");
+  const image = fs.find((f) => f.kind === "image");
+  if (image) {
+    return {
+      kind: "image",
+      alt: image.alt ?? "",
+      href: image.href,
+      start,
+      end,
+      strong: false,
+      em: false,
+      code: false,
+      strike: false,
+    };
+  }
   if (math) {
     return {
       kind: "math",

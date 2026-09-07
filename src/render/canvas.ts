@@ -117,6 +117,11 @@ export class Renderer {
 
           // A formula draws as outlines rather than text: MathJax laid it out,
           // we own where it goes. One fill call, whatever its complexity.
+          if (run.image) {
+            this.drawImage(run, x, y);
+            continue;
+          }
+
           if (run.math) {
             this.drawMath(run, x, y);
             continue;
@@ -304,6 +309,29 @@ export class Renderer {
       const w = ctx.measureText(b.marker).width;
       ctx.fillText(b.marker, b.indent - w - theme.bodySize * 0.45, baseline);
     }
+  }
+
+  /**
+   * Draw a picture.
+   *
+   * The box sits on the baseline, as a browser places an inline image, so the
+   * line above is never encroached upon. Until the file has decoded there is
+   * nothing to draw but its alt text, which is what the typesetter measured.
+   */
+  private drawImage(run: LaidRun, x: number, baseline: number): void {
+    const image = run.image!;
+    const ctx = this.ctx;
+
+    if (!image.source || image.status !== "ready") {
+      const fallback = image.fallback;
+      if (!fallback) return;
+      this.setFont(cssFont(fallback.style));
+      this.setFill(image.status === "error" ? "#b3402f" : fallback.style.color);
+      ctx.fillText(fallback.text, x, baseline);
+      return;
+    }
+
+    ctx.drawImage(image.source, x, baseline - image.height, image.width, image.height);
   }
 
   /**
