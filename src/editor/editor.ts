@@ -15,7 +15,13 @@
  * where it needs to be.
  */
 
-import { MATCH_COLOR, Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
+import {
+  MATCH_COLOR,
+  Renderer,
+  type Scrollbar,
+  type SelectionRect,
+  type Viewport,
+} from "../render/canvas.js";
 import { listItemMarker, sourceRangeOwnsPosition, type BlockType } from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
 import { wordAt, wordBoundary } from "./words.js";
@@ -38,6 +44,10 @@ const MIN_GUTTER = 48;
 const MIN_MEASURE = 240;
 /** Space above the first block. */
 const PAGE_TOP = 56;
+/** Width of the strip along the right edge that the scrollbar answers to. */
+const SCROLLBAR_WIDTH = 14;
+/** A thumb shorter than this is hard to catch, however long the document. */
+const MIN_THUMB = 32;
 
 /**
  * Delimiters that close themselves when one is typed.
@@ -121,6 +131,9 @@ export class Editor {
   private undoStack: Snapshot[] = [];
   private redoStack: Snapshot[] = [];
   private lastEditAt = -Infinity;
+
+  /** Pointer over the scrollbar, or dragging it. */
+  private scrollbarActive = false;
 
   private caretVisible = true;
   private hasFocus = false;
@@ -293,6 +306,7 @@ export class Editor {
       caret,
       this.caretVisible && this.hasFocus && this.interacted,
       this.options.showBadness,
+      this.scrollbar(),
     );
 
     if (caret) {
@@ -330,6 +344,41 @@ export class Editor {
   }
 
   // -- geometry ----------------------------------------------------------
+
+  /** How far the document can scroll. The trailing space is deliberate: the
+   *  last line should not sit against the bottom edge of the window. */
+  private get scrollMax(): number {
+    return Math.max(0, this.docHeight - this.host.clientHeight + this.theme.bodySize * 8);
+  }
+
+  /** The scrollbar thumb, or null when everything already fits. */
+  private scrollbar(): Scrollbar | null {
+    const max = this.scrollMax;
+    if (max <= 0) return null;
+    const view = this.host.clientHeight;
+    const track = view - 4;
+    // The thumb's length is the visible fraction of the document, floored so
+    // that a very long one still leaves something to take hold of.
+    const h = Math.max(MIN_THUMB, Math.round(track * view / (view + max)));
+    const y = 2 + Math.round((track - h) * Math.min(1, this.scrollTop / max));
+    return { width: SCROLLBAR_WIDTH, y, h, active: this.scrollbarActive };
+  }
+
+  /** Scroll so the thumb's top sits at `y` in the window. */
+  private scrollThumbTo(y: number): void {
+    const bar = this.scrollbar();
+    if (!bar) return;
+    const travel = this.host.clientHeight - 4 - bar.h;
+    const at = travel <= 0 ? 0 : (y - 2) / travel;
+    this.scrollTo(at * this.scrollMax);
+  }
+
+  private scrollTo(top: number): void {
+    const next = Math.max(0, Math.min(this.scrollMax, top));
+    if (next === this.scrollTop) return;
+    this.scrollTop = next;
+    this.schedule();
+  }
 
   /** Source position and visual affinity for a point in canvas coordinates. */
   private positionAt(clientX: number, clientY: number): CaretPosition {
@@ -528,6 +577,45 @@ export class Editor {
       for (const r of this.selectionRects(m.start, m.end)) rects.push({ ...r, color: MATCH_COLOR });
     }
     return rects;
+  }
+
+  /** Whether a canvas-relative x is within the strip the scrollbar answers
+   *  to. Kept in terms of an offset so that tracking the pointer costs no
+   *  layout read on every move. */
+  private overScrollbar(canvasX: number): boolean {
+    return this.scrollbar() !== null && canvasX >= this.canvas.clientWidth - SCROLLBAR_WIDTH;
+  }
+
+  /**
+   * Take a press on the scrollbar, if that is what it is.
+   *
+   * Pressing the track jumps the thumb to the pointer and then drags from
+   * there, which is what both platforms now do: the alternative — paging
+   * towards the click — makes reaching a distant part of a long document a
+   * matter of repeated clicks.
+   */
+  private beginScrollDrag(e: MouseEvent): boolean {
+    const bar = this.scrollbar();
+    if (!bar || !this.overScrollbar(e.offsetX)) return false;
+    const top = this.canvas.getBoundingClientRect().top;
+    const within = e.clientY - top - bar.y;
+    // Grabbing the thumb keeps the point that was grabbed under the pointer;
+    // anywhere else the thumb centres on it first.
+    const grip = within >= 0 && within <= bar.h ? within : bar.h / 2;
+
+    this.scrollbarActive = true;
+    this.schedule();
+    const move = (ev: MouseEvent) => this.scrollThumbTo(ev.clientY - top - grip);
+    const up = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      this.scrollbarActive = this.overScrollbar(ev.clientX - this.canvas.getBoundingClientRect().left);
+      this.schedule();
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    move(e);
+    return true;
   }
 
   // -- search ------------------------------------------------------------
@@ -775,8 +863,8 @@ export class Editor {
     const viewBottom = this.scrollTop + this.host.clientHeight - this.theme.bodySize * 4;
     const top = caret.y;
     const bottom = caret.y + caret.h;
-    if (top < viewTop) this.scrollTop = Math.max(0, top - this.theme.bodySize * 2);
-    else if (bottom > viewBottom) this.scrollTop = bottom - this.host.clientHeight + this.theme.bodySize * 5;
+    if (top < viewTop) this.scrollTo(top - this.theme.bodySize * 2);
+    else if (bottom > viewBottom) this.scrollTo(bottom - this.host.clientHeight + this.theme.bodySize * 5);
   }
 
   // -- events ------------------------------------------------------------
@@ -842,6 +930,7 @@ export class Editor {
 
     canvas.addEventListener("mousedown", (e) => {
       e.preventDefault();
+      if (this.beginScrollDrag(e)) return;
       this.finishComposition();
       this.interacted = true;
       this.focus();
@@ -877,11 +966,21 @@ export class Editor {
       window.addEventListener("mouseup", up);
     });
 
+    canvas.addEventListener("mousemove", (e) => {
+      const over = this.overScrollbar(e.offsetX);
+      if (over === this.scrollbarActive) return;
+      this.scrollbarActive = over;
+      this.schedule();
+    });
+    canvas.addEventListener("mouseleave", () => {
+      if (!this.scrollbarActive) return;
+      this.scrollbarActive = false;
+      this.schedule();
+    });
+
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
-      const max = Math.max(0, this.docHeight - this.host.clientHeight + this.theme.bodySize * 8);
-      this.scrollTop = Math.max(0, Math.min(max, this.scrollTop + e.deltaY));
-      this.schedule();
+      this.scrollTo(this.scrollTop + e.deltaY);
     }, { passive: false });
 
     this.input.addEventListener("keydown", (e) => this.onKeyDown(e));

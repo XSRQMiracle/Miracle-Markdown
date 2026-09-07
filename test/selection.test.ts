@@ -59,7 +59,10 @@ function gestures(text: string, ranges: Array<[number, number]>) {
   Object.assign(editor, {
     text, selStart: 0, selEnd: 0, caretAffinity: "downstream", preferredX: null,
     composing: null, undoStack: [], redoStack: [], lastEditAt: -Infinity,
-    input, canvas, host: {},
+    input, canvas,
+    // Enough of the geometry for the scrollbar to work out that a document
+    // this short does not need one.
+    host: { clientHeight: 600 }, docHeight: 0, typesetter: { theme: { bodySize: 18 } },
     blocks: ranges.map(([start, end]) => ({ block: { start, end } })),
     invalidate() {}, scrollCaretIntoView() {},
     positionAt: (x: number) => ({ offset: x, affinity: "downstream" }),
