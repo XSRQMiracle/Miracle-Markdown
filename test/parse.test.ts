@@ -562,6 +562,26 @@ eq(tasks("- [ ] a\n- [x] b\n- c"), ["todo", "done", "none"], "mixed items in one
 // a document, and even there only when something closes them.
 const kinds = (doc: string) => parseBlocks(doc).map((b) => b.type);
 
+// --- setext headings ------------------------------------------------------
+// Markdown's older heading form, which CommonMark keeps and Typora reads.
+{
+  const one = parseBlocks("Title\n===")[0];
+  eq([one.type, one.level], ["heading", 1], "equals signs underline a first-level heading");
+  eq(renderBlock(one, false).text, "Title", "and the underline is not part of the text");
+  const two = parseBlocks("Sub\n---")[0];
+  eq([two.type, two.level], ["heading", 2], "dashes underline a second-level one");
+  eq(renderBlock(two, false).text, "Sub");
+  eq(kinds("a\nb\n==="), ["heading"], "the whole paragraph is underlined, not just the last line");
+  eq(renderBlock(parseBlocks("a\nb\n===")[0], false).text, "a b");
+  eq(kinds("---"), ["rule"], "with no paragraph above them the dashes are a rule");
+  eq(kinds("\n---"), ["blank", "rule"], "and so is one after a blank line");
+  eq(kinds("# atx\n==="), ["heading", "paragraph"],
+     "an ATX heading is already a heading, so the equals signs are text");
+  eq(kinds("- item\n---"), ["list", "rule"], "a list is not underlined either");
+  eq(kinds("Title\n=== extra"), ["paragraph"], "an underline carries nothing but its own character");
+}
+
+
 eq(kinds("---\ntitle: x\n---\n\nbody"),
    ["frontmatter", "blank", "paragraph"], "front matter opens a document");
 eq(kinds("---\ntitle: x\n...\n\nbody"),
@@ -569,8 +589,9 @@ eq(kinds("---\ntitle: x\n...\n\nbody"),
 eq(kinds("---\nno terminator\n\nbody"),
    ["rule", "paragraph", "blank", "paragraph"], "without a closer it stays a rule");
 eq(kinds("intro\n\n---\ntitle: x\n---"),
-   ["paragraph", "blank", "rule", "paragraph", "rule"],
-   "dashes below the first line are still a break");
+   ["paragraph", "blank", "rule", "heading"],
+   "dashes below the first line open no front matter: the first is a break, " +
+   "and the second underlines the line above it");
 eq(kinds("---"), ["rule"], "a lone divider is a rule");
 
 {
@@ -654,8 +675,8 @@ eq(tableOf("| a | b |\n| c | d |"), undefined, "without a delimiter row it is a 
 eq(tableOf("| a | b |\n|---|"), undefined, "the two rows must agree on the column count");
 eq(tableOf("no pipes here\n---"), undefined,
    "a delimiter row needs pipes above it to make a table");
-eq(parseBlocks("no pipes here\n---").map((b) => b.type), ["paragraph", "rule"],
-   "the dashes stay a thematic break");
+eq(parseBlocks("no pipes here\n---").map((b) => b.type), ["heading"],
+   "the dashes underline the line above instead, as CommonMark says");
 
 // A table interrupts a paragraph, and the paragraph keeps its own lines.
 {

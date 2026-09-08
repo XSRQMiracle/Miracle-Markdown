@@ -141,6 +141,15 @@ export function fenceCloser(openingLine: string): RegExp | null {
 const MATH_OPEN = /^\s*(\$\$|\\\[)/;
 const HEADING = /^(#{1,6})\s+(.*)$/;
 const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+/**
+ * The underline of a setext heading.
+ *
+ * CommonMark's older heading form, and one Typora still reads. It only means
+ * anything under an open paragraph, which is what keeps `---` after a blank
+ * line a thematic break and `---` at the top of a file the front matter it
+ * opens.
+ */
+const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
 /** Front matter opens with exactly three dashes on the document's first line. */
 const FRONT_MATTER_OPEN = /^---\s*$/;
 /** YAML permits either fence as a terminator. */
@@ -587,11 +596,28 @@ counters.length = 0;
       continue;
     }
 
-    // Paragraph: run on until a blank line or a block that interrupts.
+    // Paragraph: run on until a blank line, a block that interrupts, or the
+    // underline that turns it into a heading.
     let j = i + 1;
-    while (j < count && !interruptsParagraph(lines[j], options, lines[j + 1])) j++;
+    while (
+      j < count &&
+      !interruptsParagraph(lines[j], options, lines[j + 1]) &&
+      !SETEXT.test(lines[j])
+    ) j++;
+    counters.length = 0;
+    if (j < count && SETEXT.test(lines[j])) {
+      // The underline belongs to the heading, so the block covers both: the
+      // level is written there and nowhere else.
+      const end = blockEnd(doc, offsets, lines.length, j + 1, start, line);
+      blocks.push(
+        block("heading", doc.slice(start, end), start, end, {
+          level: lines[j].trim().startsWith("=") ? 1 : 2,
+        }),
+      );
+      i = j + 1;
+      continue;
+    }
     const end = blockEnd(doc, offsets, lines.length, j, start, line);
-counters.length = 0;
     blocks.push(block("paragraph", doc.slice(start, end), start, end));
     i = j;
   }
@@ -787,6 +813,10 @@ export function renderBlock(
     if (m) {
       base += m[1].length + b.source.slice(m[1].length).indexOf(m[2]);
       body = m[2];
+    } else {
+      // Setext: the text is every line but the underline.
+      const cut = b.source.lastIndexOf("\n");
+      if (cut >= 0) body = b.source.slice(0, cut);
     }
   } else if (b.type === "quote") {
     return stripPerLine(b, /^\s*>\s?/, options);

@@ -90,6 +90,14 @@ assert.equal(apply("a\nb", head("a\nb", 2, 0, 0)), "## a\nb", "a caret only affe
   assert.deepEqual(edit!.select, { start: 6, end: 6 }, "the caret stays between the same letters");
 }
 
+// An underlined heading is a heading, and changing its level converts it to
+// the ATX form — the two-line form has nothing left to say, and leaving the
+// dashes behind would make them a paragraph.
+assert.equal(apply("Title\n===", head("Title\n===", 2)), "## Title", "setext becomes ATX");
+assert.equal(apply("Title\n===", head("Title\n===", 1)), "Title",
+  "and asking for the level it already has takes the heading off, underline and all");
+assert.equal(apply("Sub\n---", head("Sub\n---", 0)), "Sub", "and level 0 takes the underline off");
+
 const step = (text: string, dir: 1 | -1, at = 0) => apply(text, stepHeading(text, { start: at, end: at }, dir));
 assert.equal(step("### x", 1), "## x", "promoting makes the heading bigger");
 assert.equal(step("# x", 1), "# x", "and stops at the top");
@@ -97,6 +105,7 @@ assert.equal(step("x", 1), "###### x", "a paragraph promotes to the smallest hea
 assert.equal(step("### x", -1), "#### x", "demoting makes it smaller");
 assert.equal(step("###### x", -1), "x", "and falls out to a paragraph");
 assert.equal(step("x", -1), "x", "which has nowhere further to go");
+assert.equal(step("Title\n===", -1), "## Title", "an underlined heading demotes into an ATX one");
 
 // --- fenced blocks --------------------------------------------------------
 {

@@ -177,10 +177,19 @@ export function mapLines(
   return { from, to, insert, select };
 }
 
+/** An underlined heading's second line. */
+const UNDERLINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
+
 /** The heading level of a line, 0 for anything that is not a heading. */
-export function headingLevel(line: string): number {
+export function headingLevel(line: string, next?: string): number {
   const lead = LEAD.exec(line)![1];
-  return ATX.exec(line.slice(lead.length))?.[1].length ?? 0;
+  const atx = ATX.exec(line.slice(lead.length))?.[1].length;
+  if (atx) return atx;
+  // Underlined, if the line below says so and this one has something on it.
+  if (next !== undefined && line.trim() && UNDERLINE.test(next)) {
+    return next.trim().startsWith("=") ? 1 : 2;
+  }
+  return 0;
 }
 
 /**
@@ -190,9 +199,35 @@ export function headingLevel(line: string): number {
  * Typora's toggle — so the same key both applies and removes it.
  */
 export function setHeading(text: string, sel: Range, level: number, toggle = true): Edit | null {
-  const first = linesIn(text, sel)[0];
-  const target = toggle && level > 0 && headingLevel(first.text) === level ? 0 : level;
-  return mapLines(text, sel, (line) => {
+  const lines = linesIn(text, sel);
+  const first = lines[0];
+  const last = lines[lines.length - 1];
+  const below = underlineAfter(text, last);
+  const target = toggle && level > 0 && headingLevel(first.text, below?.text) === level ? 0 : level;
+
+  // An underlined heading becomes an ATX one: the level is being changed, so
+  // the two-line form has nothing left to say, and keeping it would leave a
+  // row of dashes behind as a paragraph of its own.
+  if (below) {
+    // Not through mapLines: the text of the heading may be unchanged while
+    // the underline still has to go, and mapLines reports "nothing changed".
+    const insert = lines.map((l) => headed(l.text, target)).join("\n");
+    const at = first.start + insert.length;
+    return { from: first.start, to: below.end, insert, select: { start: at, end: at } };
+  }
+  return mapLines(text, sel, (line) => headed(line, target));
+}
+
+/** The setext underline belonging to a line, if there is one. */
+function underlineAfter(text: string, line: Line): Line | null {
+  if (!line.text.trim() || line.end >= text.length) return null;
+  const [next] = linesIn(text, { start: line.end + 1, end: line.end + 1 });
+  return next && UNDERLINE.test(next.text) ? next : null;
+}
+
+/** One line rewritten as a heading of `target`, or as a plain line at 0. */
+function headed(line: string, target: number): string {
+  return ((line: string) => {
     const lead = LEAD.exec(line)![1];
     let body = line.slice(lead.length);
     const atx = ATX.exec(body);
@@ -200,7 +235,7 @@ export function setHeading(text: string, sel: Range, level: number, toggle = tru
     body = atx ? body.slice(atx[0].length) : body.replace(MARKER, "");
     if (!body && !target) return lead + body;
     return lead + (target ? "#".repeat(target) + " " : "") + body;
-  });
+  })(line);
 }
 
 /**
@@ -211,7 +246,8 @@ export function setHeading(text: string, sel: Range, level: number, toggle = tru
  * H1 or demoting a paragraph has nowhere to go.
  */
 export function stepHeading(text: string, sel: Range, direction: 1 | -1): Edit | null {
-  const level = headingLevel(linesIn(text, sel)[0].text);
+  const lines = linesIn(text, sel);
+  const level = headingLevel(lines[0].text, underlineAfter(text, lines[lines.length - 1])?.text);
   const next = direction > 0
     ? (level === 0 ? 6 : level === 1 ? 1 : level - 1)
     : (level === 0 ? 0 : level === 6 ? 0 : level + 1);
