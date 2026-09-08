@@ -200,6 +200,12 @@
       }
       footer .spacer { flex: 1; }
       footer b { font-weight: 600; color: var(--ink); }
+      footer #mode:not(:empty) {
+        padding: 1px 6px;
+        border-radius: 4px;
+        background: #e7e5df;
+        color: var(--ink);
+      }
     </style>
   </head>
   <body>
@@ -253,6 +259,7 @@
       </div>
       <footer>
         <span id="status">正在加载排版引擎…</span>
+        <span id="mode"></span>
         <span class="spacer"></span>
         <span id="perf"></span>
       </footer>

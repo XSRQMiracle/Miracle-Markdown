@@ -163,4 +163,5 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Mod+Enter", command: "insertParagraphAfter" },
   { chord: "Mod+Shift+Enter", command: "insertParagraphBefore" },
   { chord: "Ctrl+t", command: "insertTable" },
+  { chord: "Mod+/", command: "sourceMode" },
 ];

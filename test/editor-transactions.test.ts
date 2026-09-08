@@ -370,4 +370,20 @@ function fixture(text='aOLDz', start=4, end=1) {
   assert.deepEqual(room('| a | b |\n| - | - |\n| 1 | 2 |', 22),
     ['| a | b |\n| - | - |\n| 1 | 2 |\n|  |  |', 32], 'a row is added with the caret in its first cell');
 }
+// --- source mode ----------------------------------------------------------
+{
+  const {editor:e,event} = fixture('# a', 0, 0);
+  let laidOut = 0;
+  e.editingOptions = {...DEFAULT_EDITING_OPTIONS};
+  e.invalidate = () => { laidOut++; };
+  event('keydown', {key:'/', metaKey:true, preventDefault(){}});
+  assert.equal(e.editing.sourceMode, true, 'Cmd+/ turns source mode on');
+  assert.equal(laidOut, 1, 'and lays the page out again, since every block changes');
+  event('keydown', {key:'/', metaKey:true, preventDefault(){}});
+  assert.equal(e.editing.sourceMode, false, 'and off again');
+  // The other options change only the next keystroke, so they cost no layout.
+  laidOut = 0;
+  e.setEditing({smartPunctuation:false});
+  assert.equal(laidOut, 0);
+}
 console.log('all editor transaction tests passing');

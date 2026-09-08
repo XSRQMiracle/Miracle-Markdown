@@ -25,6 +25,7 @@ const stage = document.getElementById("stage") as HTMLElement;
 const canvas = document.getElementById("surface") as HTMLCanvasElement;
 const status = document.getElementById("status") as HTMLElement;
 const perf = document.getElementById("perf") as HTMLElement;
+const mode = document.getElementById("mode") as HTMLElement;
 const toggles = document.getElementById("toggles") as HTMLElement;
 const sizeInput = document.getElementById("size") as HTMLInputElement;
 const openButton = document.getElementById("open") as HTMLButtonElement;
@@ -208,6 +209,14 @@ async function main() {
   columnInput.addEventListener("input", () => {
     editor.setTheme({ columnWidth: Number(columnInput.value) });
   });
+
+  // Source mode is a state the reader is in, so it is worth saying so
+  // somewhere: the footer, where Typora says it too.
+  const syncMode = () => {
+    mode.textContent = editor.editing.sourceMode ? "源代码模式 ⌘/" : "";
+  };
+  editor.onEditingChange = syncMode;
+  syncMode();
 
   editor.onStatus = (info: StatusInfo) => {
     status.textContent =

@@ -617,6 +617,8 @@ export class Typesetter {
     doc: string,
     width: number,
     focusedPosition: number,
+    /** Show every block as its source, not only the one holding the caret. */
+    sourceMode = false,
   ): { blocks: LaidBlock[]; height: number } {
     const parsed = parseBlocks(doc, this.options.inline);
     // Most blocks exclude the trailing LF, but an unterminated code/math
@@ -639,7 +641,7 @@ export class Typesetter {
       const laid = this.layoutBlock(
         b,
         width,
-        i === focusedBlock,
+        sourceMode || i === focusedBlock,
         out.at(-1)?.block ?? null,
         numbering.tags.get(i) ?? null,
         numbering,

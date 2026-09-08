@@ -186,6 +186,8 @@ export class Editor {
   onStatus: ((info: StatusInfo) => void) | null = null;
   /** Fires after every text change, including undo/redo and IME updates. */
   onChange: (() => void) | null = null;
+  /** Fires when an editing option is toggled from the keyboard. */
+  onEditingChange: (() => void) | null = null;
   /** Called when a link is followed. Opening it belongs to the host, which
    *  knows whether it is running in a browser or in the desktop shell. */
   onFollowLink: ((href: string) => void) | null = null;
@@ -217,7 +219,17 @@ export class Editor {
   }
 
   setEditing(patch: Partial<EditingOptions>): void {
-    this.editingOptions = { ...this.editingOptions, ...patch };
+    const before = this.editingOptions;
+    this.editingOptions = { ...before, ...patch };
+    // Source mode changes what every block looks like, so the page has to be
+    // laid out again; the other options only affect the next keystroke.
+    if (this.editingOptions.sourceMode !== before.sourceMode) this.invalidate();
+  }
+
+  /** Show the whole document as source, or go back to the typeset page. */
+  toggleSourceMode(): void {
+    this.setEditing({ sourceMode: !this.editingOptions.sourceMode });
+    this.onEditingChange?.();
   }
 
   get options(): TypesetOptions {
@@ -330,11 +342,14 @@ export class Editor {
    * the way the renderer computes it, from the same function.
    */
   private checkboxAt(clientX: number, clientY: number): LaidBlock | null {
+    const boxes = this.blocks.filter((b) => b.block.task !== "none" && b.lines.length);
+    // Most documents have no checkbox at all; the layout read is worth
+    // skipping on every click in those.
+    if (!boxes.length) return null;
     const rect = this.canvas.getBoundingClientRect();
     const x = clientX - rect.left - this.gutter;
     const y = clientY - rect.top - this.originY + this.scrollTop;
-    for (const b of this.blocks) {
-      if (b.block.task === "none" || !b.lines.length) continue;
+    for (const b of boxes) {
       const style = b.lines[0].runs[0]?.style;
       if (!style) continue;
       const box = checkboxRect(b, style.size, b.y + b.lines[0].baseline, this.theme);
@@ -716,6 +731,7 @@ export class Editor {
       this.text,
       this.measure,
       this.hasFocus && this.interacted ? this.selEnd : -1,
+      this.editingOptions.sourceMode,
     );
     this.blocks = result.blocks;
     this.docHeight = result.height;
@@ -1835,10 +1851,13 @@ export interface SearchStatus {
 export interface EditingOptions {
   /** Turn typed quotes, dashes and dots into their typographic forms. */
   smartPunctuation: boolean;
+  /** Show the whole document as markdown source rather than typeset. */
+  sourceMode: boolean;
 }
 
 export const DEFAULT_EDITING_OPTIONS: EditingOptions = {
   smartPunctuation: true,
+  sourceMode: false,
 };
 
 export interface StatusInfo {

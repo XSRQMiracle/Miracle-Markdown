@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { initSync } from "../crates/typeset-wasm/pkg/typeset_wasm.js";
 import { DEFAULT_OPTIONS, DEFAULT_THEME, initEngine, Typesetter } from "../src/engine/typeset.js";
-import { Editor } from "../src/editor/editor.js";
+import { DEFAULT_EDITING_OPTIONS, Editor } from "../src/editor/editor.js";
 import { EMPTY_GEOMETRY } from "../src/engine/math.js";
 import { Renderer } from "../src/render/canvas.js";
 import { cssFont } from "../src/engine/measure.js";
@@ -153,6 +153,7 @@ const editable = (source: string, position = 0) => {
   Object.assign(editor, {
     typesetter, text: source, selStart: position, selEnd: position,
     caretAffinity: "downstream", preferredX: null, hasFocus: true, interacted: true,
+    editingOptions: { ...DEFAULT_EDITING_OPTIONS },
     scrollTop: 0, host: { clientWidth: 336, clientHeight: 10000 },
     canvas: { getBoundingClientRect: () => ({ left: 0, top: 0 }) },
     schedule() {},
