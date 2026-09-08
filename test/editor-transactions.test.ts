@@ -299,4 +299,20 @@ function fixture(text='aOLDz', start=4, end=1) {
   assert.deepEqual(clip('a\nb', 2, 2, 'cut'), ['b', 'a\n'], 'the last line has no newline to take');
   assert.deepEqual(clip('a\nb\nc', 0, 1, 'copy'), ['a', 'a\nb\nc'], 'a real selection is untouched by all this');
 }
+// --- making room ----------------------------------------------------------
+{
+  const room = (text: string, at: number, shiftKey = false) => {
+    const {editor:e,event} = fixture(text, at, at);
+    event('keydown', {key:'Enter', metaKey:true, preventDefault(){}, shiftKey});
+    return [e.getText(), e.selEnd] as const;
+  };
+  assert.deepEqual(room('para', 2), ['para\n\n', 6], 'a paragraph after the block');
+  assert.deepEqual(room('para', 2, true), ['\n\npara', 0], 'and before it');
+  // The escape hatch: a document that opens with a table has nowhere to put
+  // a paragraph in front of it.
+  assert.deepEqual(room('| a |\n| - |', 2, true), ['\n\n| a |\n| - |', 0], 'even when the block is a table');
+  // In a table, one more of these means one more row.
+  assert.deepEqual(room('| a | b |\n| - | - |\n| 1 | 2 |', 22),
+    ['| a | b |\n| - | - |\n| 1 | 2 |\n| | |', 31], 'a row is added with the caret in its first cell');
+}
 console.log('all editor transaction tests passing');

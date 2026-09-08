@@ -157,4 +157,6 @@ export const BINDINGS: readonly Binding[] = [
   // both jobs.
   { chord: "Ctrl+Shift+Backspace", command: "deleteLine" },
   { chord: "Cmd+Shift+Backspace", command: "deleteLine" },
+  { chord: "Mod+Enter", command: "insertParagraphAfter" },
+  { chord: "Mod+Shift+Enter", command: "insertParagraphBefore" },
 ];

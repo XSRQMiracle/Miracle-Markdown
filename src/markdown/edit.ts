@@ -352,6 +352,27 @@ export function moveLines(text: string, sel: Range, direction: 1 | -1): Edit | n
   };
 }
 
+/**
+ * An empty paragraph before or after a block.
+ *
+ * The escape hatch for a document that opens with a table, a fence or a
+ * formula: without it there is nowhere to put the caret in front of one.
+ */
+export function insertParagraph(text: string, block: Range, before: boolean): Edit {
+  if (before) {
+    return { from: block.start, to: block.start, insert: "\n\n", select: { start: block.start, end: block.start } };
+  }
+  const at = block.end + 2;
+  return { from: block.end, to: block.end, insert: "\n\n", select: { start: at, end: at } };
+}
+
+/** An empty row under the one the caret is on. */
+export function insertTableRow(text: string, lineEnd: number, columns: number): Edit {
+  const row = `|${" |".repeat(Math.max(1, columns))}`;
+  const at = lineEnd + 2;
+  return { from: lineEnd, to: lineEnd, insert: `\n${row}`, select: { start: at, end: at } };
+}
+
 /** One level of list nesting, matching what the parser counts. */
 export const INDENT = "  ";
 /** Blockquote markers only — unlike LEAD this leaves the indentation, which

@@ -47,7 +47,9 @@ export type CommandId =
   | "selectBlock"
   | "selectStyledScope"
   | "deleteWord"
-  | "deleteLine";
+  | "deleteLine"
+  | "insertParagraphBefore"
+  | "insertParagraphAfter";
 
 export interface Command {
   /** Menu label. */
@@ -100,4 +102,8 @@ export const COMMANDS: Record<CommandId, Command> = {
 
   deleteWord: { label: "删除当前词", run: (e) => e.deleteWord() },
   deleteLine: { label: "删除当前行", run: (e) => e.deleteLine() },
+
+  insertParagraphBefore: { label: "在上方插入段落", run: (e) => e.insertParagraph(true) },
+  // In a table this adds a row, which is what Typora binds ⌘↵ to there.
+  insertParagraphAfter: { label: "在下方插入段落 / 下方插入行", run: (e) => e.insertParagraph(false) },
 };

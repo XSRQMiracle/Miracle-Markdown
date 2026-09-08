@@ -39,6 +39,8 @@ import {
   clearFormat,
   indentLines,
   INDENT,
+  insertParagraph,
+  insertTableRow,
   linesIn,
   moveLines,
   setHeading,
@@ -372,6 +374,30 @@ export class Editor {
     if (to < this.text.length) to++;
     else if (from > 0) from--;
     this.replace(from, to, "");
+  }
+
+  /**
+   * Make room after the current block — or, in a table, after the row.
+   *
+   * One key for "another one of these": a row where rows are what the block
+   * is made of, and a paragraph everywhere else. It is also the only way to
+   * put a paragraph in front of a table that opens the document.
+   */
+  insertParagraph(before: boolean): void {
+    if (this.dirty) this.relayout();
+    const at = this.range().start;
+    const block = this.blockAt(at);
+    if (!block) {
+      this.insert("\n", false);
+      return;
+    }
+    if (!before && block.type === "table") {
+      let lineEnd = this.text.indexOf("\n", at);
+      if (lineEnd < 0 || lineEnd > block.end) lineEnd = block.end;
+      this.applyEdit(insertTableRow(this.text, lineEnd, block.rows[0]?.length ?? 1));
+      return;
+    }
+    this.applyEdit(insertParagraph(this.text, { start: block.start, end: block.end }, before));
   }
 
   // -- selection commands -------------------------------------------------
