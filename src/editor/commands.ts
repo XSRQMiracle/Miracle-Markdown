@@ -31,7 +31,8 @@ export type CommandId =
   | "heading6"
   | "paragraph"
   | "increaseHeading"
-  | "decreaseHeading";
+  | "decreaseHeading"
+  | "quote";
 
 export interface Command {
   /** Menu label. */
@@ -66,4 +67,5 @@ export const COMMANDS: Record<CommandId, Command> = {
   paragraph: { label: "段落", run: (e) => e.setHeading(0) },
   increaseHeading: { label: "提升标题级别", run: (e) => e.stepHeading(1) },
   decreaseHeading: { label: "降低标题级别", run: (e) => e.stepHeading(-1) },
+  quote: { label: "引用", run: (e) => e.toggleQuote() },
 };

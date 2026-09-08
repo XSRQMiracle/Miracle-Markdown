@@ -5,7 +5,7 @@
 // selection with a space on the end, markup already there, a formula caught in
 // the middle — cheap to pin down.
 import assert from "node:assert/strict";
-import { clearFormat, setHeading, stepHeading, toggleInline, toggleLink } from "../src/markdown/edit.js";
+import { clearFormat, setHeading, stepHeading, toggleInline, toggleLink, toggleQuote } from "../src/markdown/edit.js";
 
 let failures = 0;
 function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
@@ -97,6 +97,19 @@ assert.equal(step("x", 1), "###### x", "a paragraph promotes to the smallest hea
 assert.equal(step("### x", -1), "#### x", "demoting makes it smaller");
 assert.equal(step("###### x", -1), "x", "and falls out to a paragraph");
 assert.equal(step("x", -1), "x", "which has nowhere further to go");
+
+// --- blockquote -----------------------------------------------------------
+const quote = (text: string, start = 0, end = text.length) => apply(text, toggleQuote(text, { start, end }));
+assert.equal(quote("a"), "> a", "a line is quoted");
+assert.equal(quote("> a"), "a", "and unquoted again");
+assert.equal(quote(">a"), "a", "however tightly it was written");
+assert.equal(quote("a\nb"), "> a\n> b", "every line the selection touches");
+assert.equal(quote("> a\n> b"), "a\nb");
+assert.equal(quote("> a\nb"), "> > a\n> b", "a partly quoted range is quoted the rest of the way");
+// A blank line with no marker would end the quote, so it gets one too.
+assert.equal(quote("a\n\nb"), "> a\n>\n> b", "a blank line inside the range is kept in the quote");
+assert.equal(quote("> a\n>\n> b"), "a\n\nb", "and given back on the way out");
+assert.equal(quote("> > deep"), "> deep", "one level at a time");
 
 // --- links ----------------------------------------------------------------
 const link = (text: string, start: number, end = start) => toggleLink(text, { start, end });

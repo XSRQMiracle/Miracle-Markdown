@@ -33,6 +33,7 @@ import {
   setHeading,
   stepHeading,
   toggleInline,
+  toggleQuote,
   toggleLink,
   type Edit,
 } from "../markdown/edit.js";
@@ -281,6 +282,12 @@ export class Editor {
   stepHeading(direction: 1 | -1): void {
     if (this.blockedBlock()) return;
     this.applyEdit(stepHeading(this.text, this.range(), direction));
+  }
+
+  /** Quote the lines the selection touches, or unquote them. */
+  toggleQuote(): void {
+    if (this.blockedBlock()) return;
+    this.applyEdit(toggleQuote(this.text, this.range()));
   }
 
   /** The selection, low end first. */

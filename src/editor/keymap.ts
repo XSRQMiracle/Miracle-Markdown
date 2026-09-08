@@ -134,4 +134,5 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Cmd+0", command: "paragraph" },
   { chord: "Ctrl+=", command: "increaseHeading" },
   { chord: "Ctrl+-", command: "decreaseHeading" },
+  { chord: "Ctrl+Shift+q", command: "quote" },
 ];

@@ -215,6 +215,24 @@ export function stepHeading(text: string, sel: Range, direction: 1 | -1): Edit |
   return setHeading(text, sel, next, false);
 }
 
+/**
+ * Quote the lines the selection touches, or unquote them.
+ *
+ * Blank lines inside the range are given a bare `>` rather than being left
+ * alone: an unmarked blank line ends a blockquote, so quoting a run of
+ * paragraphs without it would produce several quotes instead of one.
+ */
+export function toggleQuote(text: string, sel: Range): Edit | null {
+  const lines = linesIn(text, sel);
+  const marked = (line: string) => /^\s*>/.test(line);
+  const quoted = lines.some((l) => marked(l.text)) &&
+    lines.every((l) => !l.text.trim() || marked(l.text));
+  return mapLines(text, sel, (line) => {
+    if (quoted) return line.replace(/^(\s*)>[ \t]?/, "$1");
+    return line.trim() ? "> " + line : ">";
+  });
+}
+
 /** Something that can only have been meant as a URL. */
 const URL_LIKE = /^(?:[a-z][a-z0-9+.-]*:\/\/|mailto:|www\.)\S+$/i;
 
