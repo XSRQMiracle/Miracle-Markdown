@@ -24,6 +24,8 @@ import {
 } from "../render/canvas.js";
 import {
   listItemMarker,
+  OBJECT_REPLACEMENT,
+  renderBlock,
   sourceRangeOwnsPosition,
   type Block,
   type BlockType,
@@ -340,6 +342,67 @@ export class Editor {
   /** Move the lines the selection touches past their neighbour. */
   moveLines(direction: 1 | -1): void {
     this.applyEdit(moveLines(this.text, this.range(), direction));
+  }
+
+  // -- selection commands -------------------------------------------------
+
+  /** Select the word under the caret. */
+  selectWord(): void {
+    const { start } = this.range();
+    const word = wordAt(this.text, start);
+    this.select(word.start, word.end);
+  }
+
+  /** Select the source line the caret is on. */
+  selectLine(): void {
+    const { start, end } = this.range();
+    const from = this.text.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    let to = this.text.indexOf("\n", end);
+    if (to < 0) to = this.text.length;
+    this.select(from, to);
+  }
+
+  /** Select the whole block the caret is in. */
+  selectBlock(): void {
+    const range = this.blockRangeAt(this.range().start);
+    this.select(range.start, range.end);
+  }
+
+  /**
+   * Select the styled run the caret sits in — the whole bold phrase, the
+   * whole code span, the text of the whole link.
+   *
+   * What is selected is the run's *content*, not its delimiters: the point of
+   * the command is to replace the words, and the markup around them should
+   * survive that. Where the caret is in plain text there is no scope to take,
+   * so it falls back to the word, as Typora's does.
+   */
+  selectStyledScope(): void {
+    if (this.dirty) this.relayout();
+    const at = this.range().start;
+    const block = this.blockAt(at);
+    if (!block) return this.selectWord();
+    const rendered = renderBlock(block, false, this.options.inline);
+    for (const span of rendered.spans) {
+      const from = rendered.map[span.start];
+      // The map's exclusive end is where the *next* rendered character came
+      // from, which is past any markup the span closes with. The content ends
+      // one character after its last one — unless that one is an object,
+      // whose source is longer than the U+FFFC standing in for it.
+      const last = span.end - 1;
+      const to = rendered.text[last] === OBJECT_REPLACEMENT
+        ? rendered.map[span.end]
+        : rendered.map[last] + 1;
+      if (at < from || at > to) continue;
+      const styled = span.kind !== "text" || span.strong || span.em || span.code || span.strike;
+      if (!styled) break;
+      // Pressing it again on a scope already selected takes the delimiters
+      // too, which is the way to remove the styling with one more keystroke.
+      if (this.selStart === from && this.selEnd === to) break;
+      this.select(from, to);
+      return;
+    }
+    this.selectWord();
   }
 
   /** The selection, low end first. */

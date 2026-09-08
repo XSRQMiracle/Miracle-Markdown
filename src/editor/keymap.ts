@@ -146,4 +146,10 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Mod+[", command: "outdent" },
   { chord: "Alt+ArrowUp", command: "moveLineUp" },
   { chord: "Alt+ArrowDown", command: "moveLineDown" },
+
+  // Selection.
+  { chord: "Mod+d", command: "selectWord" },
+  { chord: "Mod+l", command: "selectLine" },
+  { chord: "Mod+e", command: "selectStyledScope" },
+  { chord: "Mod+Shift+l", command: "selectBlock" },
 ];

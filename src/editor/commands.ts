@@ -41,7 +41,11 @@ export type CommandId =
   | "indent"
   | "outdent"
   | "moveLineUp"
-  | "moveLineDown";
+  | "moveLineDown"
+  | "selectWord"
+  | "selectLine"
+  | "selectBlock"
+  | "selectStyledScope";
 
 export interface Command {
   /** Menu label. */
@@ -86,4 +90,9 @@ export const COMMANDS: Record<CommandId, Command> = {
   outdent: { label: "减少缩进", run: (e) => e.indent(-1) },
   moveLineUp: { label: "上移该行", run: (e) => e.moveLines(-1) },
   moveLineDown: { label: "下移该行", run: (e) => e.moveLines(1) },
+
+  selectWord: { label: "选中当前词", run: (e) => e.selectWord() },
+  selectLine: { label: "选中当前行", run: (e) => e.selectLine() },
+  selectBlock: { label: "选择段落或块", run: (e) => e.selectBlock() },
+  selectStyledScope: { label: "选中当前格式文本", run: (e) => e.selectStyledScope() },
 };

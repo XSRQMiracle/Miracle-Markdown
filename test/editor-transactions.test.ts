@@ -247,4 +247,21 @@ function fixture(text='aOLDz', start=4, end=1) {
   assert.equal(tab('  a\n  b', 0, 7, true), 'a\nb', 'and Shift+Tab brings it back');
   assert.equal(tab('- a\n  - b', 9, 9, true), '- a\n- b', 'Shift+Tab outdents an item');
 }
+// --- selection commands ---------------------------------------------------
+{
+  const sel = (text: string, at: number, props: Record<string, unknown>) => {
+    const {editor:e,event} = fixture(text, at, at);
+    event('keydown', {preventDefault(){}, ...props});
+    return text.slice(Math.min(e.selStart,e.selEnd), Math.max(e.selStart,e.selEnd));
+  };
+  assert.equal(sel('one two three', 5, {key:'d', metaKey:true}), 'two', 'Cmd+D takes the word');
+  assert.equal(sel('中文排版很好', 3, {key:'d', metaKey:true}), '排版', 'segmented, in Han');
+  assert.equal(sel('a\nbb\nc', 4, {key:'l', metaKey:true}), 'bb', 'Cmd+L takes the line');
+  assert.equal(sel('a **bold** b', 5, {key:'e', metaKey:true}), 'bold',
+    'Cmd+E takes the styled run without its markers');
+  assert.equal(sel('a **bold** b', 0, {key:'e', metaKey:true}), 'a',
+    'and falls back to the word in plain text');
+  assert.equal(sel('para one\n\npara two', 3, {key:'l', metaKey:true, shiftKey:true}), 'para one',
+    'Cmd+Shift+L takes the block');
+}
 console.log('all editor transaction tests passing');
