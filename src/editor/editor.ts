@@ -188,6 +188,9 @@ export class Editor {
   onChange: (() => void) | null = null;
   /** Fires when an editing option is toggled from the keyboard. */
   onEditingChange: (() => void) | null = null;
+  /** Fires when the theme is changed from the keyboard, so the chrome that
+   *  also sets it — a slider, say — can follow along. */
+  onThemeChange: (() => void) | null = null;
   /** Called when a link is followed. Opening it belongs to the host, which
    *  knows whether it is running in a browser or in the desktop shell. */
   onFollowLink: ((href: string) => void) | null = null;
@@ -224,11 +227,41 @@ export class Editor {
     // Source mode changes what every block looks like, so the page has to be
     // laid out again; the other options only affect the next keystroke.
     if (this.editingOptions.sourceMode !== before.sourceMode) this.invalidate();
+    else if (this.editingOptions.focusMode !== before.focusMode) this.schedule();
+    if (this.editingOptions.typewriter && !before.typewriter) this.scrollCaretIntoView();
+  }
+
+  /**
+   * Step the type size, or put it back where it started.
+   *
+   * Zooming a page of text means changing the size of the type; the column
+   * stays where it is, because the margins here are a property of the window
+   * rather than of the em.
+   */
+  zoom(step: number): void {
+    const size = step === 0
+      ? DEFAULT_THEME.bodySize
+      : Math.max(12, Math.min(32, Math.round(this.theme.bodySize + step)));
+    if (size === this.theme.bodySize) return;
+    this.setTheme({ bodySize: size });
+    this.onThemeChange?.();
   }
 
   /** Show the whole document as source, or go back to the typeset page. */
   toggleSourceMode(): void {
     this.setEditing({ sourceMode: !this.editingOptions.sourceMode });
+    this.onEditingChange?.();
+  }
+
+  /** Veil everything but the line being written. */
+  toggleFocusMode(): void {
+    this.setEditing({ focusMode: !this.editingOptions.focusMode });
+    this.onEditingChange?.();
+  }
+
+  /** Keep the line being written at the middle of the window. */
+  toggleTypewriter(): void {
+    this.setEditing({ typewriter: !this.editingOptions.typewriter });
     this.onEditingChange?.();
   }
 
@@ -767,6 +800,7 @@ export class Editor {
       this.caretVisible && this.hasFocus && this.interacted,
       this.options.showBadness,
       this.scrollbar(),
+      this.focusBand(),
     );
 
     if (caret) {
@@ -1042,6 +1076,21 @@ export class Editor {
       }
     }
     return rects;
+  }
+
+  /** The line that stays lit in focus mode, in document coordinates. */
+  private focusBand(): { top: number; bottom: number } | null {
+    if (!this.editingOptions.focusMode) return null;
+    const found = this.locate(this.selEnd);
+    if (!found) return null;
+    const { block, line } = found;
+    // The line rather than the whole block: a long paragraph veils down to
+    // the line being written, which is the point of the mode.
+    const air = this.theme.bodySize * 0.35;
+    return {
+      top: block.y + line.baseline - line.height - air,
+      bottom: block.y + line.baseline + line.depth + air,
+    };
   }
 
   /**
@@ -1356,6 +1405,12 @@ export class Editor {
     if (this.dirty) this.relayout();
     const caret = this.caretRect();
     if (!caret) return;
+    if (this.editingOptions.typewriter) {
+      // The line being written stays where the eyes already are, and the page
+      // moves under it.
+      this.scrollTo(caret.y + caret.h / 2 - this.host.clientHeight / 2);
+      return;
+    }
     const viewTop = this.scrollTop;
     const viewBottom = this.scrollTop + this.host.clientHeight - this.theme.bodySize * 4;
     const top = caret.y;
@@ -1853,11 +1908,17 @@ export interface EditingOptions {
   smartPunctuation: boolean;
   /** Show the whole document as markdown source rather than typeset. */
   sourceMode: boolean;
+  /** Veil everything but the line being written. */
+  focusMode: boolean;
+  /** Keep the line being written at the middle of the window. */
+  typewriter: boolean;
 }
 
 export const DEFAULT_EDITING_OPTIONS: EditingOptions = {
   smartPunctuation: true,
   sourceMode: false,
+  focusMode: false,
+  typewriter: false,
 };
 
 export interface StatusInfo {

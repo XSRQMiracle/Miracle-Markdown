@@ -52,7 +52,12 @@ export type CommandId =
   | "insertParagraphAfter"
   | "insertTable"
   | "toggleTask"
-  | "sourceMode";
+  | "sourceMode"
+  | "zoomIn"
+  | "zoomOut"
+  | "zoomReset"
+  | "focusMode"
+  | "typewriter";
 
 /** The heading a command sits under in the shortcut sheet. */
 export type CommandGroup = "编辑" | "选择" | "移动" | "段落" | "格式" | "表格" | "视图" | "文件";
@@ -97,6 +102,11 @@ export const COMMANDS: Record<CommandId, Command> = {
   taskList: { label: "任务列表", group: "段落", run: (e) => e.toggleList("task") },
   toggleTask: { label: "切换任务状态", group: "段落", run: (e) => e.toggleTask() },
   sourceMode: { label: "源代码模式", group: "视图", run: (e) => e.toggleSourceMode() },
+  zoomIn: { label: "放大字号", group: "视图", run: (e) => e.zoom(1) },
+  zoomOut: { label: "缩小字号", group: "视图", run: (e) => e.zoom(-1) },
+  zoomReset: { label: "恢复字号", group: "视图", run: (e) => e.zoom(0) },
+  focusMode: { label: "专注模式", group: "视图", run: (e) => e.toggleFocusMode() },
+  typewriter: { label: "打字机模式", group: "视图", run: (e) => e.toggleTypewriter() },
   codeFence: { label: "代码块", group: "段落", run: (e) => e.toggleFenced("code") },
   mathBlock: { label: "公式块", group: "段落", run: (e) => e.toggleFenced("math") },
   indent: { label: "增加缩进", group: "段落", run: (e) => e.indent(1) },

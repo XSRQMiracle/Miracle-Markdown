@@ -164,4 +164,9 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Mod+Shift+Enter", command: "insertParagraphBefore" },
   { chord: "Ctrl+t", command: "insertTable" },
   { chord: "Mod+/", command: "sourceMode" },
+  { chord: "Ctrl+Shift+=", command: "zoomIn" },
+  { chord: "Ctrl+Shift+-", command: "zoomOut" },
+  { chord: "Ctrl+Shift+0", command: "zoomReset" },
+  { chord: "F8", command: "focusMode" },
+  { chord: "F9", command: "typewriter" },
 ];

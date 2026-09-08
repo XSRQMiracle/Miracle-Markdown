@@ -128,6 +128,8 @@ export class Renderer {
     caretVisible: boolean,
     showBadness: boolean,
     scrollbar: Scrollbar | null = null,
+    /** In focus mode, the document-space band that stays undimmed. */
+    focusBand: { top: number; bottom: number } | null = null,
   ): void {
     const ctx = this.ctx;
     ctx.save();
@@ -209,6 +211,17 @@ export class Renderer {
     if (caret && caretVisible) {
       this.setFill(theme.color);
       ctx.fillRect(caret.x, caret.y, Math.max(1.5, 1.5), caret.h);
+    }
+
+    if (focusBand) {
+      // Everything but the current block is veiled rather than redrawn in a
+      // paler colour: the type keeps its exact shapes and positions, and the
+      // page stays one paint rather than two.
+      ctx.fillStyle = "rgba(253, 253, 251, 0.72)";
+      this.currentFill = "";
+      const height = view.height + view.scrollTop;
+      ctx.fillRect(-view.originX, top - 200, view.width, focusBand.top - top + 200);
+      ctx.fillRect(-view.originX, focusBand.bottom, view.width, height);
     }
 
     ctx.restore();

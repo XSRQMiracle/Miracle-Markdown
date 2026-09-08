@@ -221,6 +221,10 @@ async function main() {
   sizeInput.addEventListener("input", () => {
     editor.setTheme({ bodySize: Number(sizeInput.value) });
   });
+  // The keyboard can set the size too, and then the slider has to catch up.
+  editor.onThemeChange = () => {
+    sizeInput.value = String(editor.theme.bodySize);
+  };
 
   // Line length is its own decision now that it no longer rides on the type
   // size. Measured in characters it is the more meaningful of the two, so it
@@ -232,7 +236,11 @@ async function main() {
   // Source mode is a state the reader is in, so it is worth saying so
   // somewhere: the footer, where Typora says it too.
   const syncMode = () => {
-    mode.textContent = editor.editing.sourceMode ? "源代码模式 ⌘/" : "";
+    mode.textContent = [
+      editor.editing.sourceMode ? "源代码模式 ⌘/" : "",
+      editor.editing.focusMode ? "专注模式 F8" : "",
+      editor.editing.typewriter ? "打字机 F9" : "",
+    ].filter(Boolean).join(" · ");
   };
   editor.onEditingChange = syncMode;
   syncMode();

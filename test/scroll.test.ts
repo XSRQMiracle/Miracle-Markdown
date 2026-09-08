@@ -4,7 +4,7 @@
 // get right: the thumb has to be long enough to grab, land at the top and
 // bottom exactly, and take the document with it when dragged.
 import assert from "node:assert/strict";
-import { Editor } from "../src/editor/editor.js";
+import { DEFAULT_EDITING_OPTIONS, Editor } from "../src/editor/editor.js";
 
 (globalThis as any).window = Object.assign(new EventTarget(), { setInterval: () => 0 });
 (globalThis as any).ResizeObserver = class { observe() {} };
@@ -24,6 +24,7 @@ function scrolling(docHeight: number) {
     composing: null, undoStack: [], redoStack: [], lastEditAt: -Infinity, input, canvas,
     host: { clientHeight: VIEWPORT }, docHeight, scrollTop: 0, blocks: [],
     typesetter: { theme: { bodySize: 18 } },
+    editingOptions: { ...DEFAULT_EDITING_OPTIONS },
     invalidate() {}, scrollCaretIntoView() {}, schedule() {},
     positionAt: () => ({ offset: 4, affinity: "downstream" }),
   });
@@ -105,6 +106,26 @@ function scrolling(docHeight: number) {
   // A press in the text keeps its old meaning.
   s.press(300, 300);
   assert.equal(s.editor.selEnd, 4);
+}
+
+// --- typewriter mode ------------------------------------------------------
+{
+  // The line being written stays at the middle of the window and the page
+  // moves under it, rather than the page moving only when the caret would
+  // otherwise leave the view.
+  const s = scrolling(3000);
+  s.editor.editingOptions = { ...DEFAULT_EDITING_OPTIONS, typewriter: true };
+  s.editor.caretRect = () => ({ x: 0, y: 900, w: 1.5, h: 24 });
+  s.editor.dirty = false;
+  // The fixture stubs this out to keep the other tests still; here it is the
+  // thing under test.
+  delete s.editor.scrollCaretIntoView;
+  s.editor.scrollCaretIntoView();
+  assert.equal(Math.round(s.editor.scrollTop), 900 + 12 - VIEWPORT / 2,
+    "the caret is centred rather than merely revealed");
+  s.editor.caretRect = () => ({ x: 0, y: 10, w: 1.5, h: 24 });
+  s.editor.scrollCaretIntoView();
+  assert.equal(s.editor.scrollTop, 0, "and near the top there is nowhere further to go");
 }
 
 console.log("all passing");
