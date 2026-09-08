@@ -86,6 +86,15 @@ export function buildMathPanel(
       title: "Markdown 扩展语法",
       checks: [
         {
+          label: "自动链接 https://…",
+          hint:
+            "正文里裸写的网址自动成为链接（GFM 的 autolink 扩展）。" +
+            "结尾的标点归还给句子，只有网址自己开的括号才算它的。",
+          get: () => editor.options.inline.autoLink,
+          set: (on) =>
+            editor.setOptions({ inline: { ...editor.options.inline, autoLink: on } }),
+        },
+        {
           label: "下标 H~2~O",
           hint:
             "波浪号在正文里是普通字符，因此与 Typora 一样默认关闭。规则刻意收得很窄：" +

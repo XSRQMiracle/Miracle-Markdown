@@ -910,6 +910,13 @@ function plainSpan(start: number, end: number): Span {
 /** How the inline scanner should treat math delimiters. */
 export interface InlineOptions {
   /**
+   * Turn a bare `https://…` or `www.…` into a link.
+   *
+   * GFM's autolink extension, and on by default as it is in Typora: a URL
+   * written in running text is meant as a link by anyone who writes one.
+   */
+  autoLink: boolean;
+  /**
    * Recognise `H~2~O` and `X^2^`.
    *
    * Off by default, as in Typora. A tilde is a real character in prose and a
@@ -963,6 +970,7 @@ export interface InlineOptions {
 }
 
 export const DEFAULT_INLINE_OPTIONS: InlineOptions = {
+  autoLink: true,
   subscript: false,
   superscript: false,
   highlight: false,
@@ -1188,6 +1196,18 @@ export function parseInline(
           i = target.end;
           continue;
         }
+      }
+    }
+
+    // A bare URL in running text. Only at a word boundary, so the `www.` in
+    // `see-www.example` is not one.
+    if (options.autoLink && !label && (c === "h" || c === "w" || c === "f") &&
+      urlMayStart(i > 0 ? body[i - 1] : undefined)) {
+      const bare = matchBareUrl(body, i, limit);
+      if (bare) {
+        formats.push({ kind: "link", from: i, to: bare.end, href: bare.href });
+        i = bare.end;
+        continue;
       }
     }
 
@@ -1637,6 +1657,59 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
     sup: has("sup"),
     underline: has("underline"),
     href: link?.href ?? "",
+  };
+}
+
+/**
+ * A URL written without any markup around it.
+ *
+ * The body is RFC 3986's own character set rather than "anything but a
+ * space". GFM stops only at whitespace and `<`, which in Chinese swallows the
+ * rest of the sentence: 「https://typora.io，镜像在…」 has no space in it at
+ * all, and the full-width comma is not part of the address.
+ */
+const BARE_URL = /^(?:https?:\/\/|ftp:\/\/|www\.)[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/i;
+
+/** Whether a URL may begin here: after space, or after opening punctuation,
+ *  but not in the middle of a hyphenated or dotted word. */
+function urlMayStart(before: string | undefined): boolean {
+  return before === undefined || !/[A-Za-z0-9\-_.\/@]/.test(before);
+}
+
+/**
+ * The extent of a bare URL, or null.
+ *
+ * Trailing punctuation is given back to the sentence: a URL at the end of a
+ * clause is followed by the full stop, not part of it. A closing parenthesis
+ * is kept only when the URL opened one, which is what lets a Wikipedia link
+ * ending in `(disambiguation)` survive being written inside brackets.
+ */
+function matchBareUrl(body: string, from: number, limit: number): { end: number; href: string } | null {
+  const found = BARE_URL.exec(body.slice(from, limit));
+  if (!found) return null;
+  let text = found[0];
+  for (;;) {
+    const last = text[text.length - 1];
+    if (/[!"'.,:;?*_~]/.test(last)) {
+      text = text.slice(0, -1);
+      continue;
+    }
+    if (last === ")") {
+      const opens = (text.match(/\(/g) ?? []).length;
+      const closes = (text.match(/\)/g) ?? []).length;
+      if (closes > opens) {
+        text = text.slice(0, -1);
+        continue;
+      }
+    }
+    break;
+  }
+  // A scheme on its own is not a link.
+  if (!/[a-z0-9]/i.test(text.slice(text.indexOf("//") + 2) || text.slice(4))) return null;
+  if (text.length < 5) return null;
+  return {
+    end: from + text.length,
+    href: /^www\./i.test(text) ? `https://${text}` : text,
   };
 }
 

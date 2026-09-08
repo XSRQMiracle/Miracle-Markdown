@@ -77,6 +77,38 @@ function eq(actual: unknown, expected: unknown, label: string) {
      [[true, false], [true, true], [true, false]], "emphasis around a subscript");
 }
 
+// --- bare URLs ------------------------------------------------------------
+{
+  const auto = (src: string) => parseInline(src, 0, undefined, DEFAULT_INLINE_OPTIONS);
+  const hrefs = (src: string) => auto(src).spans.filter((s) => s.href).map((s) => s.href);
+  eq(hrefs("see https://example.com now"), ["https://example.com"], "a bare URL is a link");
+  eq(hrefs("see www.example.com now"), ["https://www.example.com"], "and so is a bare www");
+  eq(auto("see https://example.com now").text, "see https://example.com now",
+     "with its text left exactly as written");
+  // Trailing punctuation belongs to the sentence.
+  eq(hrefs("at https://example.com."), ["https://example.com"], "a full stop is not part of it");
+  eq(hrefs("(https://example.com)"), ["https://example.com"], "nor a closing bracket it did not open");
+  eq(hrefs("https://en.wikipedia.org/wiki/L_(x)"), ["https://en.wikipedia.org/wiki/L_(x)"],
+     "but one it did open is kept");
+  // What it leaves alone.
+  eq(hrefs("see-www.example.com"), [], "not in the middle of a word");
+  eq(hrefs("`https://example.com`"), [], "not inside code");
+  eq(hrefs("[text](https://example.com)"), ["https://example.com"],
+     "a written link is still one link, not two");
+  eq(auto("[text](https://example.com)").text, "text");
+  eq(hrefs("<https://example.com>"), ["https://example.com"], "an angle autolink still works");
+  eq(hrefs("https://"), [], "a scheme on its own is not a link");
+  // A Chinese sentence has no spaces in it, so "up to the next space" would
+  // swallow the rest of the line.
+  eq(hrefs("主页在 https://typora.io，镜像在别处"), ["https://typora.io"],
+     "a full-width comma ends the address");
+  eq(hrefs("（https://example.com）也行"), ["https://example.com"], "and so do full-width brackets");
+  eq(hrefs("见 https://example.com/a_b。"), ["https://example.com/a_b"], "and a full stop");
+  const off = { ...DEFAULT_INLINE_OPTIONS, autoLink: false };
+  eq(parseInline("see https://example.com", 0, undefined, off).spans.filter((s) => s.href).length, 0,
+     "and the whole thing can be turned off");
+}
+
 // --- inline HTML ----------------------------------------------------------
 // Markdown has always written the things it has no syntax for as HTML, so a
 // handful of tags are drawn rather than shown. There is no option: Typora has
@@ -456,8 +488,13 @@ eq(autoHref("<user@example.com>"), "mailto:user@example.com", "and gains a mailt
 eq(autoHref("<div>"), undefined, "a bare tag has no scheme and is not a link");
 eq(parseInline("<div>", 0).text, "<div>", "and survives verbatim");
 eq(autoHref("<not a url>"), undefined, "spaces disqualify a candidate");
-eq(autoHref("<https://a b>"), undefined, "including inside the URL");
-eq(autoHref("< https://x>"), undefined, "a leading space disqualifies it");
+// These two are about the angle form alone, so the bare-URL rule — which
+// would legitimately find a URL inside them, as GFM does — is turned off.
+const angleOnly = (body: string) =>
+  parseInline(body, 0, undefined, { ...DEFAULT_INLINE_OPTIONS, autoLink: false })
+    .spans.find((s) => s.kind === "link")?.href;
+eq(angleOnly("<https://a b>"), undefined, "including inside the URL");
+eq(angleOnly("< https://x>"), undefined, "a leading space disqualifies it");
 eq(autoHref("<a:b>"), undefined, "a one-letter scheme is too short");
 
 // Interaction with the constructs scanned around it.
