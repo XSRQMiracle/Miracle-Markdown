@@ -44,6 +44,39 @@ function eq(actual: unknown, expected: unknown, label: string) {
      [[true, false]], "code is opaque to it");
 }
 
+// --- subscript and superscript, also opt-in -------------------------------
+{
+  const on = { ...DEFAULT_INLINE_OPTIONS, subscript: true, superscript: true };
+  eq(parseInline("H~2~O", 0, undefined, DEFAULT_INLINE_OPTIONS).text, "H~2~O",
+     "with the options off the tildes are text");
+  eq(parseInline("H~2~O", 0, undefined, on).text, "H2O", "and with them on the markers go");
+  eq(parseInline("H~2~O", 0, undefined, on).spans.map((s) => [s.sub, s.sup]),
+     [[false, false], [true, false], [false, false]], "only the digit is a subscript");
+  eq(parseInline("X^2^", 0, undefined, on).text, "X2", "a superscript reads the same way");
+  eq(parseInline("X^2^", 0, undefined, on).spans.map((s) => s.sup), [false, true]);
+
+  // The rule is narrow on purpose.
+  eq(parseInline("~long text~", 0, undefined, on).text, "~long text~",
+     "a space inside ends the attempt");
+  eq(parseInline("~long\\ text~", 0, undefined, on).text, "long text",
+     "unless it is written as an escape, which is then dropped");
+  eq(parseInline("~~gone~~", 0, undefined, on).text, "gone",
+     "a doubled tilde is still strikethrough");
+  eq(parseInline("~~a~b~~", 0, undefined, on).text, "a~b",
+     "and strikethrough wins over a subscript inside it");
+  eq(parseInline("~a~b~", 0, undefined, on).text, "ab~", "matching is lazy, so the first pair wins");
+  eq(parseInline("~~", 0, undefined, on).text, "~~", "an empty pair is not one");
+  eq(parseInline("a ~ b", 0, undefined, on).text, "a ~ b", "a lone tilde is ordinary punctuation");
+  eq(parseInline("2^10 and 3^2", 0, undefined, on).text, "2^10 and 3^2",
+     "carets that never close are left alone");
+  // Content is not re-read as markup, so a subscript cannot contain emphasis.
+  eq(parseInline("~*a*~", 0, undefined, on).text, "*a*", "markup inside is literal");
+  eq(parseInline("~*a*~", 0, undefined, on).spans.map((s) => [s.sub, s.em]), [[true, false]]);
+  // But it nests the other way round.
+  eq(parseInline("*H~2~O*", 0, undefined, on).spans.map((s) => [s.em, s.sub]),
+     [[true, false], [true, true], [true, false]], "emphasis around a subscript");
+}
+
 // --- inline delimiters -----------------------------------------------------
 eq(parseInline("**bold**", 0).text, "bold", "strong markers are removed");
 eq(parseInline("*em*", 0).text, "em", "emphasis markers are removed");

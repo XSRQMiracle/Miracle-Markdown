@@ -72,6 +72,8 @@ export type SpanKind =
   | "link"
   | "strike"
   | "highlight"
+  | "sub"
+  | "sup"
   | "math"
   | "image";
 
@@ -113,6 +115,8 @@ export interface Span {
   code: boolean;
   strike: boolean;
   highlight: boolean;
+  sub: boolean;
+  sup: boolean;
   href: string;
 }
 
@@ -894,12 +898,25 @@ function plainSpan(start: number, end: number): Span {
     code: false,
     strike: false,
     highlight: false,
+    sub: false,
+    sup: false,
     href: "",
   };
 }
 
 /** How the inline scanner should treat math delimiters. */
 export interface InlineOptions {
+  /**
+   * Recognise `H~2~O` and `X^2^`.
+   *
+   * Off by default, as in Typora. A tilde is a real character in prose and a
+   * caret is a real character in code, and a document written before anyone
+   * asked for subscripts should not suddenly grow them. The rule is
+   * deliberately narrow — no spaces inside, no markup inside — which is what
+   * keeps `~` from colliding with `~~strikethrough~~` and with itself.
+   */
+  subscript: boolean;
+  superscript: boolean;
   /**
    * Recognise `==highlighted==` text.
    *
@@ -943,6 +960,8 @@ export interface InlineOptions {
 }
 
 export const DEFAULT_INLINE_OPTIONS: InlineOptions = {
+  subscript: false,
+  superscript: false,
   highlight: false,
   inlineMath: true,
   texDelimiters: true,
@@ -1201,6 +1220,31 @@ export function parseInline(
       continue;
     }
 
+    // A subscript or a superscript is one narrow pair: no spaces inside, and
+    // nothing inside re-read as markup. That is Typora's rule, and it is what
+    // stops a lone `~` in prose or a `^` in a formula from opening one.
+    if ((c === "~" && options.subscript) || (c === "^" && options.superscript)) {
+      const run = markerRun(body, i, c, limit);
+      // A tilde inside an unclosed `~~` belongs to the strikethrough that is
+      // waiting to close, not to a subscript: Typora reaches the same answer
+      // by testing its `del` rule first.
+      const pending = c === "~" && open.some((o) => o.marker === "~~");
+      if (run === 1 && !pending) {
+        const found = shortPair(body, i, c, limit);
+        if (found) {
+          drops.push([i, i + 1], [found.close, found.close + 1]);
+          for (const at of found.escapes) drops.push([at, at + 1]);
+          formats.push({ kind: c === "~" ? "sub" : "sup", from: i + 1, to: found.close, href: "" });
+          i = found.close + 1;
+          continue;
+        }
+      }
+      if (c === "^") {
+        i += run;
+        continue;
+      }
+    }
+
     if (c === "*" || c === "_" || c === "~" || (c === "=" && options.highlight)) {
       if (i >= markerEnd) {
         markerEnd = i + 1;
@@ -1381,7 +1425,7 @@ class FormatSweep {
   private active = new Set<number>();
   private changes = new Set<number>();
   private links: number[] = [];
-  private counts = { strong: 0, em: 0, code: 0, strike: 0, highlight: 0 };
+  private counts = { strong: 0, em: 0, code: 0, strike: 0, highlight: 0, sub: 0, sup: 0 };
   private format: Span | undefined;
 
   constructor(private formats: Format[]) {
@@ -1404,7 +1448,7 @@ class FormatSweep {
         if (kind === "link") this.addLink(id);
       } else this.active.delete(id);
       if (kind === "strong" || kind === "em" || kind === "code" || kind === "strike" ||
-        kind === "highlight") {
+        kind === "highlight" || kind === "sub" || kind === "sup") {
         this.counts[kind] += entering ? 1 : -1;
       }
       // A format wholly hidden between emitted characters does not split a
@@ -1421,6 +1465,8 @@ class FormatSweep {
     const code = this.counts.code > 0;
     const strike = this.counts.strike > 0;
     const highlight = this.counts.highlight > 0;
+    const sub = this.counts.sub > 0;
+    const sup = this.counts.sup > 0;
     return this.format = {
       ...unformatted,
       kind: link ? "link"
@@ -1429,8 +1475,10 @@ class FormatSweep {
         : em ? "em"
         : strike ? "strike"
         : highlight ? "highlight"
+        : sup ? "sup"
+        : sub ? "sub"
         : "text",
-      strong, em, code, strike, highlight, href: link?.href ?? "",
+      strong, em, code, strike, highlight, sub, sup, href: link?.href ?? "",
     };
   }
 
@@ -1478,6 +1526,8 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       code: false,
       strike: false,
       highlight: false,
+      sub: false,
+      sup: false,
       href: "",
     };
   }
@@ -1493,6 +1543,8 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       code: false,
       strike: false,
       highlight: false,
+      sub: false,
+      sup: false,
     };
   }
   if (math) {
@@ -1507,6 +1559,8 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       code: false,
       strike: false,
       highlight: false,
+      sub: false,
+      sup: false,
       href: "",
     };
   }
@@ -1523,7 +1577,11 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
               ? "strike"
               : has("highlight")
                 ? "highlight"
-                : "text",
+                : has("sup")
+                  ? "sup"
+                  : has("sub")
+                    ? "sub"
+                    : "text",
     start,
     end,
     strong: has("strong"),
@@ -1531,8 +1589,47 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
     code: has("code"),
     strike: has("strike"),
     highlight: has("highlight"),
+    sub: has("sub"),
+    sup: has("sup"),
     href: link?.href ?? "",
   };
+}
+
+/** How long the run of `c` starting at `i` is. */
+function markerRun(body: string, i: number, c: string, limit: number): number {
+  let n = 1;
+  while (i + n < limit && body[i + n] === c) n++;
+  return n;
+}
+
+/**
+ * The closing half of a subscript or superscript, if there is one.
+ *
+ * The content may hold no whitespace, which is what keeps the rule narrow
+ * enough to be safe; a space that is genuinely wanted is written `\ `, and the
+ * backslash is dropped from the rendered text. Lazy, so `~a~b~` is one
+ * subscript followed by a stray tilde rather than the other way round.
+ */
+function shortPair(
+  body: string,
+  open: number,
+  c: string,
+  limit: number,
+): { close: number; escapes: number[] } | null {
+  const escapes: number[] = [];
+  let i = open + 1;
+  while (i < limit) {
+    const ch = body[i];
+    if (ch === "\\" && body[i + 1] === " ") {
+      escapes.push(i);
+      i += 2;
+      continue;
+    }
+    if (ch === c) return i > open + 1 ? { close: i, escapes } : null;
+    if (isSpace(ch) || ch === "\n") return null;
+    i++;
+  }
+  return null;
 }
 
 /**

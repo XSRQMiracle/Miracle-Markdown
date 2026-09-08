@@ -24,6 +24,8 @@ export interface TextStyle {
   lineHeight: number;
   /** Painted behind the text, for highlighted spans. */
   background?: string;
+  /** Baseline shift, positive upwards — superscripts and subscripts. */
+  raise?: number;
 }
 
 export const FALLBACK_SERIF =

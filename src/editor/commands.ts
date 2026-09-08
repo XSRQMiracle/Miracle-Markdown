@@ -22,6 +22,8 @@ export type CommandId =
   | "inlineCode"
   | "strike"
   | "highlight"
+  | "superscript"
+  | "subscript"
   | "clearFormat"
   | "hyperlink"
   | "heading1"
@@ -82,6 +84,8 @@ export const COMMANDS: Record<CommandId, Command> = {
   inlineCode: { label: "代码", group: "格式", run: (e) => e.toggleInline("`") },
   strike: { label: "删除线", group: "格式", run: (e) => e.toggleInline("~~") },
   highlight: { label: "高亮", group: "格式", run: (e) => e.toggleInline("==") },
+  superscript: { label: "上标", group: "格式", run: (e) => e.toggleInline("^") },
+  subscript: { label: "下标", group: "格式", run: (e) => e.toggleInline("~") },
   clearFormat: { label: "清除样式", group: "格式", run: (e) => e.clearFormat() },
   hyperlink: { label: "超链接", group: "格式", run: (e) => e.toggleLink() },
 

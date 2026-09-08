@@ -34,6 +34,23 @@ export function buildMathPanel(
       title: "Markdown 扩展语法",
       checks: [
         {
+          label: "下标 H~2~O",
+          hint:
+            "波浪号在正文里是普通字符，因此与 Typora 一样默认关闭。规则刻意收得很窄：" +
+            "中间不能有空格（要空格就写 \\ ），里面也不再解析别的标记 —— " +
+            "这正是它不与 ~~删除线~~ 打架的原因。",
+          get: () => editor.options.inline.subscript,
+          set: (on) =>
+            editor.setOptions({ inline: { ...editor.options.inline, subscript: on } }),
+        },
+        {
+          label: "上标 X^2^",
+          hint: "与下标同一条规则，只是分隔符换成脱字符。",
+          get: () => editor.options.inline.superscript,
+          set: (on) =>
+            editor.setOptions({ inline: { ...editor.options.inline, superscript: on } }),
+        },
+        {
           label: "高亮 ==key==",
           hint:
             "CommonMark 里没有这条语法，Typora 也默认关闭：一篇用 == 表示别的东西的文档" +

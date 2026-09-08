@@ -194,17 +194,18 @@ export class Renderer {
             const w = ctx.measureText(run.text).width * run.scaleX;
             const size = run.style.size;
             this.setFill(run.style.background);
-            ctx.fillRect(x, y - size * 0.84, w, size * 1.08);
+            ctx.fillRect(x, y - (run.style.raise ?? 0) - size * 0.84, w, size * 1.08);
           }
           this.setFill(run.style.color);
+          const baseline = y - (run.style.raise ?? 0);
           if (run.scaleX !== 1) {
             ctx.save();
-            ctx.translate(x, y);
+            ctx.translate(x, baseline);
             ctx.scale(run.scaleX, 1);
             ctx.fillText(run.text, 0, 0);
             ctx.restore();
           } else {
-            ctx.fillText(run.text, x, y);
+            ctx.fillText(run.text, x, baseline);
           }
           if (run.style.color === theme.accentColor) {
             // Underline links along their own baseline rather than with a
