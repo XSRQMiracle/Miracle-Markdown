@@ -5,10 +5,36 @@
 //! has to cross the IPC boundary to be laid out. What the shell owns is the
 //! things a webview cannot do: the window, the menu and the filesystem.
 
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+#[derive(Default)]
+struct CloseGuard {
+    protected: AtomicBool,
+    approved: AtomicBool,
+}
+
+impl CloseGuard {
+    fn should_prompt(&self) -> bool {
+        self.protected.load(Ordering::SeqCst) && !self.approved.load(Ordering::SeqCst)
+    }
+}
+
+// Enable interception only after the webview has installed its listener.
+#[tauri::command]
+fn protect_document(state: tauri::State<'_, CloseGuard>) {
+    state.protected.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn finish_close(app: tauri::AppHandle, state: tauri::State<'_, CloseGuard>) {
+    state.approved.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
+mod file_save;
 
 #[derive(Serialize)]
 pub struct OpenedFile {
@@ -25,13 +51,8 @@ fn read_file(path: String) -> Result<String, String> {
 /// Write the document back to disk.
 #[tauri::command]
 fn write_file(path: String, contents: String) -> Result<(), String> {
-    // Write to a sibling temporary file and rename, so an interrupted save
-    // cannot leave the user with a half-written document.
-    let target = PathBuf::from(&path);
-    let tmp = target.with_extension("md.tmp");
-    std::fs::write(&tmp, contents.as_bytes()).map_err(|e| format!("无法写入：{e}"))?;
-    std::fs::rename(&tmp, &target).map_err(|e| format!("无法保存 {path}：{e}"))?;
-    Ok(())
+    file_save::save_document(std::path::Path::new(&path), contents.as_bytes())
+        .map_err(|e| format!("无法保存 {path}：{e}"))
 }
 
 /// Fonts the user actually has, so the settings panel can offer real choices
@@ -58,18 +79,38 @@ fn suggested_fonts() -> Vec<String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(CloseGuard::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             read_file,
             write_file,
-            suggested_fonts
+            suggested_fonts,
+            protect_document,
+            finish_close
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.state::<CloseGuard>().should_prompt() {
+                    api.prevent_close();
+                    let _ = window.emit("document-close-requested", ());
+                }
+            }
+        })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Miracle Markdown");
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the application");
+        .build(tauri::generate_context!())
+        .expect("error while building the application")
+        .run(|app, event| {
+            // Application Quit (including Cmd-Q) can bypass window close.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if app.state::<CloseGuard>().should_prompt() {
+                    api.prevent_exit();
+                    let _ = app.emit("document-close-requested", ());
+                }
+            }
+        });
 }

@@ -96,11 +96,20 @@ export function viewportTransform(
   width: number,
   height: number,
   viewBox: number[] | null,
+  preserveAspectRatio = "none",
 ): Matrix {
   if (!viewBox || viewBox.length < 4) return [1, 0, 0, 1, x, y];
   const [vx, vy, vw, vh] = viewBox;
-  const sx = vw ? width / vw : 1;
-  const sy = vh ? height / vh : 1;
+  let sx = vw ? width / vw : 1;
+  let sy = vh ? height / vh : 1;
+  if (preserveAspectRatio !== "none") {
+    const [align, fit] = preserveAspectRatio.trim().split(/\s+/);
+    sx = sy = fit === "slice" ? Math.max(sx, sy) : Math.min(sx, sy);
+    const extraX = width - vw * sx;
+    const extraY = height - vh * sy;
+    x += align.includes("xMax") ? extraX : align.includes("xMid") ? extraX / 2 : 0;
+    y += align.includes("YMax") ? extraY : align.includes("YMid") ? extraY / 2 : 0;
+  }
   return multiply([sx, 0, 0, sy, x, y], [1, 0, 0, 1, -vx, -vy]);
 }
 
@@ -173,6 +182,16 @@ export interface MathGeometry {
   viewBoxWidth: number;
   /** Non-null when the formula did not parse; the caller shows the source. */
   error: string | null;
+  /** True when TeX emitted actual equation labels, including macro expansions. */
+  hasTags?: boolean;
+  /** Semantic metadata from the same TeX parse that produced the geometry. */
+  equation?: {
+    tags: string[];
+    labels: string[];
+    references: Record<string, string>;
+    suppressed: boolean;
+    numberedEnvironment: boolean;
+  };
 }
 
 export const EMPTY_GEOMETRY: MathGeometry = {
@@ -475,29 +494,44 @@ interface Collected {
   commands: MathDrawCommand[];
 }
 
+interface Viewport { width: number; height: number; exPx: number }
+
+function svgLength(value: string | null, reference: number, exPx: number, fallback = 0): number {
+  if (value === null) return fallback;
+  const n = unit(value);
+  if (value.endsWith("%")) return n * reference / 100;
+  if (value.endsWith("ex")) return n * exPx;
+  if (value.endsWith("em")) return n * exPx * 2;
+  return n;
+}
+
 /** Shared walker for whole formulas and line-break segments. */
-function collectElements(nodes: Element[], base: Matrix, inherited: Presentation): Collected {
+function collectElements(nodes: Element[], base: Matrix, inherited: Presentation,
+  viewport: Viewport = { width: 0, height: 0, exPx: 8 }): Collected {
   const aggregate = new Path2D();
   const commands: MathDrawCommand[] = [];
   let hasPath = false;
 
-  const walk = (node: Element, parentMatrix: Matrix, parentStyle: Presentation): void => {
+  const walk = (node: Element, parentMatrix: Matrix, parentStyle: Presentation, parentViewport: Viewport): void => {
     const tag = node.tagName.toLowerCase();
     if (["defs", "clippath", "mask", "metadata", "title", "desc"].includes(tag)) return;
 
     let matrix = multiply(parentMatrix, parseTransform(node.getAttribute("transform")));
     const style = presentation(node, parentStyle);
+    let childViewport = parentViewport;
     if (tag === "svg") {
-      matrix = multiply(
-        matrix,
-        viewportTransform(
-          unit(node.getAttribute("x")),
-          unit(node.getAttribute("y")),
-          unit(node.getAttribute("width")),
-          unit(node.getAttribute("height")),
-          numbers(node.getAttribute("viewBox")),
-        ),
-      );
+      // A nested SVG defaults to the enclosing viewport's full dimensions;
+      // omitted width/height are not zero. Its viewBox alignment matters for
+      // MathJax's center-aligned formula and right-aligned tag viewports.
+      const width = svgLength(node.getAttribute("width"), parentViewport.width, parentViewport.exPx, parentViewport.width);
+      const height = svgLength(node.getAttribute("height"), parentViewport.height, parentViewport.exPx, parentViewport.height);
+      const viewBox = numbers(node.getAttribute("viewBox"));
+      matrix = multiply(matrix, viewportTransform(
+        svgLength(node.getAttribute("x"), parentViewport.width, parentViewport.exPx),
+        svgLength(node.getAttribute("y"), parentViewport.height, parentViewport.exPx),
+        width, height, viewBox, node.getAttribute("preserveAspectRatio") ?? "xMidYMid meet",
+      ));
+      childViewport = { width: viewBox?.[2] ?? width, height: viewBox?.[3] ?? height, exPx: parentViewport.exPx };
     }
 
     const shape = shapeFrom(node);
@@ -541,10 +575,10 @@ function collectElements(nodes: Element[], base: Matrix, inherited: Presentation
       return;
     }
 
-    for (const child of Array.from(node.children)) walk(child, matrix, style);
+    for (const child of Array.from(node.children)) walk(child, matrix, style, childViewport);
   };
 
-  for (const node of nodes) walk(node, base, inherited);
+  for (const node of nodes) walk(node, base, inherited, viewport);
   return { path: hasPath ? aggregate : null, commands };
 }
 
@@ -557,18 +591,31 @@ function collectElements(nodes: Element[], base: Matrix, inherited: Presentation
  * That duplicates path data in the SVG, which would matter if we kept the SVG
  * — but we convert once and cache the result, so the simpler tree wins.
  */
-export function geometryFromSvg(svg: SVGSVGElement): MathGeometry {
+export function geometryFromSvg(svg: SVGSVGElement, options: { widthEx?: number; exPx?: number } = {}): MathGeometry {
   const viewBox = numbers(svg.getAttribute("viewBox"));
-  const widthEx = unit(svg.getAttribute("width"));
-  const heightEx = unit(svg.getAttribute("height"));
+  const exPx = options.exPx ?? 8;
+  const styles = inlineStyle(svg);
+  const intrinsic = svgLength(styles.get("min-width") ?? styles.get("minwidth") ?? null, 0, exPx) / exPx;
+  const percentage = (svg.getAttribute("width") ?? "").endsWith("%");
+  const widthEx = percentage ? Math.max(options.widthEx ?? 0, intrinsic)
+    : svgLength(svg.getAttribute("width"), 0, exPx) / exPx;
+  const heightEx = svgLength(svg.getAttribute("height"), 0, exPx) / exPx;
   // MathJax reports depth as a negative vertical-align, in ex.
   const depthEx = Math.abs(unit(svg.getAttribute("style")?.match(/vertical-align:\s*([^;]+)/)?.[1] ?? null));
 
   // The path is built with the viewBox's left edge at x = 0 and the baseline
   // at y = 0, which is where the viewBox's own y origin already sits.
-  const root: Matrix = viewBox ? [1, 0, 0, 1, -viewBox[0], 0] : IDENTITY;
+  // Percentage-width MathJax SVG has no root viewBox: its native units are
+  // pixels and its origin is the top edge. Restore the same baseline origin
+  // as fixed-width math before collecting either body or label outlines.
+  const root: Matrix = viewBox ? [1, 0, 0, 1, -viewBox[0], 0]
+    : [1, 0, 0, 1, 0, -(heightEx - depthEx) * exPx];
   const rootStyle = presentation(svg, DEFAULT_PRESENTATION);
-  const collected = collectElements(Array.from(svg.children), root, rootStyle);
+  const collected = collectElements(Array.from(svg.children), root, rootStyle, {
+    width: viewBox?.[2] ?? widthEx * exPx,
+    height: viewBox?.[3] ?? heightEx * exPx,
+    exPx,
+  });
 
   return {
     path: collected.path,
@@ -576,7 +623,8 @@ export function geometryFromSvg(svg: SVGSVGElement): MathGeometry {
     widthEx,
     heightEx,
     depthEx,
-    viewBoxWidth: viewBox && viewBox[2] ? viewBox[2] : 1,
+    viewBoxWidth: viewBox?.[2] || widthEx * exPx || 1,
+    hasTags: svg.querySelector('[data-mml-node="mlabeledtr"]') !== null,
     error: null,
   };
 }

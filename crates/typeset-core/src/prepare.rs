@@ -23,11 +23,11 @@ pub struct Token {
 
 /// Split text into measurable tokens.
 ///
-/// Latin runs stay whole so the host measures them with kerning and ligatures
-/// intact — and since a word is a single indivisible box to the line breaker,
-/// nothing is lost by not knowing its interior. CJK characters are split
-/// individually because punctuation squeezing has to move them relative to
-/// each other.
+/// Latin words stay whole except at dictionary hyphenation points. Western
+/// punctuation gets its own token so protrusion uses the edge glyph, not an
+/// entire word. The host still shapes adjacent Western tokens together; these
+/// measurement boundaries do not introduce line breaks. CJK characters are
+/// split individually because punctuation squeezing moves them independently.
 pub fn tokenize(text: &str, style: PunctStyle, hyphenate: bool) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut latin_start: Option<usize> = None;
@@ -182,9 +182,12 @@ fn protrusion(c: char, class: CharClass, width: f32, em: f32) -> (f32, f32) {
 
 /// Build the horizontal list.
 ///
-/// `metrics` holds four floats per token, in the same order as `tokens`:
+/// `metrics` holds six floats per token, in the same order as `tokens`:
 /// advance, height above the baseline, depth below it, and the penalty for
-/// breaking immediately after it (NaN for "no explicit penalty").
+/// breaking immediately after it (NaN for "no explicit penalty"), the width
+/// of a discretionary hyphen in this token's font, and its standalone glyph
+/// advance. The last differs from the contextual advance when punctuation
+/// kerns against its neighbour; protrusion is a fraction of the glyph itself.
 ///
 /// The vertical pair is what lets a line make room for something taller than
 /// the text. The penalty is what lets an inline formula be handed over as
@@ -199,7 +202,6 @@ pub fn prepare(
     config: Config,
 ) -> Paragraph {
     let em = config.font_size;
-    let hyphen_width = em * 0.33;
     let mut items: Vec<Item> = Vec::with_capacity(tokens.len() * 2 + 4);
     let mut atoms: Vec<Atom> = Vec::with_capacity(tokens.len());
 
@@ -208,11 +210,15 @@ pub fn prepare(
     let last_char = |t: &Token| text[t.start as usize..t.end as usize].chars().next_back();
 
     for (i, tok) in tokens.iter().enumerate() {
-        let measured_width = metrics.get(i * 4).copied();
+        let measured_width = metrics.get(i * 6).copied();
         let width = measured_width.filter(|w| w.is_finite()).unwrap_or(0.0);
-        let height = metrics.get(i * 4 + 1).copied().unwrap_or(0.0);
-        let depth = metrics.get(i * 4 + 2).copied().unwrap_or(0.0);
-        let break_after = metrics.get(i * 4 + 3).copied().unwrap_or(f32::NAN);
+        let height = metrics.get(i * 6 + 1).copied().unwrap_or(0.0);
+        let depth = metrics.get(i * 6 + 2).copied().unwrap_or(0.0);
+        let break_after = metrics.get(i * 6 + 3).copied().unwrap_or(f32::NAN);
+        let hyphen_width = metrics.get(i * 6 + 4).copied()
+            .filter(|w| w.is_finite() && *w >= 0.0);
+        let glyph_width = metrics.get(i * 6 + 5).copied()
+            .filter(|w| w.is_finite() && *w >= 0.0).unwrap_or(width);
         let c = match first_char(tok) {
             Some(c) => c,
             None => continue,
@@ -263,7 +269,7 @@ pub fn prepare(
         };
 
         let (protrude_left, protrude_right) = if config.protrusion {
-            protrusion(c, tok.class, width, em)
+            protrusion(c, tok.class, glyph_width, em)
         } else {
             (0.0, 0.0)
         };
@@ -308,9 +314,10 @@ pub fn prepare(
             && tok.class == CharClass::Letter
             && next.class == CharClass::Letter
             && tok.end == next.start
+            && hyphen_width.is_some()
         {
             items.push(Item::penalty(
-                hyphen_width,
+                hyphen_width.unwrap(),
                 hyphenation_cost(text, tokens, i, config),
                 true,
             ));

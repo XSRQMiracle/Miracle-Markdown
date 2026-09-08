@@ -148,7 +148,7 @@ pub fn layout_lines(para: &Paragraph, breaks: &[Breakpoint]) -> Vec<Line> {
                     style: last.style,
                 });
             }
-            x += items[end].width;
+            x += items[end].width * scale_x;
             ink = x;
         }
 

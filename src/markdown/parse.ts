@@ -145,8 +145,6 @@ const TASK = /^\[([ xX])\]\s+/;
 const DELIMITER_CELL = /^:?-+:?$/;
 /** A footnote definition: a labelled paragraph that belongs at the foot. */
 const FOOTNOTE_DEF = /^\[\^([^\]\s]+)\]:\s?/;
-/** A footnote reference within running text. */
-const FOOTNOTE_REF = /^\[\^([^\]\s]+)\]/;
 
 /**
  * HTML blocks, in CommonMark's terms.
@@ -777,12 +775,23 @@ function stripPerLine(b: Block, marker: RegExp, options: InlineOptions): Rendere
   lines.forEach((line, n) => {
     const m = marker.exec(line);
     const skip = m ? m[0].length : 0;
-    for (let i = skip; i < line.length; i++) {
+    // This function joins the lines itself, so the newline that would have
+    // carried a hard break never reaches the inline scanner. The marker has
+    // to be read — and consumed — here instead, or a quoted line ending in a
+    // backslash keeps it as content and the break is lost either way.
+    const forced = n + 1 < lines.length ? hardBreakMarker(line, skip) : null;
+    const content = forced === null ? line.length : forced;
+    for (let i = skip; i < content; i++) {
       text += line[i];
       map.push(at + i);
     }
     at += line.length + 1;
     if (n + 1 < lines.length) {
+      if (forced !== null) {
+        text += LINE_SEPARATOR;
+        map.push(at - 1);
+        return;
+      }
       // The same rule the running text follows: a break between wide
       // characters is how the author wrapped the file, not a space.
       const next = lines[n + 1].replace(marker, "");
@@ -799,6 +808,26 @@ function stripPerLine(b: Block, marker: RegExp, options: InlineOptions): Rendere
   // and keep the map that comes back, since emphasis removal shortens it
   // further.
   return parseInline(text, -1, map, options);
+}
+
+/**
+ * Where a line's content stops because the author asked for a break, or null
+ * if it did not.
+ *
+ * Both of CommonMark's spellings: a trailing backslash, or two or more
+ * trailing spaces. The returned index excludes the marker, which is an
+ * instruction rather than content.
+ */
+function hardBreakMarker(line: string, from: number): number | null {
+  if (line.length > from && line.endsWith("\\")) {
+    // An even run of backslashes is escaped literals, not a break.
+    let slashes = 0;
+    for (let i = line.length - 1; i >= from && line[i] === "\\"; i--) slashes++;
+    return slashes % 2 === 1 ? line.length - 1 : null;
+  }
+  let end = line.length;
+  while (end > from && line[end - 1] === " ") end--;
+  return line.length - end >= 2 ? end : null;
 }
 
 function identityMap(length: number, base: number): Int32Array {
@@ -949,16 +978,24 @@ export function parseInline(
   const drops: Array<[number, number]> = [];
   /** Source ranges replaced wholesale by a single placeholder character —
    *  the formulas, which have no textual form. */
-  const swaps: Array<{ from: number; to: number }> = [];
-  /** Source positions that are literal because a backslash escaped them. */
-  const escaped = new Set<number>();
+  const swaps: Format[] = [];
+  const codeRanges: Array<[number, number]> = [];
+  const delimiters = new InlineDelimiterIndex(body);
   /** Newlines the author marked as breaks, by backslash or trailing spaces. */
   const hardBreaks = new Set<number>();
   /** Label-local scan boundaries, including the emphasis stack they own. */
   const linkLabels: Array<{ start: number; close: number; end: number; openStart: number }> = [];
 
   // ---- pass one: find the real delimiters ------------------------------
-  const open: Array<{ marker: string; at: number; contentAt: number }> = [];
+  const open: Array<{ marker: string; at: number; contentAt: number; previous: number }> = [];
+  const lastOpen = new Map<string, number>();
+  const truncateOpen = (length: number): void => {
+    while (open.length > length) {
+      const removed = open.pop()!;
+      lastOpen.set(removed.marker, removed.previous);
+    }
+  };
+  let markerEnd = 0;
   let i = 0;
   while (i < body.length) {
     const label = linkLabels.at(-1);
@@ -966,7 +1003,7 @@ export function parseInline(
       // The label has already been scanned for inline formatting. Skip its
       // closing bracket and the complete destination so math or emphasis in
       // the URL cannot leak back into the rendered label.
-      open.length = label.openStart;
+      truncateOpen(label.openStart);
       linkLabels.pop();
       i = label.end;
       continue;
@@ -977,10 +1014,9 @@ export function parseInline(
 
     if (options.texDelimiters && c === "\\" && (body[i + 1] === "(" || body[i + 1] === "[")) {
       const display = body[i + 1] === "[";
-      const close = findUnescapedDelimiter(body, display ? "\\]" : "\\)", i + 2);
+      const close = delimiters.texCloser(i + 2, display);
       if (close > 0 && close + 2 <= limit) {
-        swaps.push({ from: i, to: close + 2 });
-        formats.push({
+        swaps.push({
           kind: "math",
           from: i,
           to: close + 2,
@@ -1004,7 +1040,6 @@ export function parseInline(
 
     if (c === "\\" && isEscapableAsciiPunctuation(body[i + 1])) {
       drops.push([i, i + 1]);
-      escaped.add(i + 1);
       i += 2;
       continue;
     }
@@ -1012,10 +1047,9 @@ export function parseInline(
     // Math is scanned before emphasis and code so that a formula's contents
     // are never reinterpreted as markdown.
     if (options.inlineMath && c === "$") {
-      const found = scanDollarMath(body, i, options.strictDollar, limit);
+      const found = delimiters.dollarMath(i, options.strictDollar, limit);
       if (found) {
-        swaps.push({ from: i, to: found.end });
-        formats.push({
+        swaps.push({
           kind: "math",
           from: i,
           to: found.end,
@@ -1029,27 +1063,27 @@ export function parseInline(
     }
 
     if (c === "`") {
-      const code = scanBackticks(body, i, limit);
+      const code = delimiters.backticks(i, limit);
       if (code.close >= 0) {
         drops.push([i, code.contentAt], [code.close, code.end]);
         formats.push({ kind: "code", from: code.contentAt, to: code.close, href: "" });
+        codeRanges.push([code.contentAt, code.close]);
       }
       i = code.end;
       continue;
     }
 
     if (c === "[" && body[i + 1] === "^") {
-      const ref = FOOTNOTE_REF.exec(body.slice(i, limit));
+      const ref = delimiters.footnote(i, limit);
       if (ref) {
-        swaps.push({ from: i, to: i + ref[0].length });
-        formats.push({
+        swaps.push({
           kind: "note",
           from: i,
-          to: i + ref[0].length,
+          to: ref.end,
           href: "",
-          label: ref[1],
+          label: ref.label,
         });
-        i += ref[0].length;
+        i = ref.end;
         continue;
       }
     }
@@ -1058,12 +1092,11 @@ export function parseInline(
     // it becomes a placeholder like a formula: its alt text is a fallback,
     // not content, and the typesetter needs a box rather than characters.
     if (c === "!" && body[i + 1] === "[") {
-      const close = matchBracket(body, i + 1, limit);
+      const close = delimiters.bracket(i + 1, limit);
       if (close > 0 && close < limit && body[close + 1] === "(") {
         const target = matchLinkDestination(body, close + 1, limit);
         if (target) {
-          swaps.push({ from: i, to: target.end });
-          formats.push({
+          swaps.push({
             kind: "image",
             from: i,
             to: target.end,
@@ -1090,7 +1123,7 @@ export function parseInline(
     }
 
     if (c === "[") {
-      const close = matchBracket(body, i, limit);
+      const close = delimiters.bracket(i, limit);
       if (close > 0 && close < limit && body[close + 1] === "(") {
         const target = matchLinkDestination(body, close + 1, limit);
         if (target) {
@@ -1111,8 +1144,11 @@ export function parseInline(
     }
 
     if (c === "*" || c === "_" || c === "~") {
-      let n = 1;
-      while (i + n < limit && body[i + n] === c) n++;
+      if (i >= markerEnd) {
+        markerEnd = i + 1;
+        while (markerEnd < limit && body[markerEnd] === c) markerEnd++;
+      }
+      const n = markerEnd - i;
       const marker = c === "~" ? (n >= 2 ? "~~" : "") : n >= 2 ? c + c : c;
       if (!marker) {
         i += n;
@@ -1137,10 +1173,10 @@ export function parseInline(
         !PUNCT.test(after);
 
       if (!intraword) {
-        const top = open.findLastIndex((o) => o.marker === marker);
+        const top = lastOpen.get(marker) ?? -1;
         if (canClose && top >= (label?.openStart ?? 0)) {
           const o = open[top];
-          open.length = top;
+          truncateOpen(top);
           drops.push([o.at, o.at + len], [i, i + len]);
           formats.push({
             kind: marker === "~~" ? "strike" : len === 2 ? "strong" : "em",
@@ -1152,7 +1188,8 @@ export function parseInline(
           continue;
         }
         if (canOpen) {
-          open.push({ marker, at: i, contentAt: i + len });
+          lastOpen.set(marker, open.length);
+          open.push({ marker, at: i, contentAt: i + len, previous: top });
           i += len;
           continue;
         }
@@ -1163,18 +1200,14 @@ export function parseInline(
     i++;
   }
 
-  // Code content is opaque to emphasis, so drop any emphasis that
-  // strayed inside one.
-  const opaque = formats.filter((f) => f.kind === "code");
-  const insideCode = (at: number) => opaque.some((o) => at >= o.from && at < o.to);
-
-  // Two or more spaces at the end of a line are CommonMark's original hard
-  // break. The spaces themselves are not content — they exist only to carry
-  // the instruction — so they are dropped along with being noted. Inside a
-  // code span they are content and mean nothing, which is why this runs after
-  // the opaque ranges are known rather than during the scan.
+  // Pass one skips code as a whole, so neither formats nor drops can begin
+  // inside it. Newline processing is the only later pass that needs opacity.
+  // The disjoint ranges arrive in source order and each is visited once.
+  let codeRange = 0;
   for (let k = 0; k < body.length; k++) {
-    if (body[k] !== "\n" || insideCode(k)) continue;
+    if (body[k] !== "\n") continue;
+    while (codeRange < codeRanges.length && codeRanges[codeRange][1] <= k) codeRange++;
+    if (codeRange < codeRanges.length && codeRanges[codeRange][0] <= k) continue;
     let run = k;
     while (run > 0 && body[run - 1] === " ") run--;
     if (k - run >= 2) {
@@ -1182,69 +1215,72 @@ export function parseInline(
       hardBreaks.add(k);
     }
   }
-  for (const at of [...hardBreaks]) if (insideCode(at)) hardBreaks.delete(at);
 
-  const live = formats.filter(
-    (f) => f.kind === "code" || !opaque.some((o) => f.from >= o.from && f.to <= o.to),
-  );
-  const liveDrops = drops.filter(
-    ([a, b]) => !opaque.some((o) => a >= o.from && b <= o.to) || escaped.has(b),
-  );
-  liveDrops.sort((x, y) => x[0] - y[0]);
+  // Merge overlapping omitted ranges once. Both the emitter and its newline
+  // lookahead can now walk them monotonically rather than search every range.
+  drops.sort((a, b) => a[0] - b[0]);
+  const omitted: Array<[number, number]> = [];
+  for (const range of drops) {
+    const previous = omitted.at(-1);
+    if (previous && range[0] <= previous[1]) previous[1] = Math.max(previous[1], range[1]);
+    else omitted.push(range);
+  }
 
   // ---- pass two: emit ---------------------------------------------------
-  swaps.sort((a, b) => a.from - b.from);
-
-  /** The first character that will survive into the output at or after `from`. */
+  // Swaps are recorded as the scanner encounters them, already source-ordered.
+  // Negative lookahead entries denote placeholders; -1 denotes end of input.
+  const nextVisible = new Int32Array(body.length + 1);
+  nextVisible[body.length] = -1;
+  let d = omitted.length - 1;
+  let w = swaps.length - 1;
+  for (let k = body.length - 1; k >= 0; k--) {
+    while (d >= 0 && k < omitted[d][0]) d--;
+    while (w >= 0 && k < swaps[w].from) w--;
+    nextVisible[k] = d >= 0 && k < omitted[d][1]
+      ? nextVisible[omitted[d][1]]
+      : w >= 0 && k < swaps[w].to
+        ? -2
+        : body[k] === "\n" ? nextVisible[k + 1] : k;
+  }
   const nextEmitted = (from: number): string => {
-    let j = from;
-    while (j < body.length) {
-      const drop = liveDrops.find(([a, b]) => j >= a && j < b);
-      if (drop) {
-        j = drop[1];
-        continue;
-      }
-      if (swaps.some((w) => j >= w.from && j < w.to)) return OBJECT_REPLACEMENT;
-      if (body[j] === "\n") {
-        j++;
-        continue;
-      }
-      return body[j];
-    }
-    return "";
+    const at = nextVisible[from];
+    return at === -2 ? OBJECT_REPLACEMENT : at === -1 ? "" : body[at];
   };
+
+  const sweep = new FormatSweep(formats);
+  const unformatted = plainSpan(0, 0);
   let text = "";
   const map: number[] = [];
-  const active: Format[][] = [];
-  let d = 0;
-  let w = 0;
+  const spans: Span[] = [];
+  let previousFormat: Span | undefined;
+  const emit = (character: string, at: number, format: Span): void => {
+    const start = text.length;
+    text += character;
+    map.push(src(at));
+    if (previousFormat === format) spans[spans.length - 1].end = text.length;
+    else spans.push({ ...format, start, end: text.length });
+    previousFormat = format;
+  };
+
+  d = 0;
+  w = 0;
   for (let k = 0; k < body.length; k++) {
-    // A formula collapses to one placeholder character, which carries the
-    // whole span's source position so the caret can still find it.
+    // A placeholder carries its own format, independently of surrounding
+    // emphasis. Its source map still points to the start of the complete atom.
     while (w < swaps.length && swaps[w].to <= k) w++;
     if (w < swaps.length && k === swaps[w].from) {
-      text += OBJECT_REPLACEMENT;
-      map.push(src(k));
-      active.push(
-        live.filter(
-          (f) =>
-            f.from === swaps[w].from &&
-            (f.kind === "math" || f.kind === "image" || f.kind === "note"),
-        ),
-      );
+      emit(OBJECT_REPLACEMENT, k, spanFrom([swaps[w]], 0, 0));
       k = swaps[w].to - 1;
       continue;
     }
-    while (d < liveDrops.length && liveDrops[d][1] <= k) d++;
-    if (d < liveDrops.length && k >= liveDrops[d][0] && k < liveDrops[d][1]) continue;
+    while (d < omitted.length && omitted[d][1] <= k) d++;
+    if (d < omitted.length && k >= omitted[d][0]) {
+      k = omitted[d][1] - 1;
+      continue;
+    }
 
     if (body[k] === "\n" && hardBreaks.has(k) && text.length) {
-      // A break the author asked for holds wherever it falls, so it survives
-      // the soft-break rules entirely — including the CJK one, which exists to
-      // discard breaks the author did *not* intend.
-      text += LINE_SEPARATOR;
-      map.push(src(k));
-      active.push([]);
+      emit(LINE_SEPARATOR, k, unformatted);
       let j = k + 1;
       while (j < body.length && (body[j] === " " || body[j] === "\t")) j++;
       k = j - 1;
@@ -1252,53 +1288,105 @@ export function parseInline(
     }
 
     if (body[k] === "\n") {
-      // A continuation line's leading whitespace is not content; CommonMark
-      // strips it, and keeping it would put the indentation of the source
-      // file into the middle of a sentence.
       let j = k + 1;
       while (j < body.length && (body[j] === " " || body[j] === "\t")) j++;
-
-      // Judge the break by what actually surrounds it in the finished text,
-      // not by the raw source: a delimiter or a formula may sit between.
       const before = text.length ? text[text.length - 1] : "";
       const after = nextEmitted(j);
-      // Whitespace the author already typed is enough; a break adjacent to it
-      // adds nothing.
       const redundant = before === "" || before === " ";
       const wide = options.cjkSoftBreaks && (isWide(before) || isWide(after));
-      if (!redundant && !wide) {
-        text += " ";
-        map.push(src(k));
-        active.push([]);
-      }
+      if (!redundant && !wide) emit(" ", k, unformatted);
       k = j - 1;
       continue;
     }
 
-    text += body[k];
-    map.push(src(k));
-    active.push(live.filter((f) => k >= f.from && k < f.to));
+    emit(body[k], k, sweep.at(k, unformatted));
   }
   map.push(src(body.length));
-
-  // ---- group runs of identical formatting into spans --------------------
-  const spans: Span[] = [];
-  let start = 0;
-  for (let k = 0; k <= text.length; k++) {
-    const same = k > 0 && k < text.length && sameFormat(active[k - 1], active[k]);
-    if (same) continue;
-    if (k > start) spans.push(spanFrom(active[start], start, k));
-    start = k;
-  }
   if (!spans.length) spans.push(plainSpan(0, text.length));
-
   return { text, spans, map: Int32Array.from(map) };
 }
 
-function sameFormat(a: Format[], b: Format[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
+/**
+ * Formatting changes at source boundaries, not at every output character.
+ * Counts track boolean styles; a min-heap preserves the first-created link's
+ * precedence when link labels nest. There is no per-character active array.
+ */
+class FormatSweep {
+  private events: Array<{ at: number; id: number; entering: boolean }>;
+  private cursor = 0;
+  private active = new Set<number>();
+  private changes = new Set<number>();
+  private links: number[] = [];
+  private counts = { strong: 0, em: 0, code: 0, strike: 0 };
+  private format: Span | undefined;
+
+  constructor(private formats: Format[]) {
+    this.events = [];
+    formats.forEach((format, id) => {
+      if (format.from < format.to) {
+        this.events.push({ at: format.from, id, entering: true }, { at: format.to, id, entering: false });
+      }
+    });
+    this.events.sort((a, b) => a.at - b.at);
+  }
+
+  at(position: number, unformatted: Span): Span {
+    this.changes.clear();
+    while (this.cursor < this.events.length && this.events[this.cursor].at <= position) {
+      const { id, entering } = this.events[this.cursor++];
+      const kind = this.formats[id].kind;
+      if (entering) {
+        this.active.add(id);
+        if (kind === "link") this.addLink(id);
+      } else this.active.delete(id);
+      if (kind === "strong" || kind === "em" || kind === "code" || kind === "strike") {
+        this.counts[kind] += entering ? 1 : -1;
+      }
+      // A format wholly hidden between emitted characters does not split a
+      // visible run: its enter and exit cancel before we build the next span.
+      if (this.changes.has(id)) this.changes.delete(id);
+      else this.changes.add(id);
+    }
+    if (!this.active.size) return unformatted;
+    if (!this.changes.size && this.format) return this.format;
+    while (this.links.length && !this.active.has(this.links[0])) this.removeLink();
+    const link = this.links.length ? this.formats[this.links[0]] : undefined;
+    const strong = this.counts.strong > 0;
+    const em = this.counts.em > 0;
+    const code = this.counts.code > 0;
+    const strike = this.counts.strike > 0;
+    return this.format = {
+      ...unformatted,
+      kind: link ? "link" : code ? "code" : strong ? "strong" : em ? "em" : strike ? "strike" : "text",
+      strong, em, code, strike, href: link?.href ?? "",
+    };
+  }
+
+  private addLink(id: number): void {
+    let at = this.links.length;
+    this.links.push(id);
+    while (at > 0) {
+      const parent = (at - 1) >> 1;
+      if (this.links[parent] < id) break;
+      this.links[at] = this.links[parent];
+      at = parent;
+    }
+    this.links[at] = id;
+  }
+
+  private removeLink(): void {
+    const last = this.links.pop()!;
+    if (!this.links.length) return;
+    let at = 0;
+    while (at * 2 + 1 < this.links.length) {
+      let child = at * 2 + 1;
+      if (child + 1 < this.links.length && this.links[child + 1] < this.links[child]) child++;
+      if (last <= this.links[child]) break;
+      this.links[at] = this.links[child];
+      at = child;
+    }
+    this.links[at] = last;
+  }
 }
 
 function spanFrom(fs: Format[], start: number, end: number): Span {
@@ -1370,63 +1458,6 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
 }
 
 /**
- * Decide whether the dollar at `at` opens a formula, and find its end.
- *
- * Two dollars open display math wherever they appear, following Pandoc. A
- * single dollar is governed by `strict`, which is the difference between
- * reading "$5 and $10" as a price and as a formula.
- */
-function scanDollarMath(
-  body: string,
-  at: number,
-  strict: boolean,
-  limit: number = body.length,
-): { end: number; bodyStart: number; bodyEnd: number; display: boolean } | null {
-  const display = body[at + 1] === "$";
-  const delimiter = display ? "$$" : "$";
-  const bodyStart = at + delimiter.length;
-  if (bodyStart >= limit) return null;
-
-  if (!display && strict && isSpace(body[bodyStart])) return null;
-
-  let k = bodyStart;
-  while (k < limit) {
-    if (body[k] === "\\") {
-      k += 2;
-      continue;
-    }
-    // A blank line ends a paragraph, so it also ends any formula.
-    if (body[k] === "\n" && body[k + 1] === "\n") return null;
-    if (body[k] !== "$") {
-      k++;
-      continue;
-    }
-    if (display) {
-      if (k + 1 < limit && body[k + 1] === "$") {
-        return { end: k + 2, bodyStart, bodyEnd: k, display: true };
-      }
-      k++;
-      continue;
-    }
-    if (k === bodyStart) return null; // an empty span is not a formula
-    if (strict) {
-      if (isSpace(body[k - 1])) {
-        k++;
-        continue;
-      }
-      // The clause that saves prices: a closing delimiter immediately before
-      // a digit is far more likely to be currency than mathematics.
-      if (k + 1 < limit && /\d/.test(body[k + 1])) {
-        k++;
-        continue;
-      }
-    }
-    return { end: k + 1, bodyStart, bodyEnd: k, display: false };
-  }
-  return null;
-}
-
-/**
  * A URI autolink: a scheme, a colon, then anything but whitespace and angle
  * brackets. The scheme is what separates `<https://x>` from `<div>`, so HTML
  * that happens to sit in a paragraph is left alone.
@@ -1459,48 +1490,144 @@ function matchAutolink(
 }
 
 /**
- * Match whole backtick runs, never a prefix of a longer run. The same scanner
- * determines code opacity while finding a label and while parsing its text.
- * An unmatched opener advances over that complete run as literal content.
+ * Backtick runs and balanced brackets are structural facts shared by label
+ * recognition and inline parsing. Index runs once, then memoize every nested
+ * bracket encountered while matching a label, including unmatched openers.
+ * This avoids rescanning the remaining paragraph for each literal `[` or run.
  */
-function scanBackticks(
-  body: string,
-  from: number,
-  limit: number,
-): { contentAt: number; close: number; end: number } {
-  let contentAt = from + 1;
-  while (contentAt < limit && body[contentAt] === "`") contentAt++;
-  let at = contentAt;
-  while (at < limit) {
-    const close = body.indexOf("`", at);
-    if (close < 0 || close >= limit) break;
-    let end = close + 1;
-    while (end < limit && body[end] === "`") end++;
-    if (end - close === contentAt - from) return { contentAt, close, end };
-    at = end;
-  }
-  return { contentAt, close: -1, end: contentAt };
-}
+class InlineDelimiterIndex {
+  private tickEnd = new Map<number, number>();
+  private tickClose = new Map<number, number>();
+  private brackets = new Map<number, number>();
+  private dollars: number[] = [];
+  private strictDollars: number[] = [];
+  private doubleDollars: number[] = [];
+  private blankLines: number[] = [];
+  private texInline: number[] = [];
+  private texDisplay: number[] = [];
+  private noteStops: number[] | undefined;
 
-/** Index of the matching `]`, honouring nesting, escapes, and opaque code. */
-function matchBracket(body: string, from: number, limit: number): number {
-  let depth = 0;
-  for (let i = from; i < limit; i++) {
-    if (body[i] === "\\" && isEscapableAsciiPunctuation(body[i + 1])) {
-      i++;
-      continue;
+  constructor(private body: string) {
+    const runs: Array<[number, number]> = [];
+    let tickStart = -1;
+    let slashes = 0;
+    for (let i = 0; i <= body.length; i++) {
+      const c = body[i];
+      if (c === "`") {
+        if (tickStart < 0) tickStart = i;
+      } else if (tickStart >= 0) {
+        runs.push([tickStart, i]);
+        tickStart = -1;
+      }
+      if (slashes % 2 === 0) {
+        if (c === "$") {
+          this.dollars.push(i);
+          if (!isSpace(body[i - 1]) && !/\d/.test(body[i + 1] ?? "")) this.strictDollars.push(i);
+          if (body[i + 1] === "$") this.doubleDollars.push(i);
+        } else if (c === "\n" && body[i + 1] === "\n") this.blankLines.push(i);
+        else if (c === "\\") {
+          if (body[i + 1] === ")") this.texInline.push(i);
+          else if (body[i + 1] === "]") this.texDisplay.push(i);
+        }
+      }
+      slashes = c === "\\" ? slashes + 1 : 0;
     }
-    if (body[i] === "`") {
-      i = scanBackticks(body, i, limit).end - 1;
-      continue;
-    }
-    if (body[i] === "[") depth++;
-    else if (body[i] === "]") {
-      depth--;
-      if (depth === 0) return i;
+    const nextRun = new Map<number, number>();
+    for (let r = runs.length - 1; r >= 0; r--) {
+      const [start, end] = runs[r];
+      for (let at = start; at < end; at++) {
+        // An escaped first tick can leave a shorter opening suffix. Closers
+        // must still be whole runs, even when preceded by a backslash.
+        this.tickEnd.set(at, end);
+        this.tickClose.set(at, nextRun.get(end - at) ?? -1);
+      }
+      nextRun.set(end - start, start);
     }
   }
-  return -1;
+
+  /** Each query finds the next eligible delimiter without scanning its suffix. */
+  private next(positions: number[], from: number): number {
+    let low = 0;
+    let high = positions.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (positions[mid] < from) low = mid + 1;
+      else high = mid;
+    }
+    return positions[low] ?? -1;
+  }
+
+  texCloser(from: number, display: boolean): number {
+    return this.next(display ? this.texDisplay : this.texInline, from);
+  }
+
+  /** Pandoc dollar rules, with a blank line terminating either spelling. */
+  dollarMath(at: number, strict: boolean, limit: number): {
+    end: number; bodyStart: number; bodyEnd: number; display: boolean;
+  } | null {
+    const display = this.body[at + 1] === "$";
+    const length = display ? 2 : 1;
+    const bodyStart = at + length;
+    if (bodyStart >= limit || (!display && strict && isSpace(this.body[bodyStart]))) return null;
+    const close = this.next(display ? this.doubleDollars : strict ? this.strictDollars : this.dollars, bodyStart);
+    const blank = this.next(this.blankLines, bodyStart);
+    if (close < 0 || close + length > limit || (blank >= 0 && blank < close)) return null;
+    return { end: close + length, bodyStart, bodyEnd: close, display };
+  }
+
+  footnote(from: number, limit: number): { end: number; label: string } | null {
+    // Build only when a reference is encountered. An unfinished sequence of
+    // references then shares the same delimiter lookup instead of repeatedly
+    // running a greedy expression over the rest of the paragraph.
+    if (!this.noteStops) {
+      this.noteStops = [];
+      for (let i = 0; i < this.body.length; i++) {
+        if (this.body[i] === "]" || isSpace(this.body[i])) this.noteStops.push(i);
+      }
+    }
+    const close = this.next(this.noteStops, from + 2);
+    return close > from + 2 && close < limit && this.body[close] === "]"
+      ? { end: close + 1, label: this.body.slice(from + 2, close) }
+      : null;
+  }
+
+  backticks(from: number, limit: number): { contentAt: number; close: number; end: number } {
+    const contentAt = Math.min(this.tickEnd.get(from)!, limit);
+    const close = this.tickClose.get(from) ?? -1;
+    const end = close >= 0 ? this.tickEnd.get(close)! : contentAt;
+    return close >= 0 && end <= limit
+      ? { contentAt, close, end }
+      : { contentAt, close: -1, end: contentAt };
+  }
+
+  bracket(from: number, limit: number): number {
+    const known = this.brackets.get(from);
+    if (known !== undefined) return known < limit ? known : -1;
+    const open: number[] = [];
+    for (let i = from; i < limit; i++) {
+      if (this.body[i] === "\\" && isEscapableAsciiPunctuation(this.body[i + 1])) {
+        i++;
+        continue;
+      }
+      if (this.body[i] === "`") {
+        i = this.backticks(i, limit).end - 1;
+        continue;
+      }
+      if (this.body[i] === "[") {
+        const close = this.brackets.get(i);
+        if (close !== undefined) {
+          if (close < 0 || close >= limit) break;
+          i = close;
+        } else open.push(i);
+      } else if (this.body[i] === "]" && open.length) {
+        const start = open.pop()!;
+        this.brackets.set(start, i);
+        if (!open.length) return i;
+      }
+    }
+    for (const start of open) this.brackets.set(start, -1);
+    return -1;
+  }
 }
 
 /**

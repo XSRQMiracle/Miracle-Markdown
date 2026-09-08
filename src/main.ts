@@ -6,11 +6,12 @@
 import { Editor, type StatusInfo } from "./editor/editor.js";
 import { initEngine, type TypesetOptions } from "./engine/typeset.js";
 import { SAMPLE } from "./sample.js";
-import { isDesktop, openDocument, saveDocument } from "./platform.js";
+import { isDesktop, openDocument, saveDocument, installDesktopCloseHandler, finishDesktopClose } from "./platform.js";
 import { DEFAULT_MATH_OPTIONS, initMath, type MathOptions } from "./engine/mathjax.js";
 import { buildMathPanel } from "./ui/math-panel.js";
 import { onImageSettled } from "./engine/images.js";
-import type { LineEnding } from "./markdown/document.js";
+import { DocumentSession } from "./markdown/session.js";
+import { confirmUnsavedDocument, showDocumentError } from "./ui/document-dialog.js";
 
 const stage = document.getElementById("stage") as HTMLElement;
 const canvas = document.getElementById("surface") as HTMLCanvasElement;
@@ -20,6 +21,7 @@ const toggles = document.getElementById("toggles") as HTMLElement;
 const sizeInput = document.getElementById("size") as HTMLInputElement;
 const openButton = document.getElementById("open") as HTMLButtonElement;
 const saveButton = document.getElementById("save") as HTMLButtonElement;
+const saveAsButton = document.getElementById("save-as") as HTMLButtonElement;
 const columnInput = document.getElementById("column") as HTMLInputElement;
 
 type ToggleKey = keyof Pick<
@@ -53,6 +55,8 @@ const TOGGLE_DEFS: Array<{ key: ToggleKey; label: string; hint: string }> = [
 ];
 
 async function main() {
+  // Editing starts only once both the session and its close guard are ready.
+  stage.inert = true;
   await initEngine();
 
   const editor = new Editor(stage, canvas);
@@ -82,57 +86,62 @@ async function main() {
     button.addEventListener("click", () => {
       t.set(editor, !t.get(editor));
       sync();
-      // An image's size is only known once it has decoded, and the box the
-  // typesetter reserved was the alt text's. Re-typeset when that changes.
-  onImageSettled(() => editor.invalidateMath());
-
-  editor.focus();
+      editor.focus();
     });
     toggles.appendChild(button);
   }
 
-  let path: string | null = null;
-  let lineEnding: LineEnding = "\n";
-  let dirty = false;
-  const setTitle = () => {
-    const name = path ? path.split(/[\\/]/).pop() : "未命名";
-    document.title = `${dirty ? "• " : ""}${name} — Miracle Markdown`;
-  };
+  // Decoding can change an image's reserved width and height. Register once
+  // at startup so cached placeholder layouts are invalidated immediately.
+  onImageSettled(() => editor.invalidateMath());
 
-  openButton.addEventListener("click", async () => {
-    const opened = await openDocument();
-    if (!opened) return;
-    editor.setText(opened.contents);
-    path = opened.path;
-    lineEnding = opened.lineEnding;
-    dirty = false;
-    setTitle();
-    editor.focus();
+  let sessionReady = false;
+  const syncSession = () => {
+    document.title = `${session.dirty ? "• " : ""}${session.name} — Miracle Markdown`;
+    openButton.disabled = session.transitioning || session.isClosing;
+    saveButton.disabled = saveAsButton.disabled = session.isClosing;
+    stage.inert = session.isClosing || !sessionReady;
+  };
+  const session = new DocumentSession({ path: null, contents: editor.getText(), lineEnding: "\n" }, {
+    open: openDocument,
+    save: saveDocument,
+    confirmLeave: confirmUnsavedDocument,
+    loaded: (document) => editor.setText(document.contents),
+    changed: syncSession,
   });
-
-  const save = async () => {
-    const saved = await saveDocument(path, editor.getText(), lineEnding);
-    if (saved !== null) {
-      path = saved;
-      dirty = false;
-      setTitle();
-    }
+  const fileAction = async (action: () => Promise<unknown>) => {
+    if (session.isClosing) return;
+    try { editor.finishComposition(); await action(); }
+    catch (error) { await showDocumentError(error); }
+    if (!session.isClosing) editor.focus();
   };
-  saveButton.addEventListener("click", save);
+  openButton.addEventListener("click", () => void fileAction(() => session.open()));
+  saveButton.addEventListener("click", () => void fileAction(() => session.save()));
+  saveAsButton.addEventListener("click", () => void fileAction(() => session.save(true)));
   window.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s" && !document.querySelector("dialog[open]")) {
       e.preventDefault();
-      void save();
+      void fileAction(() => session.save(e.shiftKey));
     }
   });
-
-  editor.onChange = () => {
-    if (!dirty) {
-      dirty = true;
-      setTitle();
-    }
-  };
-  setTitle();
+  editor.onChange = () => session.updateText(editor.getText());
+  syncSession();
+  if (isDesktop()) {
+    let closePending = false;
+    await installDesktopCloseHandler(() => {
+      if (closePending) return;
+      closePending = true;
+      void fileAction(() => session.close(finishDesktopClose)).finally(() => { closePending = false; });
+    });
+  } else {
+    window.addEventListener("beforeunload", (event) => {
+      if (!session.needsUnloadProtection) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+  }
+  sessionReady = true;
+  syncSession();
 
   sizeInput.addEventListener("input", () => {
     editor.setTheme({ bodySize: Number(sizeInput.value) });

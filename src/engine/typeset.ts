@@ -18,7 +18,8 @@ import {
   Measurer,
   type TextStyle,
 } from "./measure.js";
-import { renderMath, renderMathSegments } from "./mathjax.js";
+import { renderMath, renderMathSegments, renderDisplayMath } from "./mathjax.js";
+import { mathDirectives, resolveMathSource } from "./math-source.js";
 import { fitImage, requestImage, type ImageStatus } from "./images.js";
 import { sourceLineEnds } from "./source-layout.js";
 import type { MathGeometry, MathSegment } from "./math.js";
@@ -255,60 +256,16 @@ export interface TableLayout {
   padding: number;
 }
 
-// These are kept as sources rather than as shared RegExp objects on purpose.
-// A global regular expression carries a mutable `lastIndex`, and `test` leaves
-// it pointing past the match — so a later `matchAll` on the same object starts
-// midway through the string and quietly finds nothing. Building a fresh one at
-// each use costs nothing here and removes the whole class of bug.
-
-/** `\label{...}` inside a formula. */
-const LABEL_SOURCE = String.raw`\\label\s*\{([^}]*)\}`;
-/** `\ref{...}` and `\eqref{...}`, the two ways to cite a numbered equation. */
-const REFERENCE_SOURCE = String.raw`\\(eq)?ref\s*\{([^}]*)\}`;
-
-const HAS_LABEL = new RegExp(LABEL_SOURCE);
-
-function hasLabel(latex: string): boolean {
-  return HAS_LABEL.test(latex);
+/** Whether this block depends on document-wide equation/footnote numbering. */
+function usesNumbering(block: Block): boolean {
+  // Detect commands, not their raw argument text: stripping quote markers
+  // can change a multiline argument before the formula resolves its label.
+  return block.type === "footnote" || block.source.includes("[^") ||
+    block.source.includes("\\ref") || block.source.includes("\\eqref");
 }
 
-/** Every label declared in a formula. */
-function labelsIn(latex: string): string[] {
-  return [...latex.matchAll(new RegExp(LABEL_SOURCE, "g"))].map((m) => m[1].trim());
-}
-
-/** Whether a block might contain a citation worth re-resolving. */
-function citesAnything(block: Block): boolean {
-  return block.source.includes("\\ref") || block.source.includes("\\eqref");
-}
-
-/**
- * Turn a formula's source into what MathJax should actually see: labels
- * removed, citations replaced by the numbers they resolve to.
- *
- * Neither MathJax nor KaTeX resolves `\ref` on its own — both lay out one
- * formula at a time and have no idea what else is in the document. Since the
- * numbering pass has just worked that out, substituting here is both simpler
- * and cheaper than handing MathJax a global counter to keep.
- *
- * An unresolved citation becomes `?`, which is LaTeX's own convention for a
- * reference to something that is not there.
- */
-export function resolveLatex(latex: string, labels: Map<string, string>): string {
-  let out = latex;
-  if (out.includes("\\label")) out = out.replace(new RegExp(LABEL_SOURCE, "g"), "");
-  if (out.includes("ref")) {
-    out = out.replace(
-      new RegExp(REFERENCE_SOURCE, "g"),
-      (_match, eq: string | undefined, key: string) => {
-        const number = labels.get(key.trim());
-        if (number === undefined) return eq ? "(?)" : "?";
-        return eq ? "(" + number + ")" : number;
-      },
-    );
-  }
-  return out;
-}
+/** Resolve document references without taking ownership of TeX tag syntax. */
+export const resolveLatex = resolveMathSource;
 
 /**
  * Assign every display equation its number, and record what each label
@@ -317,8 +274,8 @@ export function resolveLatex(latex: string, labels: Map<string, string>): string
  * This runs before layout because a reference may point forward: a
  * paragraph early in the document can cite an equation that appears much
  * later, and it cannot be typeset until that equation's number is known.
- * Two passes are the price of forward references, and the first is cheap —
- * it reads the source and never touches MathJax.
+ * The metadata pass shares the formula cache with layout, so unchanged
+ * formulas do not need to be parsed by MathJax again.
  */
 export function numberEquations(
 parsed: Block[],
@@ -330,12 +287,25 @@ mode: TypesetOptions["numbering"],
   for (let i = 0; i < parsed.length; i++) {
     const block = parsed[i];
     if (block.type !== "math") continue;
-    const tag = equationTag(block.math, equation + 1, mode);
+    // The actual TeX parser decides which commands execute, including tags
+    // expanded from macros and separate tags/labels on aligned rows. The
+    // lexical fallback is used only while MathJax is loading or source is
+    // incomplete; the normal math-ready invalidation replaces that layout.
+    const semantic = renderMath(block.math, true).equation;
+    const tag = semantic
+      ? semantic.tags[0] ?? (semantic.suppressed ? null
+        : semantic.labels.length || mode === "all" || (mode === "ams" && semantic.numberedEnvironment)
+          ? String(equation + 1) : null)
+      : equationTag(block.math, equation + 1, mode);
     if (tag === null) continue;
     equation++;
     tags.set(i, tag);
-    for (const label of labelsIn(block.math)) {
-      labels.set(label, tag);
+    if (semantic) {
+      for (const label of semantic.labels) labels.set(label, semantic.references[label] ?? tag);
+    } else {
+      for (const directive of mathDirectives(block.math)) {
+        if (directive.name === "label") labels.set(directive.value.trim(), tag);
+      }
     }
   }
   // Derived from the resolved values, so a block holding a reference
@@ -391,17 +361,17 @@ latex: string,
 next: number,
 mode: TypesetOptions["numbering"],
 ): string | null {
-  const explicit = /\\tag\s*\*?\s*\{([^}]*)\}/.exec(latex);
-  if (explicit) return explicit[1];
-  if (/\\(notag|nonumber)\b/.test(latex)) return null;
-  if (hasLabel(latex)) return String(next);
+  const directives = mathDirectives(latex);
+  const explicit = directives.find((directive) => directive.name === "tag");
+  if (explicit) return explicit.value;
+  if (directives.some((directive) => directive.name === "notag" || directive.name === "nonumber")) return null;
+  if (directives.some((directive) => directive.name === "label")) return String(next);
   if (mode === "none") return null;
   if (mode === "all") return String(next);
 
-  const env = /\\begin\s*\{([a-zA-Z]+\*?)\}/.exec(latex);
-  if (!env) return null;
   const NUMBERED = ["equation", "align", "alignat", "gather", "multline", "flalign", "eqnarray"];
-  return NUMBERED.includes(env[1]) ? String(next) : null;
+  return directives.some((directive) => directive.name === "begin" && NUMBERED.includes(directive.value))
+    ? String(next) : null;
 }
 
 /** What the numbering pass produces, before anything is laid out. */
@@ -419,6 +389,10 @@ export interface Numbering {
 /** Token class codes, mirroring `CharClass` in the Rust core. */
 const CLASS_LETTER = 4;
 const CLASS_OBJECT = 7;
+const CLASS_WESTERN_PUNCT = 9;
+const METRIC_STRIDE = 6;
+const isShapedText = (tokenClass: number) =>
+  tokenClass === CLASS_LETTER || tokenClass === CLASS_WESTERN_PUNCT;
 
 /** MathJax sizes its SVG in ex, and its fonts put the x-height at this many
  *  of the thousand units per em. Used only as a fallback when a formula is so
@@ -428,11 +402,23 @@ const MATHJAX_EX_UNITS = 442;
 /** Characters the engine positions one at a time: CJK ideographs, kana, and
  *  the full-width punctuation whose empty half can be squeezed away. */
 const INDIVIDUALLY_PLACED =
-  /[\u2018\u2019\u201c\u201d\u2000-\u206f\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+  /[\s\ufffc\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef\u{20000}-\u{2a6df}\u{2a700}-\u{2ebef}\u{30000}-\u{323af}]/u;
 
 /** True for a fragment that is safe to draw joined to its neighbour. */
 export function isLatinWordPiece(text: string): boolean {
   return text.length > 0 && !INDIVIDUALLY_PLACED.test(text);
+}
+
+/** First span whose end follows this character; spans are ordered/disjoint. */
+function spanIndexAt(spans: readonly Span[], position: number): number {
+  let lo = 0;
+  let hi = spans.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (spans[mid].end <= position) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 /**
@@ -541,6 +527,45 @@ function spaceAbove(block: Block, theme: Theme, previous: Block | null): number 
   }
 }
 
+/** Build cached geometry in source coordinates local to its own block. */
+function localBlock(block: Block): Block {
+  return {
+    ...block,
+    start: 0,
+    end: block.end - block.start,
+    rows: block.rows.map((row) => row.map((cell) => ({
+      ...cell, start: cell.start - block.start, end: cell.end - block.start,
+    }))),
+  };
+}
+
+/** Every occurrence owns its placement and source maps, even for equal text. */
+function placeCachedBlock(cached: LaidBlock, block: Block): LaidBlock {
+  const offset = block.start;
+  return {
+    ...cached,
+    block,
+    y: 0,
+    rendered: {
+      ...cached.rendered,
+      spans: cached.rendered.spans.map((span) => ({ ...span })),
+      map: cached.rendered.map.map((position) => position + offset),
+    },
+    lines: cached.lines.map((line) => ({
+      ...line,
+      docStart: line.docStart + offset,
+      docEnd: line.docEnd + offset,
+      runs: line.runs.map((run) => ({
+        ...run, docStart: run.docStart + offset, docEnd: run.docEnd + offset,
+      })),
+    })),
+    table: cached.table && {
+      ...cached.table,
+      x: [...cached.table.x], widths: [...cached.table.widths], rowStarts: [...cached.table.rowStarts],
+    },
+  };
+}
+
 export class Typesetter {
   private measurer = new Measurer();
   private cache = new Map<string, LaidBlock>();
@@ -605,6 +630,7 @@ export class Typesetter {
     const focusedBlock = blockIndexAtPosition(parsed, focusedPosition);
     const numbering = numberEquations(parsed, this.options.numbering);
     const out: LaidBlock[] = [];
+    const usedKeys = new Set<string>();
     let y = 0;
     for (let i = 0; i < parsed.length; i++) {
       const b = parsed[i];
@@ -615,10 +641,18 @@ export class Typesetter {
         out.at(-1)?.block ?? null,
         numbering.tags.get(i) ?? null,
         numbering,
+        usedKeys,
       );
       laid.y = y + laid.spaceBefore;
       y = laid.y + laid.height - laid.spaceBefore;
       out.push(laid);
+    }
+    // Keep the current document's working set even when it exceeds the
+    // history budget. Clearing mid-layout would evict its beginning and
+    // cause the entire next layout of a long document to miss again.
+    for (const key of this.cache.keys()) {
+      if (this.cache.size <= 4000) break;
+      if (!usedKeys.has(key)) this.cache.delete(key);
     }
     return { blocks: out, height: y };
   }
@@ -630,21 +664,25 @@ export class Typesetter {
     previous: Block | null,
     tag: string | null,
     numbering: Numbering,
+    usedKeys: Set<string>,
   ): LaidBlock {
-    // A block that cites an equation has to be re-laid-out when that
-    // equation's number moves, and only then; one that cites nothing is
-    // untouched by an edit elsewhere in the document.
-    const cites = citesAnything(block) ? numbering.version : "";
-    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${previous?.type ?? ""}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${cites}|${block.source}`;
-    const hit = this.cache.get(key);
-    if (hit) return hit;
-
-    const laid = this.buildBlock(block, width, raw, previous, tag, numbering);
-    // A cache that grows without bound would outlive its usefulness on a long
-    // document; the working set is the visible screen plus a little.
-    if (this.cache.size > 4000) this.cache.clear();
-    this.cache.set(key, laid);
-    return laid;
+    // Absolute offsets and document y never change a block's typography.
+    // Derived list markers and resolved references do, even when the source
+    // is identical. JSON framing prevents separators in source/labels from
+    // colliding, and preserves the exact available width.
+    const key = JSON.stringify([
+      this.version, width, raw, previous?.type ?? null,
+      block.type, block.level, block.ordered, block.marker, block.task,
+      block.lang, block.math, block.align, block.label, block.source,
+      raw ? null : tag, !raw && usesNumbering(block) ? numbering.version : null,
+    ]);
+    usedKeys.add(key);
+    let laid = this.cache.get(key);
+    if (!laid) {
+      laid = this.buildBlock(localBlock(block), width, raw, previous, tag, numbering);
+      this.cache.set(key, laid);
+    }
+    return placeCachedBlock(laid, block);
   }
 
   private buildBlock(
@@ -764,7 +802,8 @@ export class Typesetter {
   ): LaidBlock {
     const { style, key } = styleForSpan(this.theme, block, null);
     const latex = resolveLatex(block.math, numbering.labels);
-    const math = this.mathRun(renderMath(latex, true), latex, true, style);
+    const widthEx = measure / this.measurer.exHeight(style);
+    const math = this.mathRun(renderDisplayMath(latex, tag, widthEx), latex, true, style);
     const { width, height, depth } = math;
 
     // Centre it, but never push it off the left edge: an equation wider than
@@ -785,24 +824,6 @@ export class Typesetter {
         math,
       },
     ];
-
-    // The number sits flush to the right margin, as LaTeX's does — not beside
-    // the formula, which would move as the formula's width changed.
-    if (tag !== null) {
-      const label = `(${tag})`;
-      const labelWidth = this.measurer.width(label, style, key);
-      runs.push({
-        x: Math.max(x + width + this.theme.bodySize, measure - labelWidth),
-        text: label,
-        docStart: block.start,
-        docEnd: block.start,
-        style,
-        styleKey: key,
-        spanId: -1,
-        scaleX: 1,
-        synthetic: true,
-      });
-    }
 
     const above = this.theme.bodySize * 1.1;
     const below = this.theme.bodySize * 1.1;
@@ -1091,17 +1112,17 @@ export class Typesetter {
 
   /**
    * Rejoin runs that are contiguous in the source, share a style and sit
-   * flush against one another — the pieces of a word that was offered a
-   * hyphenation point but not broken at it.
+   * flush against one another — word pieces split for hyphenation or Western
+   * punctuation measured separately for optical margins.
    *
    * Drawing them as one `fillText` restores the kerning across the join.
    *
-   * Restricted to Latin script, because that is the only thing coalescing is
-   * for. A CJK glyph is positioned individually — squeezed punctuation is
-   * shifted inside its own em box — and merging those into one draw call
+   * Restricted to Western shaping runs. A CJK glyph is positioned
+   * individually — squeezed punctuation is shifted inside its own em box —
+   * and merging those into one draw call
    * would hand their positions back to the platform and undo the adjustment.
    * The flush-position check below would catch most such cases, but "most" is
-   * not worth relying on when "only ever join letters" is simpler and exact.
+   * not worth relying on when the shaping boundary is known.
    */
   private coalesce(runs: LaidRun[]): LaidRun[] {
     if (runs.length < 2) return runs;
@@ -1170,7 +1191,7 @@ export class Typesetter {
         map.push(rendered.map[i]);
         continue;
       }
-      const span = rendered.spans.find((s) => i >= s.start && i < s.end);
+      const span = rendered.spans[spanIndexAt(rendered.spans, i)];
       const built: ObjectPiece[] = span?.kind === "image"
         ? [this.buildImagePiece(span, style, measure)]
         : span?.kind === "note"
@@ -1202,9 +1223,8 @@ export class Typesetter {
     key: string,
     numbering: Numbering,
   ): MathPiece[] {
-    const span = rendered.spans.find(
-      (s) => s.kind === "math" && charIndex >= s.start && charIndex < s.end,
-    );
+    const found = rendered.spans[spanIndexAt(rendered.spans, charIndex)];
+    const span = found?.kind === "math" ? found : undefined;
     // References are resolved before the cache key is built, so a formula
     // whose citation now points at a different number is a different entry.
     const latex = resolveLatex(span?.math ?? "", numbering.labels);
@@ -1380,9 +1400,9 @@ export class Typesetter {
     const text = rendered.text;
     const tokens = engine.tokenize(text, spanByteBoundaries(text, rendered.spans));
     const count = tokens.length / 3;
-    // Four floats per token: advance, height, depth, and the penalty for
-    // breaking after it — the last is how a split formula's pieces are joined.
-    const metrics = new Float32Array(count * 4);
+    // Contextual advance, height, depth, break penalty, measured hyphen width,
+    // and standalone glyph advance (optical margins must not use word width).
+    const metrics = new Float32Array(count * METRIC_STRIDE);
 
     // Resolve which span a byte offset falls in, so bold and code runs are
     // measured with the face they will be drawn in.
@@ -1395,23 +1415,23 @@ export class Typesetter {
     const fallbackStyle = { span: null, id: -1, ...base };
     const styleAt = (byteOffset: number) => {
       const ch = toChar(byteOffset);
-      for (const s of spanStyles) {
-        if (ch >= s.span.start && ch < s.span.end) return s;
-      }
+      // Spans are disjoint and ordered. A full scan per token would make a
+      // paragraph with many Markdown styles quadratic again after parsing.
+      const found = spanStyles[spanIndexAt(rendered.spans, ch)];
+      if (found && ch >= found.span.start && ch < found.span.end) return found;
       return spanStyles[0] ?? fallbackStyle;
     };
 
-    // Measure. Pieces of one hyphenated word arrive as separate tokens that
-    // touch in the source; those are measured as differences between prefixes
-    // of the whole word, so the kerning between them is counted exactly once
-    // and the pieces sum to the width the word has when it is not broken.
+    // Measure word pieces and adjacent Western punctuation as differences
+    // between prefixes of one shaping run. Their advances sum to the drawn
+    // text, preserving kerning even though punctuation has its own token.
     for (let i = 0, t = 0; i < count; ) {
       let n = 1;
       const st = styleAt(tokens[t]);
-      if (tokens[t + 2] === CLASS_LETTER) {
+      if (isShapedText(tokens[t + 2])) {
         while (
           i + n < count &&
-          tokens[t + n * 3 + 2] === CLASS_LETTER &&
+          isShapedText(tokens[t + n * 3 + 2]) &&
           tokens[t + n * 3] === tokens[t + (n - 1) * 3 + 1] &&
           styleAt(tokens[t + n * 3]).key === st.key &&
           styleAt(tokens[t + n * 3]).id === st.id
@@ -1426,10 +1446,10 @@ export class Typesetter {
       // size, and it brings a height and a depth that the line must respect.
       if (tokens[t + 2] === CLASS_OBJECT) {
         const piece = pieces.get(toChar(tokens[t]));
-        metrics[i * 4] = piece?.width ?? 0;
-        metrics[i * 4 + 1] = Math.max(piece?.height ?? 0, v.ascent * 0.2);
-        metrics[i * 4 + 2] = piece?.depth ?? 0;
-        metrics[i * 4 + 3] = piece?.penaltyAfter ?? NaN;
+        metrics[i * METRIC_STRIDE] = piece?.width ?? 0;
+        metrics[i * METRIC_STRIDE + 1] = Math.max(piece?.height ?? 0, v.ascent * 0.2);
+        metrics[i * METRIC_STRIDE + 2] = piece?.depth ?? 0;
+        metrics[i * METRIC_STRIDE + 3] = piece?.penaltyAfter ?? NaN;
         i += 1;
         t += 3;
         continue;
@@ -1437,21 +1457,25 @@ export class Typesetter {
 
       if (n === 1) {
         const slice = text.slice(toChar(tokens[t]), toChar(tokens[t + 1]));
-        metrics[i * 4] = this.measurer.width(slice, st.style, st.key);
+        metrics[i * METRIC_STRIDE] = this.measurer.width(slice, st.style, st.key);
       } else {
         const from = toChar(tokens[t]);
         let previous = 0;
         for (let k = 0; k < n; k++) {
           const upto = toChar(tokens[t + k * 3 + 1]);
           const cumulative = this.measurer.width(text.slice(from, upto), st.style, st.key);
-          metrics[(i + k) * 4] = cumulative - previous;
+          metrics[(i + k) * METRIC_STRIDE] = cumulative - previous;
           previous = cumulative;
         }
       }
       for (let k = 0; k < n; k++) {
-        metrics[(i + k) * 4 + 1] = v.ascent;
-        metrics[(i + k) * 4 + 2] = v.descent;
-        metrics[(i + k) * 4 + 3] = NaN;
+        metrics[(i + k) * METRIC_STRIDE + 1] = v.ascent;
+        metrics[(i + k) * METRIC_STRIDE + 2] = v.descent;
+        metrics[(i + k) * METRIC_STRIDE + 3] = NaN;
+        metrics[(i + k) * METRIC_STRIDE + 4] = this.measurer.width("-", st.style, st.key);
+        metrics[(i + k) * METRIC_STRIDE + 5] = tokens[t + k * 3 + 2] === CLASS_WESTERN_PUNCT
+          ? this.measurer.width(text.slice(toChar(tokens[t + k * 3]), toChar(tokens[t + k * 3 + 1])), st.style, st.key)
+          : metrics[(i + k) * METRIC_STRIDE];
       }
       i += n;
       t += n * 3;

@@ -10,7 +10,7 @@ fn measure(text: &str, tokens: &[Token]) -> Vec<f32> {
             CharClass::Space => EM / 3.0,
             _ => s.chars().count() as f32 * EM * 0.5,
         };
-        [w, EM * 0.8, EM * 0.2, f32::NAN]
+        [w, EM * 0.8, EM * 0.2, f32::NAN, EM * 0.5, w]
     }).collect()
 }
 

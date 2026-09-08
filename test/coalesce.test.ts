@@ -1,6 +1,6 @@
 // The rule that decides whether two adjacent runs may be drawn as one
-// `fillText`. Joining is only ever correct for the pieces of a Latin word
-// that hyphenation split; every CJK glyph is positioned individually, and
+// `fillText`. Western word pieces and punctuation preserve kerning by joining;
+// every CJK glyph is positioned individually, and
 // squeezed punctuation is shifted inside its own em box, so handing those
 // back to the platform to lay out would undo the adjustment.
 import {
@@ -22,10 +22,10 @@ function eq(actual: unknown, expected: unknown, label: string) {
   }
 }
 
-for (const piece of ["extra", "ordi", "nary", "organisation's", "café", "Ляг", "42", "re-do"]) {
+for (const piece of ["extra", "ordi", "nary", "organisation's", "café", "Ляг", "42", "re-do", "…", "“", "’", ".", '"Hello']) {
   eq(isLatinWordPiece(piece), true, `joinable: ${JSON.stringify(piece)}`);
 }
-for (const piece of ["中", "、", "。", "（", "」", "・", "ひ", "ア", "，", "＝", "…", "“", "’"]) {
+for (const piece of ["中", "、", "。", "（", "」", "・", "ひ", "ア", "，", "＝", "한", "𠀀", "\u2028", "\ufffc", " "]) {
   eq(isLatinWordPiece(piece), false, `never joined: ${JSON.stringify(piece)}`);
 }
 eq(isLatinWordPiece("ab中"), false, "a mixed fragment is not joinable");

@@ -6,6 +6,8 @@ import { initSync } from "../crates/typeset-wasm/pkg/typeset_wasm.js";
 import { DEFAULT_OPTIONS, DEFAULT_THEME, initEngine, Typesetter } from "../src/engine/typeset.js";
 import { Editor } from "../src/editor/editor.js";
 import { EMPTY_GEOMETRY } from "../src/engine/math.js";
+import { Renderer } from "../src/render/canvas.js";
+import { cssFont } from "../src/engine/measure.js";
 
 Object.defineProperty(globalThis, "document", {
   configurable: true,
@@ -48,6 +50,49 @@ assert.deepEqual(runs("😀**é**z").map((r) => [r.text, r.docStart]),
   [["😀", 0], ["é", 4], ["z", 7]]);
 assert.deepEqual(runs("e\u0301**x**").map((r) => r.text), ["e\u0301", "x"]);
 assert.equal(layout("`a b`").lines[0].width, 29, "code-space measurement reaches the core");
+
+// A separate deterministic shaper makes punctuation narrower than letters
+// and kerns it against its neighbours. Exercise the real measurement -> WASM
+// -> coalescing path, including styled discretionary hyphens.
+const optical = new Typesetter({ ...DEFAULT_THEME }, {
+  ...DEFAULT_OPTIONS, inline: { ...DEFAULT_OPTIONS.inline }, justify: false,
+  protrusion: true, maxExpand: 0,
+});
+(optical as any).measurer.width = (text: string, style: { weight: number }) => {
+  const bold = style.weight === 700;
+  return Array.from(text).reduce((width, c) => width +
+    (c === '"' || c === "“" || c === "”" ? 4 : c === "." ? 2 :
+      c === "-" ? (bold ? 13 : 7) : c === " " ? 4 : (bold ? 12 : 10)), 0) -
+    (text.includes('"H') || text.includes("“H") ? 1 : 0) -
+    (text.includes("o.") ? 0.5 : 0);
+};
+for (const source of ['"Hello.', "“Hello.”", "Hello."]) {
+  const line = optical.layoutDocument(source, 1000, -1).blocks[0].lines[0];
+  assert.equal(line.runs.length, 1, "punctuation tokens rejoin to preserve platform kerning");
+  const run = line.runs[0];
+  assert.equal(run.text, source);
+  assert.equal(run.x + 0, source === "Hello." ? 0 : -2, "only half the opening quote hangs");
+  assert.ok(Math.abs(line.width - (run.x + optical.measureText(run.text, run.style, run.styleKey))) < 0.0001,
+    "kerned punctuation and text reserve precisely their drawn width");
+}
+const opticalStyled = optical.layoutDocument('"**Hello**.', 1000, -1).blocks[0].lines[0];
+assert.deepEqual(opticalStyled.runs.map((r) => [r.text, r.style.weight]),
+  [['"', 400], ["Hello", 700], [".", 400]], "punctuation cannot erase style boundaries");
+assert.equal(opticalStyled.width, 64, "separately drawn styles do not borrow punctuation kerning");
+for (const source of ["extraordinary", "**extraordinary**"]) {
+  const lines = optical.layoutDocument(source, 80, -1).blocks[0].lines;
+  const inserted = lines.filter((line) => line.runs.at(-1)?.synthetic);
+  assert.ok(inserted.length > 0, "a narrow word exercises discretionary hyphens");
+  for (const line of inserted) {
+    const hyphen = line.runs.at(-1)!;
+    const measured = optical.measureText("-", hyphen.style, hyphen.styleKey);
+    assert.equal(measured, source.startsWith("**") ? 13 : 7);
+    assert.ok(Math.abs(line.width - hyphen.x - measured * hyphen.scaleX) < 0.0001,
+      "the inserted hyphen reserves the measured width of its actual font");
+  }
+}
+assert.equal(optical.layoutDocument('"short."', 20, -1).blocks[0].lines.length, 1,
+  "measuring punctuation separately never creates punctuation-only lines");
 const math = runs("a$x$**b**");
 assert.equal(math.at(-1)?.text, "b");
 assert.equal(math.at(-1)?.style.weight, 700);
@@ -124,28 +169,28 @@ for (let position = 0; position <= longSource.length; position++) {
 const visualLines = wrappedEditor.blocks[0].lines;
 for (let i = 1; i < visualLines.length; i++) {
   wrappedEditor.moveVertical(1, false);
-  assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i],
+  assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i],
     "ArrowDown reaches the following visual line, including shared source offsets");
 }
 for (let i = visualLines.length - 2; i >= 0; i--) {
   wrappedEditor.moveVertical(-1, false);
-  assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i], "ArrowUp returns through every visual line");
+  assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, visualLines[i], "ArrowUp returns through every visual line");
 }
 const firstLine = visualLines[0];
 const endHit = wrappedEditor.positionAt(48 + firstLine.width + 1, 56 + firstLine.baseline - 5);
 wrappedEditor.moveTo(endHit.offset, false, endHit.affinity);
-assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, firstLine, "clicking the wrapped line end stays on that line");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, firstLine, "clicking the wrapped line end stays on that line");
 const nextLine = visualLines[1];
 const startHit = wrappedEditor.positionAt(48, 56 + nextLine.baseline - 5);
 wrappedEditor.moveTo(startHit.offset, false, startHit.affinity);
-assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "clicking the shared offset on the next line stays there");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "clicking the shared offset on the next line stays there");
 const key = (name: string) => wrappedEditor.onKeyDown({ key: name, preventDefault() {} });
 key("End");
 assert.equal(wrappedEditor.selEnd, nextLine.docEnd);
-assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "End uses the upstream side of a wrap");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "End uses the upstream side of a wrap");
 key("Home");
 assert.equal(wrappedEditor.selEnd, nextLine.docStart);
-assert.equal(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "Home uses the downstream side of a wrap");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "Home uses the downstream side of a wrap");
 wrappedEditor.selStart = 0;
 wrappedEditor.selEnd = longSource.length;
 assert.equal(wrappedEditor.selectionRects().length, visualLines.length, "selection covers every wrapped source line");
@@ -333,5 +378,196 @@ console.log("ok   tables break each cell in its own column and keep their source
     "a line carrying a mark is no shorter than one without");
 }
 console.log("ok   footnotes number by first reference and sit in their own margin");
+
+// Cache geometry is block-local: prefix edits may move a hundred source
+// ranges, but only the changed block needs parsing, measurement and breaking.
+const cached = new Typesetter({ ...DEFAULT_THEME }, {
+  ...DEFAULT_OPTIONS, inline: { ...DEFAULT_OPTIONS.inline }, justify: false,
+});
+let builds = 0;
+const buildBlock = (cached as any).buildBlock;
+(cached as any).buildBlock = function (...args: unknown[]) {
+  builds++;
+  return buildBlock.apply(this, args);
+};
+const longDoc = Array.from({ length: 20 }, (_, i) => `paragraph ${i} with **style**`).join("\n\n");
+const oldBlocks = cached.layoutDocument(longDoc, 400, -1).blocks;
+const initialBuilds = builds;
+cached.layoutDocument(longDoc, 400, -1);
+assert.equal(builds, initialBuilds, "unchanged layout builds no blocks");
+const shiftedBlocks = cached.layoutDocument("x" + longDoc, 400, -1).blocks;
+assert.equal(builds - initialBuilds, 1, "a prefix edit rebuilds only the changed paragraph");
+for (let i = 1; i < oldBlocks.length; i++) {
+  const old = oldBlocks[i];
+  const shifted = shiftedBlocks[i];
+  assert.notEqual(old, shifted, "placement belongs to an occurrence, not the cache");
+  assert.equal(shifted.block.start, old.block.start + 1);
+  assert.deepEqual([...shifted.rendered.map], [...old.rendered.map].map((p) => p + 1));
+  assert.deepEqual(shifted.lines.map((l) => [l.docStart, l.docEnd]),
+    old.lines.map((l) => [l.docStart + 1, l.docEnd + 1]));
+  assert.deepEqual(shifted.lines.flatMap((l) => l.runs).map((r) => [r.docStart, r.docEnd]),
+    old.lines.flatMap((l) => l.runs).map((r) => [r.docStart + 1, r.docEnd + 1]));
+}
+const duplicates = cached.layoutDocument("same\n\nsame\n\nsame", 400, -1).blocks;
+assert.notEqual(duplicates[2], duplicates[4]);
+assert.notEqual(duplicates[2].lines[0], duplicates[4].lines[0]);
+assert.notEqual(duplicates[2].lines[0].runs[0], duplicates[4].lines[0].runs[0]);
+assert.notEqual(duplicates[2].rendered.map, duplicates[4].rendered.map);
+assert.ok(duplicates[4].y > duplicates[2].y, "duplicate text keeps distinct document placement");
+duplicates[2].lines[0].runs[0].docStart = -100;
+duplicates[2].rendered.map[0] = -100;
+assert.equal(cached.layoutDocument("same\n\nsame\n\nsame", 400, -1).blocks[2].lines[0].runs[0].docStart, 6,
+  "a returned source map cannot corrupt the reusable layout");
+
+// Reusing a shifted layout must match a cold layout for every current block
+// shape, including table cell maps, objects, raw source, and derived markers.
+Object.defineProperty(globalThis, "window", { configurable: true, value: { devicePixelRatio: 1 } });
+Object.defineProperty(globalThis, "Image", {
+  configurable: true, value: class { addEventListener() {} },
+});
+const cacheFixtures = [
+  "lead\n\n| a | b |\n| - | - |\n| 中文 | **wide** |",
+  "lead\n\n```\ncode\n```\n\n> a\n> b\n\n---",
+  "lead\n\n$$\nx\\label{x}\n$$\n\nsee $\\eqref{x}$",
+  "lead\n\n![fallback](https://example.test/picture.png) text",
+  "lead\n\n- [x] done\n- [ ] pending\n\n## heading",
+];
+for (const doc of cacheFixtures) {
+  for (const raw of [false, true]) {
+    const hot = new Typesetter({ ...DEFAULT_THEME }, {
+      ...DEFAULT_OPTIONS, inline: { ...DEFAULT_OPTIONS.inline }, justify: false,
+    });
+    hot.layoutDocument(doc, 240, raw ? doc.length : -1);
+    const shifted = "x" + doc;
+    const warmResult = hot.layoutDocument(shifted, 240, raw ? shifted.length : -1);
+    const cold = new Typesetter({ ...DEFAULT_THEME }, {
+      ...DEFAULT_OPTIONS, inline: { ...DEFAULT_OPTIONS.inline }, justify: false,
+    }).layoutDocument(shifted, 240, raw ? shifted.length : -1);
+    assert.deepEqual(warmResult, cold, "all shifted source maps match a fresh layout");
+  }
+}
+const listBefore = cached.layoutDocument("1. alpha\n1. beta\n1. gamma", 400, -1);
+const listAfter = cached.layoutDocument("5. alpha\n1. beta\n1. gamma", 400, -1);
+assert.deepEqual(listBefore.blocks.map((b) => b.marker), ["1.", "2.", "3."]);
+assert.deepEqual(listAfter.blocks.map((b) => b.marker), ["5.", "6.", "7."],
+  "derived list counters participate in cache identity");
+const notesBefore = "lead[^a] then[^b]\n\nref[^a]\n\n[^a]: alpha\n\n[^b]: beta";
+cached.layoutDocument(notesBefore, 400, -1);
+const notesAfter = cached.layoutDocument(notesBefore.replace("lead[^a] then[^b]", "lead[^b] then[^a]"), 400, -1);
+assert.equal(notesAfter.blocks.find((b) => b.block.source === "ref[^a]")!.lines[0].runs.find((r) => r.note)!.note!.text, "2");
+assert.equal(notesAfter.blocks.find((b) => b.block.label === "a")!.note!.text, "2",
+  "footnote references and definition markers track reordered numbers");
+const headingWithGap = cached.layoutDocument("before\n# heading", 400, -1).blocks.at(-1)!;
+const headingWithoutGap = cached.layoutDocument("before\n\n# heading", 400, -1).blocks.at(-1)!;
+assert.ok(headingWithGap.spaceBefore > headingWithoutGap.spaceBefore,
+  "the previous block's type remains a layout dependency");
+console.log("ok   block-local cache reuses shifted geometry without aliasing source maps or stale context");
+
+// Canvas dimension setters reset the entire context, while restore restores
+// font/fill. A context double with those semantics exposes stale memoization
+// that resetting the backing store on every frame previously concealed.
+const paints: Array<[string, string, string]> = [];
+const states: Array<[string, string]> = [];
+const ctx = {
+  font: "10px default", fillStyle: "#000000", textBaseline: "alphabetic",
+  save() { states.push([this.font, this.fillStyle]); },
+  restore() { [this.font, this.fillStyle] = states.pop()!; },
+  scale() {}, translate() {}, fillRect() {},
+  fillText(text: string) { paints.push([text, this.font, this.fillStyle]); },
+};
+let backingWidth = 0;
+let backingHeight = 0;
+let allocations = 0;
+const canvas = {
+  style: { width: "", height: "" },
+  getContext: () => ctx,
+  get width() { return backingWidth; },
+  set width(value: number) { backingWidth = value; allocations++; ctx.font = "10px default"; ctx.fillStyle = "#000000"; },
+  get height() { return backingHeight; },
+  set height(value: number) { backingHeight = value; allocations++; ctx.font = "10px default"; ctx.fillStyle = "#000000"; },
+};
+const renderer = new Renderer(canvas as unknown as HTMLCanvasElement);
+const painted = layout("hello");
+const view = { scrollTop: 0, width: 400, height: 200, originX: 0, originY: 0 };
+renderer.resize(400, 200);
+assert.equal(allocations, 2);
+for (let frame = 0; frame < 3; frame++) {
+  renderer.resize(400, 200);
+  renderer.draw([painted], view, DEFAULT_THEME, [], null, false, false);
+}
+assert.equal(allocations, 2, "unchanged frames do not reallocate or clear backing storage");
+assert.deepEqual(paints, Array.from({ length: 3 }, () =>
+  ["hello", cssFont(painted.lines[0].runs[0].style), DEFAULT_THEME.color]),
+  "font and fill stay correct across save/restore on consecutive frames");
+renderer.resize(401, 200);
+assert.equal(allocations, 3, "only the changed dimension is assigned");
+(window as unknown as { devicePixelRatio: number }).devicePixelRatio = 2;
+renderer.resize(401, 200);
+assert.deepEqual([canvas.width, canvas.height], [802, 400]);
+assert.equal(allocations, 5, "a DPR change resizes the physical backing store");
+console.log("ok   renderer retains backing storage and resets restored paint-state caches");
+
+
+// --- forced line breaks ----------------------------------------------------
+// A bare newline is a soft break: markdown joins the lines, and the CJK rule
+// discards it outright. Shift+Enter has to write a marker or the break the
+// author asked for simply disappears.
+{
+  const at = (source: string, position: number) => {
+    const editor = Object.create(Editor.prototype) as any;
+    editor.typesetter = typesetter;
+    editor.text = source;
+    editor.selEnd = position;
+    editor.blocks = typesetter.layoutDocument(source, 1000, position).blocks;
+    return editor.hardBreak();
+  };
+
+  assert.equal(at("plain text", 5), "\\\n", "a paragraph takes the backslash spelling");
+  assert.equal(at("- an item", 5), "\\\n",
+    "a list item needs nothing more: an unmarked line is already its continuation");
+
+  // A quotation is recognised line by line, so the marker has to come along
+  // or the break leaves the block instead of breaking inside it — and the
+  // backslash, left as the last character of a one-line quote, becomes
+  // visible content.
+  assert.equal(at("> quoted text", 5), "\\\n> ", "a quote carries its marker across");
+  assert.equal(at(">quoted", 4), "\\\n>", "including when written without the space");
+  assert.equal(at("  > indented", 6), "\\\n  > ", "and keeps the indent it was written with");
+
+  // Verbatim blocks have no forced break to write: their line structure is
+  // already literal, and a backslash there would become content.
+  assert.equal(at("```\ncode here\n```", 6), "\n", "code takes a bare newline");
+  assert.equal(at("$$\nx = 1\n$$", 5), "\n", "and so does display math");
+  assert.equal(at("---\ntitle: x\n---", 6), "\n", "and front matter");
+  assert.equal(at("<div>\nmarkup\n</div>", 8), "\n", "and HTML");
+  assert.equal(at("| a |\n|---|\n| b |", 14), "\n", "and a table, whose rows are its lines");
+}
+{
+  // What the editor writes must be what the parser reads back as a break.
+  const editor = Object.create(Editor.prototype) as any;
+  editor.typesetter = typesetter;
+  editor.text = "第一行第二行";
+  editor.selEnd = 3;
+  editor.blocks = typesetter.layoutDocument(editor.text, 1000, 3).blocks;
+  const written = editor.text.slice(0, 3) + editor.hardBreak() + editor.text.slice(3);
+  const lines = typesetter.layoutDocument(written, 1000, -1).blocks[0].lines;
+  assert.equal(lines.length, 2, "the break the editor writes actually breaks the line");
+  assert.deepEqual(lines.map((l) => l.runs.map((r) => r.text).join("")), ["第一行", "第二行"]);
+}
+{
+  // The same round trip inside a quote, where the marker matters and a stray
+  // backslash would otherwise show.
+  const editor = Object.create(Editor.prototype) as any;
+  editor.typesetter = typesetter;
+  editor.text = "> 第一行第二行";
+  editor.selEnd = 5;
+  editor.blocks = typesetter.layoutDocument(editor.text, 1000, 5).blocks;
+  const written = editor.text.slice(0, 5) + editor.hardBreak() + editor.text.slice(5);
+  const laid = typesetter.layoutDocument(written, 1000, -1).blocks;
+  assert.deepEqual(laid.map((b) => b.block.type), ["quote"], "the quote is still one block");
+  assert.deepEqual(laid[0].lines.map((l) => l.runs.map((r) => r.text).join("")),
+    ["第一行", "第二行"], "broken in two, with no backslash left over");
+}
+console.log("ok   Shift+Enter writes a break the parser reads back");
 
 console.log("ok   real WASM preserves style boundaries, measured widths and source offsets");

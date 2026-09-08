@@ -110,6 +110,10 @@
       label.slider input { width: 84px; }
 
       #stage { position: relative; flex: 1; overflow: hidden; }
+      .document-dialog { max-width: 420px; border: 1px solid #d8d8d8; border-radius: 8px; padding: 24px; }
+      .document-dialog::backdrop { background: #0005; }
+      .document-dialog p { margin: 0 0 20px; line-height: 1.6; }
+      .document-dialog div { display: flex; justify-content: end; gap: 12px; }
       #surface { display: block; width: 100%; height: 100%; cursor: text; }
 
       /* The input that collects keystrokes and hosts IME composition. It has
@@ -156,6 +160,7 @@
         <div class="toggles">
           <button class="toggle" id="open" title="打开一个 Markdown 文件">打开</button>
           <button class="toggle" id="save" title="保存（⌘S）">保存</button>
+          <button class="toggle" id="save-as" title="另存为（⌘⇧S）">另存为</button>
         </div>
         <span class="sep"></span>
         <div class="toggles" id="toggles"></div>
