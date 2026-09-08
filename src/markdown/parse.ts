@@ -71,6 +71,10 @@ export type SpanKind =
   | "code"
   | "link"
   | "strike"
+  | "highlight"
+  | "sub"
+  | "sup"
+  | "underline"
   | "math"
   | "image";
 
@@ -111,6 +115,10 @@ export interface Span {
   em: boolean;
   code: boolean;
   strike: boolean;
+  highlight: boolean;
+  sub: boolean;
+  sup: boolean;
+  underline: boolean;
   href: string;
 }
 
@@ -133,6 +141,15 @@ export function fenceCloser(openingLine: string): RegExp | null {
 const MATH_OPEN = /^\s*(\$\$|\\\[)/;
 const HEADING = /^(#{1,6})\s+(.*)$/;
 const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+/**
+ * The underline of a setext heading.
+ *
+ * CommonMark's older heading form, and one Typora still reads. It only means
+ * anything under an open paragraph, which is what keeps `---` after a blank
+ * line a thematic break and `---` at the top of a file the front matter it
+ * opens.
+ */
+const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
 /** Front matter opens with exactly three dashes on the document's first line. */
 const FRONT_MATTER_OPEN = /^---\s*$/;
 /** YAML permits either fence as a terminator. */
@@ -579,11 +596,28 @@ counters.length = 0;
       continue;
     }
 
-    // Paragraph: run on until a blank line or a block that interrupts.
+    // Paragraph: run on until a blank line, a block that interrupts, or the
+    // underline that turns it into a heading.
     let j = i + 1;
-    while (j < count && !interruptsParagraph(lines[j], options, lines[j + 1])) j++;
+    while (
+      j < count &&
+      !interruptsParagraph(lines[j], options, lines[j + 1]) &&
+      !SETEXT.test(lines[j])
+    ) j++;
+    counters.length = 0;
+    if (j < count && SETEXT.test(lines[j])) {
+      // The underline belongs to the heading, so the block covers both: the
+      // level is written there and nowhere else.
+      const end = blockEnd(doc, offsets, lines.length, j + 1, start, line);
+      blocks.push(
+        block("heading", doc.slice(start, end), start, end, {
+          level: lines[j].trim().startsWith("=") ? 1 : 2,
+        }),
+      );
+      i = j + 1;
+      continue;
+    }
     const end = blockEnd(doc, offsets, lines.length, j, start, line);
-counters.length = 0;
     blocks.push(block("paragraph", doc.slice(start, end), start, end));
     i = j;
   }
@@ -779,6 +813,10 @@ export function renderBlock(
     if (m) {
       base += m[1].length + b.source.slice(m[1].length).indexOf(m[2]);
       body = m[2];
+    } else {
+      // Setext: the text is every line but the underline.
+      const cut = b.source.lastIndexOf("\n");
+      if (cut >= 0) body = b.source.slice(0, cut);
     }
   } else if (b.type === "quote") {
     return stripPerLine(b, /^\s*>\s?/, options);
@@ -842,8 +880,14 @@ function stripPerLine(b: Block, marker: RegExp, options: InlineOptions): Rendere
       // characters is how the author wrapped the file, not a space.
       const next = lines[n + 1].replace(marker, "");
       const before = text.length ? text[text.length - 1] : "";
-      const wide = isWide(before) || isWide(next.charAt(0));
-      if (!options.cjkSoftBreaks || !wide) {
+      if (options.softBreak === "break") {
+        text += LINE_SEPARATOR;
+        map.push(at - 1);
+        return;
+      }
+      const wide = options.softBreak === "smart" &&
+        (isWide(before) || isWide(next.charAt(0)));
+      if (!wide) {
         text += " ";
         map.push(at - 1);
       }
@@ -891,12 +935,42 @@ function plainSpan(start: number, end: number): Span {
     em: false,
     code: false,
     strike: false,
+    highlight: false,
+    sub: false,
+    sup: false,
+    underline: false,
     href: "",
   };
 }
 
 /** How the inline scanner should treat math delimiters. */
 export interface InlineOptions {
+  /**
+   * Turn a bare `https://…` or `www.…` into a link.
+   *
+   * GFM's autolink extension, and on by default as it is in Typora: a URL
+   * written in running text is meant as a link by anyone who writes one.
+   */
+  autoLink: boolean;
+  /**
+   * Recognise `H~2~O` and `X^2^`.
+   *
+   * Off by default, as in Typora. A tilde is a real character in prose and a
+   * caret is a real character in code, and a document written before anyone
+   * asked for subscripts should not suddenly grow them. The rule is
+   * deliberately narrow — no spaces inside, no markup inside — which is what
+   * keeps `~` from colliding with `~~strikethrough~~` and with itself.
+   */
+  subscript: boolean;
+  superscript: boolean;
+  /**
+   * Recognise `==highlighted==` text.
+   *
+   * Off by default, as it is in Typora: `==` is not CommonMark, and a
+   * document that writes it for something else — a rule, an equation — should
+   * keep saying what it says.
+   */
+  highlight: boolean;
   /** Recognise dollar-delimited formulas at all. */
   inlineMath: boolean;
   /** Recognise TeX's own \( \) and \[ \] delimiters. */
@@ -913,29 +987,38 @@ export interface InlineOptions {
    */
   strictDollar: boolean;
   /**
-   * Drop a source line break that touches a CJK character, instead of turning
-   * it into a space.
+   * What a single line break inside a paragraph means.
    *
-   * CommonMark says a newline inside a paragraph is a space, which is right
-   * for scripts that separate words with one and wrong for Chinese and
-   * Japanese, where a line break in the source is only how the author chose
-   * to wrap the file. Leave it on and a paragraph reads the same however it
-   * is wrapped; turn it off for CommonMark's literal behaviour.
+   * The three answers that exist, because implementations genuinely disagree:
+   *
+   *  - "space" is CommonMark's: the newline is a space. Right for scripts
+   *    that separate words with one.
+   *  - "break" is Typora's default: the newline is a line break, and the
+   *    paragraph is laid out the way it was typed.
+   *  - "smart" is this editor's, and the default: a space, except where the
+   *    break touches a wide character, where it is dropped outright. A
+   *    Chinese paragraph then reads the same however the file is wrapped,
+   *    which is what the author meant by wrapping it.
    *
    * Pandoc's `east_asian_line_breaks` drops the newline only when the
-   * characters on *both* sides are wide. We drop it when *either* side is,
-   * because we also insert the quarter em between Han and Latin ourselves: on
-   * a boundary like "意思；\n`\eqref`" Pandoc's rule leaves a space that the
-   * mixed-script spacing then widens further, and the gap reads as a mistake.
+   * characters on *both* sides are wide. "smart" drops it when *either* side
+   * is, because this editor also inserts the quarter em between Han and Latin
+   * itself: on a boundary like "意思；\n`\eqref`" Pandoc's rule leaves a space
+   * that the mixed-script spacing then widens further, and the gap reads as a
+   * mistake.
    */
-  cjkSoftBreaks: boolean;
+  softBreak: "space" | "break" | "smart";
 }
 
 export const DEFAULT_INLINE_OPTIONS: InlineOptions = {
+  autoLink: true,
+  subscript: false,
+  superscript: false,
+  highlight: false,
   inlineMath: true,
   texDelimiters: true,
   strictDollar: true,
-  cjkSoftBreaks: true,
+  softBreak: "smart",
 };
 
 /** One level of an in-progress list, for numbering ordered items. */
@@ -1029,6 +1112,8 @@ export function parseInline(
   const delimiters = new InlineDelimiterIndex(body);
   /** Newlines the author marked as breaks, by backslash or trailing spaces. */
   const hardBreaks = new Set<number>();
+  /** Where a <br> was written, in place of which a break is emitted. */
+  const tagBreaks = new Set<number>();
   /** Label-local scan boundaries, including the emphasis stack they own. */
   const linkLabels: Array<{ start: number; close: number; end: number; openStart: number }> = [];
 
@@ -1155,6 +1240,43 @@ export function parseInline(
       }
     }
 
+    // A bare URL in running text. Only at a word boundary, so the `www.` in
+    // `see-www.example` is not one.
+    if (options.autoLink && !label && (c === "h" || c === "w" || c === "f") &&
+      urlMayStart(i > 0 ? body[i - 1] : undefined)) {
+      const bare = matchBareUrl(body, i, limit);
+      if (bare) {
+        formats.push({ kind: "link", from: i, to: bare.end, href: bare.href });
+        i = bare.end;
+        continue;
+      }
+    }
+
+    // Inline HTML. Typora renders a handful of tags rather than showing
+    // their source, and does it with no preference to turn off — they are
+    // how markdown has always written the things it has no syntax for.
+    if (c === "<") {
+      const br = INLINE_BREAK.exec(body.slice(i, limit));
+      if (br) {
+        // A <br> is a hard break like any other. All of the tag but its last
+        // character is dropped; that character is what the break is emitted
+        // in place of, so it survives the merging of adjacent dropped ranges
+        // and the emitter can still find it.
+        const at = i + br[0].length - 1;
+        drops.push([i, at]);
+        tagBreaks.add(at);
+        i = at + 1;
+        continue;
+      }
+      const tag = matchInlineTag(body, i, limit);
+      if (tag) {
+        drops.push([i, tag.contentAt], [tag.close, tag.end]);
+        formats.push({ kind: tag.kind, from: tag.contentAt, to: tag.close, href: "" });
+        i = tag.contentAt;
+        continue;
+      }
+    }
+
     // An autolink is only a link when it is not already inside one: CommonMark
     // forbids a link within a link, and letting both formats cover the same
     // characters would leave the span builder to choose arbitrarily.
@@ -1189,13 +1311,42 @@ export function parseInline(
       continue;
     }
 
-    if (c === "*" || c === "_" || c === "~") {
+    // A subscript or a superscript is one narrow pair: no spaces inside, and
+    // nothing inside re-read as markup. That is Typora's rule, and it is what
+    // stops a lone `~` in prose or a `^` in a formula from opening one.
+    if ((c === "~" && options.subscript) || (c === "^" && options.superscript)) {
+      const run = markerRun(body, i, c, limit);
+      // A tilde inside an unclosed `~~` belongs to the strikethrough that is
+      // waiting to close, not to a subscript: Typora reaches the same answer
+      // by testing its `del` rule first.
+      const pending = c === "~" && open.some((o) => o.marker === "~~");
+      if (run === 1 && !pending) {
+        const found = shortPair(body, i, c, limit);
+        if (found) {
+          drops.push([i, i + 1], [found.close, found.close + 1]);
+          for (const at of found.escapes) drops.push([at, at + 1]);
+          formats.push({ kind: c === "~" ? "sub" : "sup", from: i + 1, to: found.close, href: "" });
+          i = found.close + 1;
+          continue;
+        }
+      }
+      if (c === "^") {
+        i += run;
+        continue;
+      }
+    }
+
+    if (c === "*" || c === "_" || c === "~" || (c === "=" && options.highlight)) {
       if (i >= markerEnd) {
         markerEnd = i + 1;
         while (markerEnd < limit && body[markerEnd] === c) markerEnd++;
       }
       const n = markerEnd - i;
-      const marker = c === "~" ? (n >= 2 ? "~~" : "") : n >= 2 ? c + c : c;
+      // A single tilde or equals is not a delimiter: `~~` is strikethrough and
+      // `==` is a highlight, and a lone one of either is ordinary punctuation.
+      const marker = c === "~" || c === "="
+        ? (n >= 2 ? c + c : "")
+        : n >= 2 ? c + c : c;
       if (!marker) {
         i += n;
         continue;
@@ -1225,7 +1376,9 @@ export function parseInline(
           truncateOpen(top);
           drops.push([o.at, o.at + len], [i, i + len]);
           formats.push({
-            kind: marker === "~~" ? "strike" : len === 2 ? "strong" : "em",
+            kind: marker === "~~" ? "strike"
+              : marker === "==" ? "highlight"
+              : len === 2 ? "strong" : "em",
             from: o.contentAt,
             to: i,
             href: "",
@@ -1325,6 +1478,14 @@ export function parseInline(
       continue;
     }
 
+    if (tagBreaks.has(k)) {
+      if (text.length) emit(LINE_SEPARATOR, k, unformatted);
+      let j = k + 1;
+      while (j < body.length && (body[j] === " " || body[j] === "\t")) j++;
+      k = j - 1;
+      continue;
+    }
+
     if (body[k] === "\n" && hardBreaks.has(k) && text.length) {
       emit(LINE_SEPARATOR, k, unformatted);
       let j = k + 1;
@@ -1339,7 +1500,12 @@ export function parseInline(
       const before = text.length ? text[text.length - 1] : "";
       const after = nextEmitted(j);
       const redundant = before === "" || before === " ";
-      const wide = options.cjkSoftBreaks && (isWide(before) || isWide(after));
+      if (options.softBreak === "break") {
+        if (text.length) emit(LINE_SEPARATOR, k, unformatted);
+        k = j - 1;
+        continue;
+      }
+      const wide = options.softBreak === "smart" && (isWide(before) || isWide(after));
       if (!redundant && !wide) emit(" ", k, unformatted);
       k = j - 1;
       continue;
@@ -1363,7 +1529,9 @@ class FormatSweep {
   private active = new Set<number>();
   private changes = new Set<number>();
   private links: number[] = [];
-  private counts = { strong: 0, em: 0, code: 0, strike: 0 };
+  private counts = {
+    strong: 0, em: 0, code: 0, strike: 0, highlight: 0, sub: 0, sup: 0, underline: 0,
+  };
   private format: Span | undefined;
 
   constructor(private formats: Format[]) {
@@ -1385,7 +1553,8 @@ class FormatSweep {
         this.active.add(id);
         if (kind === "link") this.addLink(id);
       } else this.active.delete(id);
-      if (kind === "strong" || kind === "em" || kind === "code" || kind === "strike") {
+      if (kind === "strong" || kind === "em" || kind === "code" || kind === "strike" ||
+        kind === "highlight" || kind === "sub" || kind === "sup" || kind === "underline") {
         this.counts[kind] += entering ? 1 : -1;
       }
       // A format wholly hidden between emitted characters does not split a
@@ -1401,10 +1570,22 @@ class FormatSweep {
     const em = this.counts.em > 0;
     const code = this.counts.code > 0;
     const strike = this.counts.strike > 0;
+    const highlight = this.counts.highlight > 0;
+    const sub = this.counts.sub > 0;
+    const sup = this.counts.sup > 0;
+    const underline = this.counts.underline > 0;
     return this.format = {
       ...unformatted,
-      kind: link ? "link" : code ? "code" : strong ? "strong" : em ? "em" : strike ? "strike" : "text",
-      strong, em, code, strike, href: link?.href ?? "",
+      kind: link ? "link"
+        : code ? "code"
+        : strong ? "strong"
+        : em ? "em"
+        : strike ? "strike"
+        : highlight ? "highlight"
+        : sup ? "sup"
+        : sub ? "sub"
+        : "text",
+      strong, em, code, strike, highlight, sub, sup, underline, href: link?.href ?? "",
     };
   }
 
@@ -1451,6 +1632,10 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       em: false,
       code: false,
       strike: false,
+      highlight: false,
+      sub: false,
+      sup: false,
+      underline: false,
       href: "",
     };
   }
@@ -1465,6 +1650,10 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       em: false,
       code: false,
       strike: false,
+      highlight: false,
+      sub: false,
+      sup: false,
+      underline: false,
     };
   }
   if (math) {
@@ -1478,6 +1667,10 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       em: false,
       code: false,
       strike: false,
+      highlight: false,
+      sub: false,
+      sup: false,
+      underline: false,
       href: "",
     };
   }
@@ -1492,15 +1685,187 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
             ? "em"
             : has("strike")
               ? "strike"
-              : "text",
+              : has("highlight")
+                ? "highlight"
+                : has("sup")
+                  ? "sup"
+                  : has("sub")
+                    ? "sub"
+                    : "text",
     start,
     end,
     strong: has("strong"),
     em: has("em"),
     code: has("code"),
     strike: has("strike"),
+    highlight: has("highlight"),
+    sub: has("sub"),
+    sup: has("sup"),
+    underline: has("underline"),
     href: link?.href ?? "",
   };
+}
+
+/**
+ * A URL written without any markup around it.
+ *
+ * The body is RFC 3986's own character set rather than "anything but a
+ * space". GFM stops only at whitespace and `<`, which in Chinese swallows the
+ * rest of the sentence: 「https://typora.io，镜像在…」 has no space in it at
+ * all, and the full-width comma is not part of the address.
+ */
+const BARE_URL = /^(?:https?:\/\/|ftp:\/\/|www\.)[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/i;
+
+/** Whether a URL may begin here: after space, or after opening punctuation,
+ *  but not in the middle of a hyphenated or dotted word. */
+function urlMayStart(before: string | undefined): boolean {
+  return before === undefined || !/[A-Za-z0-9\-_.\/@]/.test(before);
+}
+
+/**
+ * The extent of a bare URL, or null.
+ *
+ * Trailing punctuation is given back to the sentence: a URL at the end of a
+ * clause is followed by the full stop, not part of it. A closing parenthesis
+ * is kept only when the URL opened one, which is what lets a Wikipedia link
+ * ending in `(disambiguation)` survive being written inside brackets.
+ */
+function matchBareUrl(body: string, from: number, limit: number): { end: number; href: string } | null {
+  const found = BARE_URL.exec(body.slice(from, limit));
+  if (!found) return null;
+  let text = found[0];
+  for (;;) {
+    const last = text[text.length - 1];
+    if (/[!"'.,:;?*_~]/.test(last)) {
+      text = text.slice(0, -1);
+      continue;
+    }
+    if (last === ")") {
+      const opens = (text.match(/\(/g) ?? []).length;
+      const closes = (text.match(/\)/g) ?? []).length;
+      if (closes > opens) {
+        text = text.slice(0, -1);
+        continue;
+      }
+    }
+    break;
+  }
+  // A scheme on its own is not a link.
+  if (!/[a-z0-9]/i.test(text.slice(text.indexOf("//") + 2) || text.slice(4))) return null;
+  if (text.length < 5) return null;
+  return {
+    end: from + text.length,
+    href: /^www\./i.test(text) ? `https://${text}` : text,
+  };
+}
+
+/** `<br>`, in the spellings HTML accepts for it. */
+const INLINE_BREAK = /^<\s*(?:br|wbr)\s*\/?>/i;
+
+/**
+ * The HTML tags that stand for something this editor already sets, and what
+ * they stand for. Anything else — a `<div>`, a `<span style=…>` — is left as
+ * literal source, which is what a markdown editor showing its own source
+ * ought to do with markup it cannot draw.
+ */
+const INLINE_TAGS: Record<string, Exclude<SpanKind, "text">> = {
+  u: "underline",
+  ins: "underline",
+  b: "strong",
+  strong: "strong",
+  i: "em",
+  em: "em",
+  cite: "em",
+  mark: "highlight",
+  sub: "sub",
+  sup: "sup",
+  code: "code",
+  kbd: "code",
+  samp: "code",
+  del: "strike",
+  s: "strike",
+  strike: "strike",
+};
+
+/**
+ * A pair of inline HTML tags around some content.
+ *
+ * Only a bare tag with no attributes opens a pair: `<u>` is markup this
+ * editor can draw, while `<u class=…>` carries more meaning than an underline
+ * and is better left visible. The closing tag must be the matching one, and
+ * nested pairs of the same name are counted so `<b>a<b>b</b>c</b>` closes
+ * where it should.
+ */
+function matchInlineTag(
+  body: string,
+  from: number,
+  limit: number,
+): { kind: Exclude<SpanKind, "text">; contentAt: number; close: number; end: number } | null {
+  const open = /^<([A-Za-z][A-Za-z0-9]*)>/.exec(body.slice(from, limit));
+  if (!open) return null;
+  const name = open[1].toLowerCase();
+  const kind = INLINE_TAGS[name];
+  if (!kind) return null;
+  const contentAt = from + open[0].length;
+  const closing = `</${name}>`;
+  let depth = 1;
+  let at = contentAt;
+  while (at < limit) {
+    if (body[at] !== "<") {
+      at++;
+      continue;
+    }
+    const rest = body.slice(at, limit);
+    if (rest.toLowerCase().startsWith(closing)) {
+      if (--depth === 0) {
+        return at > contentAt
+          ? { kind, contentAt, close: at, end: at + closing.length }
+          : null;
+      }
+      at += closing.length;
+      continue;
+    }
+    if (new RegExp(`^<${name}>`, "i").test(rest)) depth++;
+    at++;
+  }
+  return null;
+}
+
+/** How long the run of `c` starting at `i` is. */
+function markerRun(body: string, i: number, c: string, limit: number): number {
+  let n = 1;
+  while (i + n < limit && body[i + n] === c) n++;
+  return n;
+}
+
+/**
+ * The closing half of a subscript or superscript, if there is one.
+ *
+ * The content may hold no whitespace, which is what keeps the rule narrow
+ * enough to be safe; a space that is genuinely wanted is written `\ `, and the
+ * backslash is dropped from the rendered text. Lazy, so `~a~b~` is one
+ * subscript followed by a stray tilde rather than the other way round.
+ */
+function shortPair(
+  body: string,
+  open: number,
+  c: string,
+  limit: number,
+): { close: number; escapes: number[] } | null {
+  const escapes: number[] = [];
+  let i = open + 1;
+  while (i < limit) {
+    const ch = body[i];
+    if (ch === "\\" && body[i + 1] === " ") {
+      escapes.push(i);
+      i += 2;
+      continue;
+    }
+    if (ch === c) return i > open + 1 ? { close: i, escapes } : null;
+    if (isSpace(ch) || ch === "\n") return null;
+    i++;
+  }
+  return null;
 }
 
 /**

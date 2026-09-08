@@ -53,6 +53,8 @@ export interface Theme {
   accentColor: string;
   codeBackground: string;
   ruleColor: string;
+  /** Behind ==highlighted== text. */
+  highlightColor: string;
 }
 
 export const DEFAULT_THEME: Theme = {
@@ -67,6 +69,7 @@ export const DEFAULT_THEME: Theme = {
   accentColor: "#2f6f4f",
   codeBackground: "#f5f4f1",
   ruleColor: "#dcdad4",
+  highlightColor: "#fbeaa8",
 };
 
 export interface TypesetOptions {
@@ -498,7 +501,23 @@ function styleForSpan(
     color,
     lineHeight: heading ? 1.35 : code ? 1.55 : theme.lineHeight,
   };
-  return { style, key: cssFont(style) };
+  if (span?.highlight) style.background = theme.highlightColor;
+  if (span?.underline) style.underline = true;
+  // A superscript is set smaller and lifted, a subscript smaller and dropped.
+  // The size is taken from the surrounding text rather than from the theme so
+  // that one inside a heading stays in proportion to the heading.
+  if (span?.sup || span?.sub) {
+    style.size = Math.max(8, Math.round(size * 0.68));
+    style.raise = span.sup ? size * 0.34 : -size * 0.1;
+  }
+  // The key is what the measurement caches and run coalescing key on, so
+  // anything that changes how a run is *painted* has to be in it, even when
+  // it leaves the metrics alone.
+  return {
+    style,
+    key: cssFont(style) + (style.background ?? "") + (style.raise ? `^${style.raise}` : "") +
+      (style.underline ? "_" : ""),
+  };
 }
 
 /** How far into its column a line sits, given the column's alignment. */
@@ -903,7 +922,8 @@ export class Typesetter {
     // from the lighter face makes the heading it was sized for wrap.
     const header = styleForSpan(theme, block, {
       kind: "text", start: 0, end: 0,
-      strong: true, em: false, code: false, strike: false, href: "",
+      strong: true, em: false, code: false, strike: false, highlight: false,
+      sub: false, sup: false, underline: false, href: "",
     });
     const natural = Array.from({ length: columns }, (_, c) =>
       Math.max(
@@ -1472,9 +1492,13 @@ export class Typesetter {
           previous = cumulative;
         }
       }
+      // A raised or lowered run keeps its own ink inside the line: the box
+      // has to grow by however far the glyphs moved, or a superscript would
+      // collide with the line above.
+      const shift = st.style.raise ?? 0;
       for (let k = 0; k < n; k++) {
-        metrics[(i + k) * METRIC_STRIDE + 1] = v.ascent;
-        metrics[(i + k) * METRIC_STRIDE + 2] = v.descent;
+        metrics[(i + k) * METRIC_STRIDE + 1] = v.ascent + Math.max(0, shift);
+        metrics[(i + k) * METRIC_STRIDE + 2] = v.descent + Math.max(0, -shift);
         metrics[(i + k) * METRIC_STRIDE + 3] = NaN;
         metrics[(i + k) * METRIC_STRIDE + 4] = this.measurer.width("-", st.style, st.key);
         metrics[(i + k) * METRIC_STRIDE + 5] = tokens[t + k * 3 + 2] === CLASS_WESTERN_PUNCT

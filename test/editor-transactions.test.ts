@@ -168,6 +168,16 @@ function fixture(text='aOLDz', start=4, end=1) {
   t = typing('```\nx\n```', 5);
   t.type('('); assert.deepEqual(t.state(), ['```\nx(\n```', 6, 6], 'a code fence is literal');
 
+  // And the two halves of the behaviour can be switched off separately.
+  t = typing('abc', 3);
+  t.editor.setEditing({autoPairBrackets: false});
+  t.type('(');
+  assert.deepEqual(t.state(), ['abc(', 4, 4], 'with pairing off a bracket is just a bracket');
+  t = typing('abc', 0, 3);
+  t.editor.setEditing({autoPairMarkdown: false});
+  t.type('*');
+  assert.deepEqual(t.state(), ['*', 1, 1], 'and with wrapping off the selection is replaced');
+
   // Backspace undoes a pair in one keystroke, as it was made in one.
   const {editor:e,input,event} = fixture('', 0, 0);
   input.value = '('; event('input',{inputType:'insertText'});

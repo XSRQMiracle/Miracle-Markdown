@@ -22,6 +22,12 @@ export interface TextStyle {
   color: string;
   /** Line box height as a multiple of the font size. */
   lineHeight: number;
+  /** Painted behind the text, for highlighted spans. */
+  background?: string;
+  /** Baseline shift, positive upwards — superscripts and subscripts. */
+  raise?: number;
+  /** Ruled under, for <u> and for links. */
+  underline?: boolean;
 }
 
 export const FALLBACK_SERIF =

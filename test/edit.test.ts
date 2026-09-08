@@ -90,6 +90,14 @@ assert.equal(apply("a\nb", head("a\nb", 2, 0, 0)), "## a\nb", "a caret only affe
   assert.deepEqual(edit!.select, { start: 6, end: 6 }, "the caret stays between the same letters");
 }
 
+// An underlined heading is a heading, and changing its level converts it to
+// the ATX form — the two-line form has nothing left to say, and leaving the
+// dashes behind would make them a paragraph.
+assert.equal(apply("Title\n===", head("Title\n===", 2)), "## Title", "setext becomes ATX");
+assert.equal(apply("Title\n===", head("Title\n===", 1)), "Title",
+  "and asking for the level it already has takes the heading off, underline and all");
+assert.equal(apply("Sub\n---", head("Sub\n---", 0)), "Sub", "and level 0 takes the underline off");
+
 const step = (text: string, dir: 1 | -1, at = 0) => apply(text, stepHeading(text, { start: at, end: at }, dir));
 assert.equal(step("### x", 1), "## x", "promoting makes the heading bigger");
 assert.equal(step("# x", 1), "# x", "and stops at the top");
@@ -97,6 +105,7 @@ assert.equal(step("x", 1), "###### x", "a paragraph promotes to the smallest hea
 assert.equal(step("### x", -1), "#### x", "demoting makes it smaller");
 assert.equal(step("###### x", -1), "x", "and falls out to a paragraph");
 assert.equal(step("x", -1), "x", "which has nowhere further to go");
+assert.equal(step("Title\n===", -1), "## Title", "an underlined heading demotes into an ATX one");
 
 // --- fenced blocks --------------------------------------------------------
 {
@@ -217,6 +226,25 @@ assert.equal(shift("> - a\n> - b", 1, 6, 6), "> - a\n>   - b", "inside a quote t
 assert.equal(shift("> a", -1), "a", "with nothing else to give back, a quote level goes");
 assert.equal(shift("a\n\nb", 1), "  a\n\n  b", "blank lines are left alone");
 assert.equal(indentLines("a", { start: 0, end: 0 }, -1), null, "and an unindented line cannot outdent");
+
+// --- what the commands write ----------------------------------------------
+// Typora calls these Syntax Preference and applies them only to what the menu
+// creates; an existing list keeps the marker its author typed.
+{
+  const style = { bullet: "*" as const, ordered: "repeat" as const, indent: "    ", codeIndent: "  " };
+  const listed = (text: string, kind: "bullet" | "ordered") =>
+    apply(text, toggleList(text, { start: 0, end: text.length }, kind, style));
+  assert.equal(listed("a\nb", "bullet"), "* a\n* b", "a new list takes the chosen bullet");
+  assert.equal(listed("a\nb", "ordered"), "1. a\n1. b", "and repeats the number when asked");
+  assert.equal(apply("- a\n- b", toggleList("- a\n- b", { start: 0, end: 7 }, "bullet", style)),
+    "a\nb", "an existing list is still recognised whatever the setting");
+
+  const shifted = (text: string, dir: 1 | -1, at: number) =>
+    apply(text, indentLines(text, { start: at, end: at }, dir, style));
+  assert.equal(shifted("- a\n- b", 1, 6), "- a\n    - b", "one level is as wide as the setting says");
+  assert.equal(shifted("- a\n    - b", -1, 10), "- a\n- b", "and comes off in one step");
+  assert.equal(shifted("- a\n  - b", -1, 8), "- a\n- b", "a narrower indent still outdents whole");
+}
 
 // --- blockquote -----------------------------------------------------------
 const quote = (text: string, start = 0, end = text.length) => apply(text, toggleQuote(text, { start, end }));

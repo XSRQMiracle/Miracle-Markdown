@@ -20,6 +20,15 @@ interface Check {
   reload?: boolean;
 }
 
+/** A setting with more than two answers. */
+interface Choice {
+  label: string;
+  hint: string;
+  options: Array<[string, string]>;
+  get(): string;
+  set(value: string): void;
+}
+
 export function buildMathPanel(
   panel: HTMLElement,
   button: HTMLElement,
@@ -29,7 +38,131 @@ export function buildMathPanel(
 ): void {
   let busy = false;
   let errorMessage = "";
+  const writing = () => editor.editing.writing;
+  const setWriting = (patch: Partial<ReturnType<typeof writing>>) =>
+    editor.setEditing({ writing: { ...writing(), ...patch } });
+
+  // What the commands write. Typora calls this Syntax Preference and notes
+  // that it applies only to what the menu creates — an existing list keeps
+  // the bullet its author typed, and so it does here.
+  const choices: Array<{ title: string; rows: Choice[] }> = [
+    {
+      title: "空格与换行",
+      rows: [
+        {
+          label: "段内单个换行",
+          hint:
+            "源码里段落中间的一个换行算什么。CommonMark 说算一个空格；Typora 默认原样换行；" +
+            "「中文感知」是本编辑器的默认：算空格，但换行紧邻宽字符时直接丢掉 —— " +
+            "中文段落于是无论文件怎么折行，读起来都一样。",
+          options: [
+            ["smart", "中文感知（推荐）"],
+            ["space", "算一个空格（CommonMark）"],
+            ["break", "原样换行（Typora）"],
+          ],
+          get: () => editor.options.inline.softBreak,
+          set: (v) =>
+            editor.setOptions({
+              inline: { ...editor.options.inline, softBreak: v as "space" | "break" | "smart" },
+            }),
+        },
+      ],
+    },
+    {
+      title: "Markdown 语法偏好",
+      rows: [
+        {
+          label: "无序列表",
+          hint: "新建列表用的符号。已有的列表保持作者写下的那个。",
+          options: [["-", "- 短横"], ["+", "+ 加号"], ["*", "* 星号"]],
+          get: () => writing().bullet,
+          set: (v) => setWriting({ bullet: v as "-" | "+" | "*" }),
+        },
+        {
+          label: "有序列表",
+          hint: "新建列表是逐项计数，还是每项都写同一个数字（源码里更好增删）。",
+          options: [["increment", "1. 2. 3."], ["repeat", "1. 1. 1."]],
+          get: () => writing().ordered,
+          set: (v) => setWriting({ ordered: v as "increment" | "repeat" }),
+        },
+        {
+          label: "缩进宽度",
+          hint: "一级嵌套的宽度，也是正文里 Tab 写入的宽度。",
+          options: [["2", "2 空格"], ["3", "3 空格"], ["4", "4 空格"], ["\t", "制表符"]],
+          get: () => writing().indent,
+          set: (v) => setWriting({ indent: v === "\t" ? "\t" : " ".repeat(Number(v)) }),
+        },
+        {
+          label: "代码缩进宽度",
+          hint: "代码块里 Tab 写入的宽度。代码自有其惯例，通常比正文宽。",
+          options: [["2", "2 空格"], ["4", "4 空格"], ["\t", "制表符"]],
+          get: () => writing().codeIndent,
+          set: (v) => setWriting({ codeIndent: v === "\t" ? "\t" : " ".repeat(Number(v)) }),
+        },
+      ],
+    },
+  ];
+
   const groups: Array<{ title: string; checks: Check[] }> = [
+    {
+      title: "成对符号",
+      checks: [
+        {
+          label: "自动补全括号与引号",
+          hint: "键入 ( [ { ` 时补上另一半，键入右半时跨过已有的那个。",
+          get: () => editor.editing.autoPairBrackets,
+          set: (on) => editor.setEditing({ autoPairBrackets: on }),
+        },
+        {
+          label: "选中后键入符号即包裹",
+          hint:
+            "选中一段文字再键入 * ` _ ~ $ 或引号，就用它把选中的文字包起来 —— " +
+            "这是意图唯一明确的情形，所以接受的符号也最宽。",
+          get: () => editor.editing.autoPairMarkdown,
+          set: (on) => editor.setEditing({ autoPairMarkdown: on }),
+        },
+      ],
+    },
+    {
+      title: "Markdown 扩展语法",
+      checks: [
+        {
+          label: "自动链接 https://…",
+          hint:
+            "正文里裸写的网址自动成为链接（GFM 的 autolink 扩展）。" +
+            "结尾的标点归还给句子，只有网址自己开的括号才算它的。",
+          get: () => editor.options.inline.autoLink,
+          set: (on) =>
+            editor.setOptions({ inline: { ...editor.options.inline, autoLink: on } }),
+        },
+        {
+          label: "下标 H~2~O",
+          hint:
+            "波浪号在正文里是普通字符，因此与 Typora 一样默认关闭。规则刻意收得很窄：" +
+            "中间不能有空格（要空格就写 \\ ），里面也不再解析别的标记 —— " +
+            "这正是它不与 ~~删除线~~ 打架的原因。",
+          get: () => editor.options.inline.subscript,
+          set: (on) =>
+            editor.setOptions({ inline: { ...editor.options.inline, subscript: on } }),
+        },
+        {
+          label: "上标 X^2^",
+          hint: "与下标同一条规则，只是分隔符换成脱字符。",
+          get: () => editor.options.inline.superscript,
+          set: (on) =>
+            editor.setOptions({ inline: { ...editor.options.inline, superscript: on } }),
+        },
+        {
+          label: "高亮 ==key==",
+          hint:
+            "CommonMark 里没有这条语法，Typora 也默认关闭：一篇用 == 表示别的东西的文档" +
+            "（分隔线、等式）应当仍旧照原样显示。开启后 ==文字== 会被标黄。",
+          get: () => editor.options.inline.highlight,
+          set: (on) =>
+            editor.setOptions({ inline: { ...editor.options.inline, highlight: on } }),
+        },
+      ],
+    },
     {
       title: "识别为公式",
       checks: [
@@ -165,6 +298,34 @@ export function buildMathPanel(
         text.append(name, document.createElement("br"), hint);
         label.append(box, text);
         panel.appendChild(label);
+      }
+    }
+
+    for (const group of choices) {
+      const title = document.createElement("h4");
+      title.textContent = group.title;
+      panel.appendChild(title);
+      for (const choice of group.rows) {
+        const row = document.createElement("div");
+        row.className = "row";
+        const name = document.createElement("span");
+        name.textContent = choice.label;
+        name.title = choice.hint;
+        const select = document.createElement("select");
+        for (const [value, label] of choice.options) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          option.selected = value === choice.get() ||
+            (value !== "\t" && /^\d+$/.test(value) && choice.get() === " ".repeat(Number(value)));
+          select.appendChild(option);
+        }
+        select.addEventListener("change", () => {
+          choice.set(select.value);
+          render();
+        });
+        row.append(name, select);
+        panel.appendChild(row);
       }
     }
 

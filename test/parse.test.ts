@@ -1,4 +1,10 @@
-import { parseBlocks, renderBlock, parseInline, LINE_SEPARATOR } from "../src/markdown/parse.js";
+import {
+  DEFAULT_INLINE_OPTIONS,
+  parseBlocks,
+  renderBlock,
+  parseInline,
+  LINE_SEPARATOR,
+} from "../src/markdown/parse.js";
 
 let failures = 0;
 function eq(actual: unknown, expected: unknown, label: string) {
@@ -10,6 +16,132 @@ function eq(actual: unknown, expected: unknown, label: string) {
   } else {
     console.log(`ok   ${label}`);
   }
+}
+
+// --- highlight, an opt-in extension ---------------------------------------
+// `==` is not CommonMark, so it is off unless asked for — as it is in Typora.
+{
+  const on = { ...DEFAULT_INLINE_OPTIONS, highlight: true };
+  const lit = parseInline("==key==", 0, undefined, DEFAULT_INLINE_OPTIONS);
+  eq(lit.text, "==key==", "with the option off the equals signs are text");
+  eq(lit.spans.map((s) => s.highlight), [false], "and nothing is highlighted");
+
+  const marked = parseInline("==key==", 0, undefined, on);
+  eq(marked.text, "key", "with it on the markers are removed");
+  eq(marked.spans.map((s) => [s.kind, s.highlight]), [["highlight", true]]);
+  eq(parseInline("a ==b== c", 0, undefined, on).text, "a b c", "inside a sentence");
+  eq(parseInline("=one=", 0, undefined, on).text, "=one=",
+     "a single equals is ordinary punctuation, not a delimiter");
+  eq(parseInline("a = b", 0, undefined, on).text, "a = b", "and so is one on its own");
+  eq(parseInline("== spaced ==", 0, undefined, on).text, "== spaced ==",
+     "a marker with space after it cannot open");
+  // It nests with the other emphasis, in both directions.
+  eq(parseInline("==**a**==", 0, undefined, on).spans.map((s) => [s.highlight, s.strong]),
+     [[true, true]], "strong inside a highlight");
+  eq(parseInline("**==a==**", 0, undefined, on).spans.map((s) => [s.highlight, s.strong]),
+     [[true, true]], "and a highlight inside strong");
+  eq(parseInline("`==a==`", 0, undefined, on).spans.map((s) => [s.code, s.highlight]),
+     [[true, false]], "code is opaque to it");
+}
+
+// --- subscript and superscript, also opt-in -------------------------------
+{
+  const on = { ...DEFAULT_INLINE_OPTIONS, subscript: true, superscript: true };
+  eq(parseInline("H~2~O", 0, undefined, DEFAULT_INLINE_OPTIONS).text, "H~2~O",
+     "with the options off the tildes are text");
+  eq(parseInline("H~2~O", 0, undefined, on).text, "H2O", "and with them on the markers go");
+  eq(parseInline("H~2~O", 0, undefined, on).spans.map((s) => [s.sub, s.sup]),
+     [[false, false], [true, false], [false, false]], "only the digit is a subscript");
+  eq(parseInline("X^2^", 0, undefined, on).text, "X2", "a superscript reads the same way");
+  eq(parseInline("X^2^", 0, undefined, on).spans.map((s) => s.sup), [false, true]);
+
+  // The rule is narrow on purpose.
+  eq(parseInline("~long text~", 0, undefined, on).text, "~long text~",
+     "a space inside ends the attempt");
+  eq(parseInline("~long\\ text~", 0, undefined, on).text, "long text",
+     "unless it is written as an escape, which is then dropped");
+  eq(parseInline("~~gone~~", 0, undefined, on).text, "gone",
+     "a doubled tilde is still strikethrough");
+  eq(parseInline("~~a~b~~", 0, undefined, on).text, "a~b",
+     "and strikethrough wins over a subscript inside it");
+  eq(parseInline("~a~b~", 0, undefined, on).text, "ab~", "matching is lazy, so the first pair wins");
+  eq(parseInline("~~", 0, undefined, on).text, "~~", "an empty pair is not one");
+  eq(parseInline("a ~ b", 0, undefined, on).text, "a ~ b", "a lone tilde is ordinary punctuation");
+  eq(parseInline("2^10 and 3^2", 0, undefined, on).text, "2^10 and 3^2",
+     "carets that never close are left alone");
+  // Content is not re-read as markup, so a subscript cannot contain emphasis.
+  eq(parseInline("~*a*~", 0, undefined, on).text, "*a*", "markup inside is literal");
+  eq(parseInline("~*a*~", 0, undefined, on).spans.map((s) => [s.sub, s.em]), [[true, false]]);
+  // But it nests the other way round.
+  eq(parseInline("*H~2~O*", 0, undefined, on).spans.map((s) => [s.em, s.sub]),
+     [[true, false], [true, true], [true, false]], "emphasis around a subscript");
+}
+
+// --- bare URLs ------------------------------------------------------------
+{
+  const auto = (src: string) => parseInline(src, 0, undefined, DEFAULT_INLINE_OPTIONS);
+  const hrefs = (src: string) => auto(src).spans.filter((s) => s.href).map((s) => s.href);
+  eq(hrefs("see https://example.com now"), ["https://example.com"], "a bare URL is a link");
+  eq(hrefs("see www.example.com now"), ["https://www.example.com"], "and so is a bare www");
+  eq(auto("see https://example.com now").text, "see https://example.com now",
+     "with its text left exactly as written");
+  // Trailing punctuation belongs to the sentence.
+  eq(hrefs("at https://example.com."), ["https://example.com"], "a full stop is not part of it");
+  eq(hrefs("(https://example.com)"), ["https://example.com"], "nor a closing bracket it did not open");
+  eq(hrefs("https://en.wikipedia.org/wiki/L_(x)"), ["https://en.wikipedia.org/wiki/L_(x)"],
+     "but one it did open is kept");
+  // What it leaves alone.
+  eq(hrefs("see-www.example.com"), [], "not in the middle of a word");
+  eq(hrefs("`https://example.com`"), [], "not inside code");
+  eq(hrefs("[text](https://example.com)"), ["https://example.com"],
+     "a written link is still one link, not two");
+  eq(auto("[text](https://example.com)").text, "text");
+  eq(hrefs("<https://example.com>"), ["https://example.com"], "an angle autolink still works");
+  eq(hrefs("https://"), [], "a scheme on its own is not a link");
+  // A Chinese sentence has no spaces in it, so "up to the next space" would
+  // swallow the rest of the line.
+  eq(hrefs("主页在 https://typora.io，镜像在别处"), ["https://typora.io"],
+     "a full-width comma ends the address");
+  eq(hrefs("（https://example.com）也行"), ["https://example.com"], "and so do full-width brackets");
+  eq(hrefs("见 https://example.com/a_b。"), ["https://example.com/a_b"], "and a full stop");
+  const off = { ...DEFAULT_INLINE_OPTIONS, autoLink: false };
+  eq(parseInline("see https://example.com", 0, undefined, off).spans.filter((s) => s.href).length, 0,
+     "and the whole thing can be turned off");
+}
+
+// --- inline HTML ----------------------------------------------------------
+// Markdown has always written the things it has no syntax for as HTML, so a
+// handful of tags are drawn rather than shown. There is no option: Typora has
+// none either.
+{
+  const html = (src: string) => parseInline(src, 0, undefined, DEFAULT_INLINE_OPTIONS);
+  eq(html("<u>under</u>").text, "under", "the tags go and the words stay");
+  eq(html("<u>under</u>").spans.map((s) => s.underline), [true]);
+  eq(html("a <b>bold</b> c").spans.map((s) => [s.strong, s.underline]),
+     [[false, false], [true, false], [false, false]], "b is strong");
+  eq(html("<mark>hi</mark>").spans.map((s) => s.highlight), [true], "mark is a highlight");
+  eq(html("H<sub>2</sub>O").spans.map((s) => s.sub), [false, true, false],
+     "and sub needs no preference when written as HTML");
+  eq(html("<kbd>⌘</kbd>").spans.map((s) => s.code), [true], "kbd is set as code");
+  eq(html("<em>a</em> <i>b</i>").text, "a b", "either spelling of the same thing");
+
+  // Nesting of the same tag closes where it should.
+  eq(html("<b>a<b>b</b>c</b>").text, "abc", "a nested pair closes at the right end");
+  eq(html("<b>a</b>b").text, "ab");
+
+  // What it refuses.
+  eq(html("<div>block</div>").text, "<div>block</div>", "a tag it cannot draw stays visible");
+  eq(html("<u class=x>a</u>").text, "<u class=x>a</u>", "and so does one carrying more than markup");
+  eq(html("<u></u>").text, "<u></u>", "an empty pair is not a pair");
+  eq(html("<u>never closed").text, "<u>never closed", "nor is an unclosed one");
+  eq(html("a < b").text, "a < b", "a lone angle bracket is arithmetic");
+  eq(html("<https://example.com>").spans.map((s) => s.kind), ["link"],
+     "an autolink is still an autolink");
+
+  // <br> is a hard break like any other.
+  eq(html("a<br>b").text, "a\u2028b", "br breaks the line");
+  eq(html("a<br/>b").text, "a\u2028b", "however it is spelled");
+  eq(html("a<BR />b").text, "a\u2028b");
 }
 
 // --- inline delimiters -----------------------------------------------------
@@ -356,8 +488,13 @@ eq(autoHref("<user@example.com>"), "mailto:user@example.com", "and gains a mailt
 eq(autoHref("<div>"), undefined, "a bare tag has no scheme and is not a link");
 eq(parseInline("<div>", 0).text, "<div>", "and survives verbatim");
 eq(autoHref("<not a url>"), undefined, "spaces disqualify a candidate");
-eq(autoHref("<https://a b>"), undefined, "including inside the URL");
-eq(autoHref("< https://x>"), undefined, "a leading space disqualifies it");
+// These two are about the angle form alone, so the bare-URL rule — which
+// would legitimately find a URL inside them, as GFM does — is turned off.
+const angleOnly = (body: string) =>
+  parseInline(body, 0, undefined, { ...DEFAULT_INLINE_OPTIONS, autoLink: false })
+    .spans.find((s) => s.kind === "link")?.href;
+eq(angleOnly("<https://a b>"), undefined, "including inside the URL");
+eq(angleOnly("< https://x>"), undefined, "a leading space disqualifies it");
 eq(autoHref("<a:b>"), undefined, "a one-letter scheme is too short");
 
 // Interaction with the constructs scanned around it.
@@ -425,6 +562,26 @@ eq(tasks("- [ ] a\n- [x] b\n- c"), ["todo", "done", "none"], "mixed items in one
 // a document, and even there only when something closes them.
 const kinds = (doc: string) => parseBlocks(doc).map((b) => b.type);
 
+// --- setext headings ------------------------------------------------------
+// Markdown's older heading form, which CommonMark keeps and Typora reads.
+{
+  const one = parseBlocks("Title\n===")[0];
+  eq([one.type, one.level], ["heading", 1], "equals signs underline a first-level heading");
+  eq(renderBlock(one, false).text, "Title", "and the underline is not part of the text");
+  const two = parseBlocks("Sub\n---")[0];
+  eq([two.type, two.level], ["heading", 2], "dashes underline a second-level one");
+  eq(renderBlock(two, false).text, "Sub");
+  eq(kinds("a\nb\n==="), ["heading"], "the whole paragraph is underlined, not just the last line");
+  eq(renderBlock(parseBlocks("a\nb\n===")[0], false).text, "a b");
+  eq(kinds("---"), ["rule"], "with no paragraph above them the dashes are a rule");
+  eq(kinds("\n---"), ["blank", "rule"], "and so is one after a blank line");
+  eq(kinds("# atx\n==="), ["heading", "paragraph"],
+     "an ATX heading is already a heading, so the equals signs are text");
+  eq(kinds("- item\n---"), ["list", "rule"], "a list is not underlined either");
+  eq(kinds("Title\n=== extra"), ["paragraph"], "an underline carries nothing but its own character");
+}
+
+
 eq(kinds("---\ntitle: x\n---\n\nbody"),
    ["frontmatter", "blank", "paragraph"], "front matter opens a document");
 eq(kinds("---\ntitle: x\n...\n\nbody"),
@@ -432,8 +589,9 @@ eq(kinds("---\ntitle: x\n...\n\nbody"),
 eq(kinds("---\nno terminator\n\nbody"),
    ["rule", "paragraph", "blank", "paragraph"], "without a closer it stays a rule");
 eq(kinds("intro\n\n---\ntitle: x\n---"),
-   ["paragraph", "blank", "rule", "paragraph", "rule"],
-   "dashes below the first line are still a break");
+   ["paragraph", "blank", "rule", "heading"],
+   "dashes below the first line open no front matter: the first is a break, " +
+   "and the second underlines the line above it");
 eq(kinds("---"), ["rule"], "a lone divider is a rule");
 
 {
@@ -517,8 +675,8 @@ eq(tableOf("| a | b |\n| c | d |"), undefined, "without a delimiter row it is a 
 eq(tableOf("| a | b |\n|---|"), undefined, "the two rows must agree on the column count");
 eq(tableOf("no pipes here\n---"), undefined,
    "a delimiter row needs pipes above it to make a table");
-eq(parseBlocks("no pipes here\n---").map((b) => b.type), ["paragraph", "rule"],
-   "the dashes stay a thematic break");
+eq(parseBlocks("no pipes here\n---").map((b) => b.type), ["heading"],
+   "the dashes underline the line above instead, as CommonMark says");
 
 // A table interrupts a paragraph, and the paragraph keeps its own lines.
 {

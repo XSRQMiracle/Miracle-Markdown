@@ -188,21 +188,30 @@ export class Renderer {
           }
 
           this.setFont(cssFont(run.style));
+          // A highlight is a band behind the words rather than a colour on
+          // them, so it has to be painted before they are.
+          if (run.style.background) {
+            const w = ctx.measureText(run.text).width * run.scaleX;
+            const size = run.style.size;
+            this.setFill(run.style.background);
+            ctx.fillRect(x, y - (run.style.raise ?? 0) - size * 0.84, w, size * 1.08);
+          }
           this.setFill(run.style.color);
+          const baseline = y - (run.style.raise ?? 0);
           if (run.scaleX !== 1) {
             ctx.save();
-            ctx.translate(x, y);
+            ctx.translate(x, baseline);
             ctx.scale(run.scaleX, 1);
             ctx.fillText(run.text, 0, 0);
             ctx.restore();
           } else {
-            ctx.fillText(run.text, x, y);
+            ctx.fillText(run.text, x, baseline);
           }
-          if (run.style.color === theme.accentColor) {
-            // Underline links along their own baseline rather than with a
-            // CSS-style box, so the rule sits where the type wants it.
+          if (run.style.underline || run.style.color === theme.accentColor) {
+            // Underline links and <u> along their own baseline rather than
+            // with a CSS-style box, so the rule sits where the type wants it.
             const w = ctx.measureText(run.text).width * run.scaleX;
-            ctx.fillRect(x, y + run.style.size * 0.13, w, Math.max(1, run.style.size / 20));
+            ctx.fillRect(x, baseline + run.style.size * 0.13, w, Math.max(1, run.style.size / 20));
           }
         }
       }

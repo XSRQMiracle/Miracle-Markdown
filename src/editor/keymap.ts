@@ -110,6 +110,13 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Mod+i", command: "emphasis" },
   { chord: "Mod+Shift+`", command: "inlineCode" },
   { chord: "Alt+Shift+5", command: "strike" },
+  // Typora leaves highlight unbound, having only a menu to reach it from.
+  { chord: "Mod+u", command: "underline" },
+  { chord: "Alt+Shift+h", command: "highlight" },
+  // Google Docs puts superscript on ⌘. and subscript on ⌘,; those are taken
+  // here (⌘, is Preferences), so the pair moves to ⌥⇧.
+  { chord: "Alt+Shift+.", command: "superscript" },
+  { chord: "Alt+Shift+,", command: "subscript" },
   { chord: "Mod+\\", command: "clearFormat" },
   // Typora binds a literal Ctrl+K on both platforms; ⌘K is the Mac
   // convention, and nothing else here wants it.
