@@ -5,7 +5,7 @@
 // selection with a space on the end, markup already there, a formula caught in
 // the middle — cheap to pin down.
 import assert from "node:assert/strict";
-import { clearFormat, toggleInline, toggleLink } from "../src/markdown/edit.js";
+import { clearFormat, setHeading, stepHeading, toggleInline, toggleLink } from "../src/markdown/edit.js";
 
 let failures = 0;
 function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
@@ -61,6 +61,42 @@ shows("```a```", [3, 4], wrap("```a```", 3, 4, "`"), "but a run of backticks is 
   assert.equal(text.slice(0, back.from) + back.insert + text.slice(back.to), "word",
     "wrapping and unwrapping is a round trip");
 }
+
+// --- headings -------------------------------------------------------------
+const head = (text: string, level: number, start = 0, end = start) =>
+  setHeading(text, { start, end }, level);
+const apply = (text: string, edit: ReturnType<typeof setHeading>) =>
+  edit ? text.slice(0, edit.from) + edit.insert + text.slice(edit.to) : text;
+
+assert.equal(apply("title", head("title", 2)), "## title", "a paragraph becomes a heading");
+assert.equal(apply("## title", head("## title", 3)), "### title", "and a heading changes level");
+assert.equal(apply("## title", head("## title", 2)), "title", "asking for the level it has takes it off");
+assert.equal(apply("- item", head("- item", 1)), "# item", "a list marker goes with the change");
+assert.equal(apply("- [ ] task", head("- [ ] task", 1)), "# task", "checkbox and all");
+assert.equal(apply("> quoted", head("> quoted", 1)), "> # quoted", "but a quote keeps its marker");
+assert.equal(apply("  nested", head("  nested", 1)), "  # nested", "and so does indentation");
+assert.equal(apply("#hash", head("#hash", 1)), "# #hash", "a hash with no space was never a heading");
+assert.equal(head("title", 0), null, "a paragraph asked to be a paragraph is already one");
+assert.equal(apply("## title", head("## title", 0)), "title", "level 0 takes the heading off");
+
+// A selection covering several lines makes each of them a heading.
+assert.equal(apply("a\nb", head("a\nb", 2, 0, 3)), "## a\n## b");
+assert.equal(apply("a\nb", head("a\nb", 2, 0, 0)), "## a\nb", "a caret only affects its own line");
+
+// The caret keeps its distance from the end of the line, so the words do not
+// slide out from under it.
+{
+  const edit = head("title", 2, 3);
+  assert.deepEqual(edit!.select, { start: 6, end: 6 }, "the caret stays between the same letters");
+}
+
+const step = (text: string, dir: 1 | -1, at = 0) => apply(text, stepHeading(text, { start: at, end: at }, dir));
+assert.equal(step("### x", 1), "## x", "promoting makes the heading bigger");
+assert.equal(step("# x", 1), "# x", "and stops at the top");
+assert.equal(step("x", 1), "###### x", "a paragraph promotes to the smallest heading");
+assert.equal(step("### x", -1), "#### x", "demoting makes it smaller");
+assert.equal(step("###### x", -1), "x", "and falls out to a paragraph");
+assert.equal(step("x", -1), "x", "which has nowhere further to go");
 
 // --- links ----------------------------------------------------------------
 const link = (text: string, start: number, end = start) => toggleLink(text, { start, end });

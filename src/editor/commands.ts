@@ -22,7 +22,16 @@ export type CommandId =
   | "inlineCode"
   | "strike"
   | "clearFormat"
-  | "hyperlink";
+  | "hyperlink"
+  | "heading1"
+  | "heading2"
+  | "heading3"
+  | "heading4"
+  | "heading5"
+  | "heading6"
+  | "paragraph"
+  | "increaseHeading"
+  | "decreaseHeading";
 
 export interface Command {
   /** Menu label. */
@@ -43,4 +52,18 @@ export const COMMANDS: Record<CommandId, Command> = {
   strike: { label: "删除线", run: (e) => e.toggleInline("~~") },
   clearFormat: { label: "清除样式", run: (e) => e.clearFormat() },
   hyperlink: { label: "超链接", run: (e) => e.toggleLink() },
+
+  // Headings apply to the lines the selection touches. A markdown heading is
+  // one line, so a paragraph written over several source lines becomes a
+  // heading plus the paragraph that follows it — which is what the source
+  // then says, rather than a silent reflow of the author's line breaks.
+  heading1: { label: "一级标题", run: (e) => e.setHeading(1) },
+  heading2: { label: "二级标题", run: (e) => e.setHeading(2) },
+  heading3: { label: "三级标题", run: (e) => e.setHeading(3) },
+  heading4: { label: "四级标题", run: (e) => e.setHeading(4) },
+  heading5: { label: "五级标题", run: (e) => e.setHeading(5) },
+  heading6: { label: "六级标题", run: (e) => e.setHeading(6) },
+  paragraph: { label: "段落", run: (e) => e.setHeading(0) },
+  increaseHeading: { label: "提升标题级别", run: (e) => e.stepHeading(1) },
+  decreaseHeading: { label: "降低标题级别", run: (e) => e.stepHeading(-1) },
 };

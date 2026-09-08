@@ -28,7 +28,14 @@ import { wordAt, wordBoundary } from "./words.js";
 import { compileSearch, expandReplacement, findMatches, type Match, type SearchQuery } from "./search.js";
 import { BINDINGS, commandFor } from "./keymap.js";
 import { COMMANDS, type CommandId } from "./commands.js";
-import { clearFormat, toggleInline, toggleLink, type Edit } from "../markdown/edit.js";
+import {
+  clearFormat,
+  setHeading,
+  stepHeading,
+  toggleInline,
+  toggleLink,
+  type Edit,
+} from "../markdown/edit.js";
 import {
   DEFAULT_OPTIONS,
   DEFAULT_THEME,
@@ -262,6 +269,34 @@ export class Editor {
       }
     }
     this.applyEdit(toggleInline(this.text, { start: lo, end: hi }, open, close));
+  }
+
+  /** Make the lines the selection touches headings, or paragraphs at 0. */
+  setHeading(level: number): void {
+    if (this.blockedBlock()) return;
+    this.applyEdit(setHeading(this.text, this.range(), level));
+  }
+
+  /** Promote or demote the heading under the caret. */
+  stepHeading(direction: 1 | -1): void {
+    if (this.blockedBlock()) return;
+    this.applyEdit(stepHeading(this.text, this.range(), direction));
+  }
+
+  /** The selection, low end first. */
+  private range(): { start: number; end: number } {
+    return {
+      start: Math.min(this.selStart, this.selEnd),
+      end: Math.max(this.selStart, this.selEnd),
+    };
+  }
+
+  /** Whether the caret sits in a block whose text is taken literally, where a
+   *  markdown command would write characters rather than markup. */
+  private blockedBlock(): boolean {
+    if (this.dirty) this.relayout();
+    const type = this.blockTypeAt(Math.min(this.selStart, this.selEnd));
+    return type !== null && VERBATIM.includes(type);
   }
 
   /** Make the selection a link, or take the link off it. */

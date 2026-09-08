@@ -106,6 +106,115 @@ function wraps(text: string, start: number, end: number, open: string, close: st
   return emphasis && open.length <= 2 && before === 3 && after === 3;
 }
 
+// -- lines ----------------------------------------------------------------
+
+/** Indentation and any blockquote markers: the part of a line that says where
+ *  it sits rather than what it is. */
+const LEAD = /^(\s*(?:>\s?)*)/;
+/** An ATX heading marker. */
+const ATX = /^(#{1,6})[ \t]+/;
+/** A list marker, bullet or number, with any task box after it. */
+const MARKER = /^(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?/;
+
+export interface Line {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/** Every source line the selection touches, including a collapsed caret's. */
+export function linesIn(text: string, sel: Range): Line[] {
+  const from = text.lastIndexOf("\n", Math.max(0, sel.start - 1)) + 1;
+  let to = text.indexOf("\n", Math.max(sel.start, sel.end));
+  if (to < 0) to = text.length;
+  const lines: Line[] = [];
+  let at = from;
+  while (at <= to) {
+    let stop = text.indexOf("\n", at);
+    if (stop < 0 || stop > to) stop = to;
+    lines.push({ start: at, end: stop, text: text.slice(at, stop) });
+    at = stop + 1;
+  }
+  return lines;
+}
+
+/**
+ * Rewrite every line the selection touches.
+ *
+ * A collapsed caret keeps its distance from the end of its line, which is
+ * what makes a prefix change — adding a `#`, indenting — leave the caret
+ * sitting in the same place in the words rather than sliding through them.
+ */
+export function mapLines(
+  text: string,
+  sel: Range,
+  rewrite: (line: string, index: number) => string,
+): Edit | null {
+  const lines = linesIn(text, sel);
+  const rewritten = lines.map((l, i) => rewrite(l.text, i));
+  if (rewritten.every((out, i) => out === lines[i].text)) return null;
+
+  const from = lines[0].start;
+  const to = lines[lines.length - 1].end;
+  const insert = rewritten.join("\n");
+
+  let select: Range;
+  if (sel.start === sel.end) {
+    const i = lines.findIndex((l) => sel.start >= l.start && sel.start <= l.end);
+    const line = lines[Math.max(0, i)];
+    const out = rewritten[Math.max(0, i)];
+    const before = rewritten.slice(0, Math.max(0, i)).reduce((n, t) => n + t.length + 1, 0);
+    const fromEnd = Math.max(0, line.end - sel.start);
+    const at = from + before + Math.max(0, out.length - fromEnd);
+    select = { start: at, end: at };
+  } else {
+    select = { start: from, end: from + insert.length };
+  }
+  return { from, to, insert, select };
+}
+
+/** The heading level of a line, 0 for anything that is not a heading. */
+export function headingLevel(line: string): number {
+  const lead = LEAD.exec(line)![1];
+  return ATX.exec(line.slice(lead.length))?.[1].length ?? 0;
+}
+
+/**
+ * Make the lines headings of `level`, or paragraphs again at level 0.
+ *
+ * Asking for the level a line already has takes the heading off instead —
+ * Typora's toggle — so the same key both applies and removes it.
+ */
+export function setHeading(text: string, sel: Range, level: number, toggle = true): Edit | null {
+  const first = linesIn(text, sel)[0];
+  const target = toggle && level > 0 && headingLevel(first.text) === level ? 0 : level;
+  return mapLines(text, sel, (line) => {
+    const lead = LEAD.exec(line)![1];
+    let body = line.slice(lead.length);
+    const atx = ATX.exec(body);
+    // A heading is not a list item, so its marker goes with the change.
+    body = atx ? body.slice(atx[0].length) : body.replace(MARKER, "");
+    if (!body && !target) return lead + body;
+    return lead + (target ? "#".repeat(target) + " " : "") + body;
+  });
+}
+
+/**
+ * Promote or demote the heading under the caret.
+ *
+ * Typora's arithmetic: a paragraph counts as one past H6, so promoting one
+ * makes it an H6 and demoting an H6 makes it a paragraph again. Promoting an
+ * H1 or demoting a paragraph has nowhere to go.
+ */
+export function stepHeading(text: string, sel: Range, direction: 1 | -1): Edit | null {
+  const level = headingLevel(linesIn(text, sel)[0].text);
+  const next = direction > 0
+    ? (level === 0 ? 6 : level === 1 ? 1 : level - 1)
+    : (level === 0 ? 0 : level === 6 ? 0 : level + 1);
+  if (next === level) return null;
+  return setHeading(text, sel, next, false);
+}
+
 /** Something that can only have been meant as a URL. */
 const URL_LIKE = /^(?:[a-z][a-z0-9+.-]*:\/\/|mailto:|www\.)\S+$/i;
 

@@ -115,4 +115,23 @@ export const BINDINGS: readonly Binding[] = [
   // convention, and nothing else here wants it.
   { chord: "Ctrl+k", command: "hyperlink" },
   { chord: "Mod+k", command: "hyperlink" },
+
+  // Paragraph. Typora binds a literal Ctrl+1…6 on both platforms; ⌘1…6 is
+  // what a Mac reader will reach for, so both are here.
+  { chord: "Ctrl+1", command: "heading1" },
+  { chord: "Ctrl+2", command: "heading2" },
+  { chord: "Ctrl+3", command: "heading3" },
+  { chord: "Ctrl+4", command: "heading4" },
+  { chord: "Ctrl+5", command: "heading5" },
+  { chord: "Ctrl+6", command: "heading6" },
+  { chord: "Ctrl+0", command: "paragraph" },
+  { chord: "Cmd+1", command: "heading1" },
+  { chord: "Cmd+2", command: "heading2" },
+  { chord: "Cmd+3", command: "heading3" },
+  { chord: "Cmd+4", command: "heading4" },
+  { chord: "Cmd+5", command: "heading5" },
+  { chord: "Cmd+6", command: "heading6" },
+  { chord: "Cmd+0", command: "paragraph" },
+  { chord: "Ctrl+=", command: "increaseHeading" },
+  { chord: "Ctrl+-", command: "decreaseHeading" },
 ];
