@@ -23,6 +23,7 @@ fn class_code(c: CharClass) -> u32 {
         CharClass::Letter => 4,
         CharClass::Space => 5,
         CharClass::Other => 6,
+        CharClass::Object => 7,
     }
 }
 
@@ -55,6 +56,8 @@ impl Engine {
         tolerance: f32,
         max_expand: f32,
         punct_style: u8,
+        baseline_skip: f32,
+        line_skip: f32,
     ) {
         self.config.font_size = font_size;
         self.config.justify = justify;
@@ -64,6 +67,8 @@ impl Engine {
         self.config.hyphenate = hyphenate;
         self.config.tolerance = tolerance;
         self.config.max_expand = max_expand;
+        self.config.baseline_skip = baseline_skip;
+        self.config.line_skip = line_skip;
         self.config.punct_style = match punct_style {
             1 => PunctStyle::Jis,
             2 => PunctStyle::Cns,
@@ -87,10 +92,14 @@ impl Engine {
         out
     }
 
-    /// Step two: hand back the measured widths and build the horizontal list.
-    pub fn prepare(&mut self, advances: &[f32], space_width: f32) {
+    /// Step two: hand back the measurements and build the horizontal list.
+    ///
+    /// `metrics` is three floats per token — advance, height above the
+    /// baseline, depth below it. The vertical pair is what lets a line grow to
+    /// fit something taller than the surrounding text.
+    pub fn prepare(&mut self, metrics: &[f32], space_width: f32) {
         self.para =
-            Some(prepare(&self.text, &self.tokens, advances, space_width, self.config));
+            Some(prepare(&self.text, &self.tokens, metrics, space_width, self.config));
     }
 
     /// Step three: break and position. Cheap enough to call on every frame of
@@ -98,17 +107,22 @@ impl Engine {
     ///
     /// Layout of the returned buffer:
     ///   [0]                     line count
-    ///   per line: run_count, ratio, width, hyphenated, src_start, src_end
+    ///   per line: run_count, ratio, width, hyphenated, src_start, src_end,
+    ///             baseline, height, depth
     ///   per run:  x, src_start, src_end, scale_x
+    ///
+    /// Baselines come from here rather than from a fixed multiple on the host
+    /// side, because their spacing depends on how tall and deep each line
+    /// turned out to be — which only the core knows.
     ///
     /// A run whose `src_start` is `-1` is a discretionary hyphen the host
     /// should draw itself; it has no source text of its own.
     pub fn layout(&mut self, width: f32) -> Vec<f32> {
         let Some(para) = &self.para else { return vec![0.0] };
         let breaks = break_lines(para, width);
-        let lines = layout_lines(para, &breaks, width);
+        let lines = layout_lines(para, &breaks);
 
-        let mut out = Vec::with_capacity(lines.len() * 8 + 1);
+        let mut out = Vec::with_capacity(lines.len() * 12 + 1);
         out.push(lines.len() as f32);
         for line in &lines {
             out.push(line.runs.len() as f32);
@@ -117,6 +131,9 @@ impl Engine {
             out.push(if line.hyphenated { 1.0 } else { 0.0 });
             out.push(line.source_start as f32);
             out.push(line.source_end as f32);
+            out.push(line.baseline);
+            out.push(line.height);
+            out.push(line.depth);
             for r in &line.runs {
                 out.push(r.x);
                 out.push(if r.start == u32::MAX { -1.0 } else { r.start as f32 });

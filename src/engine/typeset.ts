@@ -18,9 +18,14 @@ import {
   Measurer,
   type TextStyle,
 } from "./measure.js";
+import { renderMath, renderMathSegments } from "./mathjax.js";
+import type { MathGeometry, MathSegment } from "./math.js";
 import {
   parseBlocks,
   renderBlock,
+  DEFAULT_INLINE_OPTIONS,
+  OBJECT_REPLACEMENT,
+  type InlineOptions,
   type Block,
   type RenderedBlock,
   type Span,
@@ -68,6 +73,28 @@ export interface TypesetOptions {
   punctStyle: 0 | 1 | 2;
   /** Draw the box/glue/penalty structure instead of hiding it. */
   showBadness: boolean;
+  /** Which delimiters are recognised, and how strictly. */
+  inline: InlineOptions;
+  /**
+   * Which displayed equations get a number.
+   *
+   * "ams" follows LaTeX: the numbered environments are numbered and their
+   * starred forms are not, and a bare formula gets nothing. "all" numbers
+   * every display, which is what a reader cross-referencing a draft usually
+   * wants. An explicit \tag always wins, and \notag always suppresses.
+   */
+  numbering: "none" | "ams" | "all";
+  /**
+   * Whether an inline formula may break across lines.
+   *
+   * TeX does this by default, charging `\binoppenalty` (700) after a binary
+   * operator and `\relpenalty` (500) after a relation, and only at the outer
+   * level of the formula. Turning it off is the equivalent of setting both
+   * penalties to infinity: formulas stay whole, and a long one near the end of
+   * a line is shunted down entire, leaving the gap those penalties exist to
+   * avoid.
+   */
+  breakInsideMath: boolean;
 }
 
 export const DEFAULT_OPTIONS: TypesetOptions = {
@@ -80,7 +107,32 @@ export const DEFAULT_OPTIONS: TypesetOptions = {
   maxExpand: 0,
   punctStyle: 0,
   showBadness: false,
+  inline: { ...DEFAULT_INLINE_OPTIONS },
+  numbering: "none",
+  breakInsideMath: true,
 };
+
+/** A formula, ready to draw: outlines plus the scale that puts them in
+ *  pixels at the surrounding type size. */
+export interface MathRun {
+  geometry: MathGeometry;
+  /** Multiplier from the SVG's own units to pixels. */
+  scale: number;
+  /** LaTeX source, shown instead of the formula when it does not parse. */
+  source: string;
+  display: boolean;
+  /** The piece of a split formula this run draws, if it was split. */
+  segment?: MathSegment;
+}
+
+/** One placeholder's worth of formula: its box and how it may break. */
+interface MathPiece extends MathRun {
+  width: number;
+  height: number;
+  depth: number;
+  /** TeX's penalty for breaking after this piece; NaN when it may not. */
+  penaltyAfter: number;
+}
 
 export interface LaidRun {
   x: number;
@@ -93,11 +145,18 @@ export interface LaidRun {
   scaleX: number;
   /** Set on the hyphen the breaker inserted; it has no source of its own. */
   synthetic: boolean;
+  /** Present on a run that draws a formula rather than text. */
+  math?: MathRun;
 }
 
 export interface LaidLine {
-  /** Baseline, relative to the top of the block. */
+  /** Baseline, relative to the top of the block. Computed by the core using
+   *  TeX's interline glue, not by multiplying out a fixed line height. */
   baseline: number;
+  /** Distance from the baseline to the top of the line's tallest ink. */
+  height: number;
+  /** Distance from the baseline to the bottom of its deepest ink. */
+  depth: number;
   runs: LaidRun[];
   ratio: number;
   width: number;
@@ -119,8 +178,146 @@ export interface LaidBlock {
   raw: boolean;
 }
 
+// These are kept as sources rather than as shared RegExp objects on purpose.
+// A global regular expression carries a mutable `lastIndex`, and `test` leaves
+// it pointing past the match — so a later `matchAll` on the same object starts
+// midway through the string and quietly finds nothing. Building a fresh one at
+// each use costs nothing here and removes the whole class of bug.
+
+/** `\label{...}` inside a formula. */
+const LABEL_SOURCE = String.raw`\\label\s*\{([^}]*)\}`;
+/** `\ref{...}` and `\eqref{...}`, the two ways to cite a numbered equation. */
+const REFERENCE_SOURCE = String.raw`\\(eq)?ref\s*\{([^}]*)\}`;
+
+const HAS_LABEL = new RegExp(LABEL_SOURCE);
+
+function hasLabel(latex: string): boolean {
+  return HAS_LABEL.test(latex);
+}
+
+/** Every label declared in a formula. */
+function labelsIn(latex: string): string[] {
+  return [...latex.matchAll(new RegExp(LABEL_SOURCE, "g"))].map((m) => m[1].trim());
+}
+
+/** Whether a block might contain a citation worth re-resolving. */
+function citesAnything(block: Block): boolean {
+  return block.source.includes("\\ref") || block.source.includes("\\eqref");
+}
+
+/**
+ * Turn a formula's source into what MathJax should actually see: labels
+ * removed, citations replaced by the numbers they resolve to.
+ *
+ * Neither MathJax nor KaTeX resolves `\ref` on its own — both lay out one
+ * formula at a time and have no idea what else is in the document. Since the
+ * numbering pass has just worked that out, substituting here is both simpler
+ * and cheaper than handing MathJax a global counter to keep.
+ *
+ * An unresolved citation becomes `?`, which is LaTeX's own convention for a
+ * reference to something that is not there.
+ */
+export function resolveLatex(latex: string, labels: Map<string, string>): string {
+  let out = latex;
+  if (out.includes("\\label")) out = out.replace(new RegExp(LABEL_SOURCE, "g"), "");
+  if (out.includes("ref")) {
+    out = out.replace(
+      new RegExp(REFERENCE_SOURCE, "g"),
+      (_match, eq: string | undefined, key: string) => {
+        const number = labels.get(key.trim());
+        if (number === undefined) return eq ? "(?)" : "?";
+        return eq ? "(" + number + ")" : number;
+      },
+    );
+  }
+  return out;
+}
+
+/**
+ * Assign every display equation its number, and record what each label
+ * points at.
+ *
+ * This runs before layout because a reference may point forward: a
+ * paragraph early in the document can cite an equation that appears much
+ * later, and it cannot be typeset until that equation's number is known.
+ * Two passes are the price of forward references, and the first is cheap —
+ * it reads the source and never touches MathJax.
+ */
+export function numberEquations(
+parsed: Block[],
+mode: TypesetOptions["numbering"],
+): Numbering {
+  const tags = new Map<number, string>();
+  const labels = new Map<string, string>();
+  let equation = 0;
+  for (let i = 0; i < parsed.length; i++) {
+    const block = parsed[i];
+    if (block.type !== "math") continue;
+    const tag = equationTag(block.math, equation + 1, mode);
+    if (tag === null) continue;
+    equation++;
+    tags.set(i, tag);
+    for (const label of labelsIn(block.math)) {
+      labels.set(label, tag);
+    }
+  }
+  // Derived from the resolved values, so a block holding a reference
+  // re-typesets exactly when the number it cites moves — and not when some
+  // unrelated paragraph is edited.
+  const version = [...labels].map(([k, v]) => k + "=" + v).join(",");
+  return { tags, labels, version };
+}
+
+/**
+ * The number a display formula should carry, or null for none.
+ *
+ * An explicit \tag is honoured whatever the setting; \notag and
+ * \nonumber suppress. A \label also forces a number, in every mode
+ * including "none": labelling an equation is an explicit request for
+ * something to reference, and silently refusing would leave the citation
+ * with nothing to resolve to. That is what makes "none" a useful default —
+ * no numbers until an equation asks for one.
+ *
+ * Otherwise the setting decides, and under "ams" only the environments
+ * LaTeX itself numbers qualify — the starred forms exist precisely to opt
+ * out.
+ */
+export function equationTag(
+latex: string,
+next: number,
+mode: TypesetOptions["numbering"],
+): string | null {
+  const explicit = /\\tag\s*\*?\s*\{([^}]*)\}/.exec(latex);
+  if (explicit) return explicit[1];
+  if (/\\(notag|nonumber)\b/.test(latex)) return null;
+  if (hasLabel(latex)) return String(next);
+  if (mode === "none") return null;
+  if (mode === "all") return String(next);
+
+  const env = /\\begin\s*\{([a-zA-Z]+\*?)\}/.exec(latex);
+  if (!env) return null;
+  const NUMBERED = ["equation", "align", "alignat", "gather", "multline", "flalign", "eqnarray"];
+  return NUMBERED.includes(env[1]) ? String(next) : null;
+}
+
+/** What the numbering pass produces, before anything is laid out. */
+export interface Numbering {
+  /** Block index to the number that block's equation carries. */
+  tags: Map<number, string>;
+  /** Label to the number it resolves to. */
+  labels: Map<string, string>;
+  /** Changes exactly when some label's number changes. */
+  version: string;
+}
+
 /** Token class codes, mirroring `CharClass` in the Rust core. */
 const CLASS_LETTER = 4;
+const CLASS_OBJECT = 7;
+
+/** MathJax sizes its SVG in ex, and its fonts put the x-height at this many
+ *  of the thousand units per em. Used only as a fallback when a formula is so
+ *  degenerate that its width cannot give the scale. */
+const MATHJAX_EX_UNITS = 442;
 
 /** Characters the engine positions one at a time: CJK ideographs, kana, and
  *  the full-width punctuation whose empty half can be squeezed away. */
@@ -220,6 +417,8 @@ export class Typesetter {
   invalidate(): void {
     this.measurer.invalidate();
     this.cache.clear();
+    this.vcache.clear();
+    this.pieceCache.clear();
     this.version++;
   }
 
@@ -231,6 +430,19 @@ export class Typesetter {
     return this.measurer.prefixWidth(text, chars, style);
   }
 
+
+  private vcache = new Map<string, { ascent: number; descent: number }>();
+
+  /** Ascent and descent for a style, cached — every token asks for them. */
+  vmetrics(style: TextStyle, key: string): { ascent: number; descent: number } {
+    let hit = this.vcache.get(key);
+    if (!hit) {
+      hit = this.measurer.vmetrics(style);
+      this.vcache.set(key, hit);
+    }
+    return hit;
+  }
+
   /** Lay out a whole document, returning blocks with absolute y positions. */
   layoutDocument(
     doc: string,
@@ -238,12 +450,20 @@ export class Typesetter {
     focusedBlock: number,
   ): { blocks: LaidBlock[]; height: number } {
     const parsed = parseBlocks(doc);
+    const numbering = numberEquations(parsed, this.options.numbering);
     const out: LaidBlock[] = [];
     let y = 0;
     for (let i = 0; i < parsed.length; i++) {
       const b = parsed[i];
       if (b.type === "blank") continue;
-      const laid = this.layoutBlock(b, width, i === focusedBlock, out.at(-1)?.block ?? null);
+      const laid = this.layoutBlock(
+        b,
+        width,
+        i === focusedBlock,
+        out.at(-1)?.block ?? null,
+        numbering.tags.get(i) ?? null,
+        numbering,
+      );
       laid.y = y + laid.spaceBefore;
       y = laid.y + laid.height - laid.spaceBefore;
       out.push(laid);
@@ -256,12 +476,18 @@ export class Typesetter {
     width: number,
     raw: boolean,
     previous: Block | null,
+    tag: string | null,
+    numbering: Numbering,
   ): LaidBlock {
-    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${block.type}|${block.level}|${block.start}|${block.source}`;
+    // A block that cites an equation has to be re-laid-out when that
+    // equation's number moves, and only then; one that cites nothing is
+    // untouched by an edit elsewhere in the document.
+    const cites = citesAnything(block) ? numbering.version : "";
+    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${cites}|${block.source}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
 
-    const laid = this.buildBlock(block, width, raw, previous);
+    const laid = this.buildBlock(block, width, raw, previous, tag, numbering);
     // A cache that grows without bound would outlive its usefulness on a long
     // document; the working set is the visible screen plus a little.
     if (this.cache.size > 4000) this.cache.clear();
@@ -274,9 +500,11 @@ export class Typesetter {
     width: number,
     raw: boolean,
     previous: Block | null,
+    tag: string | null,
+    numbering: Numbering,
   ): LaidBlock {
     const theme = this.theme;
-    const rendered = renderBlock(block, raw);
+    const rendered = renderBlock(block, raw, this.options.inline);
     const spaceBefore = spaceAbove(block, theme, previous);
 
     const indent =
@@ -286,6 +514,19 @@ export class Typesetter {
           ? theme.bodySize * 1.6 * block.level
           : 0;
     const measure = Math.max(width - indent, theme.bodySize * 4);
+
+    if (block.type === "math") {
+      return this.buildDisplayMath(
+        block,
+        rendered,
+        spaceBefore,
+        measure,
+        indent,
+        raw,
+        tag,
+        numbering,
+      );
+    }
 
     if (block.type === "rule") {
       return {
@@ -310,7 +551,7 @@ export class Typesetter {
     const lines =
       block.type === "code"
         ? this.buildPreformatted(block, rendered, spaceBefore, indent, raw).lines
-        : this.breakParagraph(block, rendered, measure, indent);
+        : this.breakParagraph(block, rendered, measure, indent, numbering);
 
     const first = lines[0];
     const lh = first
@@ -332,6 +573,95 @@ export class Typesetter {
     };
   }
 
+  /**
+   * A display formula: its own block, centred on the measure.
+   *
+   * LaTeX sets displayed equations on their own line with generous space above
+   * and below — `\abovedisplayskip` and `\belowdisplayskip` — because the
+   * formula is a unit of the argument rather than part of a sentence. The
+   * numbers here follow that shape at 1.1 and 1.1 em, close to LaTeX's own
+   * 10pt-on-12pt defaults once scaled.
+   */
+  private buildDisplayMath(
+    block: Block,
+    rendered: RenderedBlock,
+    spaceBefore: number,
+    measure: number,
+    indent: number,
+    raw: boolean,
+    tag: string | null,
+    numbering: Numbering,
+  ): LaidBlock {
+    const { style, key } = styleForSpan(this.theme, block, null);
+    const ex = this.measurer.exHeight(style);
+    const geometry = renderMath(resolveLatex(block.math, numbering.labels), true);
+
+    const width = geometry.widthEx * ex;
+    const scale =
+      geometry.viewBoxWidth > 0 && width > 0 ? width / geometry.viewBoxWidth : ex / MATHJAX_EX_UNITS;
+    const height = (geometry.heightEx - geometry.depthEx) * ex;
+    const depth = geometry.depthEx * ex;
+
+    // Centre it, but never push it off the left edge: an equation wider than
+    // the measure overflows to the right, as LaTeX's does.
+    const x = Math.max(0, (measure - width) / 2);
+
+    const runs: LaidRun[] = [
+      {
+        x,
+        text: "",
+        docStart: block.start,
+        docEnd: block.end,
+        style,
+        styleKey: key,
+        scaleX: 1,
+        synthetic: false,
+        math: { geometry, scale, source: block.math, display: true },
+      },
+    ];
+
+    // The number sits flush to the right margin, as LaTeX's does — not beside
+    // the formula, which would move as the formula's width changed.
+    if (tag !== null) {
+      const label = `(${tag})`;
+      const labelWidth = this.measurer.width(label, style, key);
+      runs.push({
+        x: Math.max(x + width + this.theme.bodySize, measure - labelWidth),
+        text: label,
+        docStart: block.start,
+        docEnd: block.start,
+        style,
+        styleKey: key,
+        scaleX: 1,
+        synthetic: true,
+      });
+    }
+
+    const above = this.theme.bodySize * 1.1;
+    const below = this.theme.bodySize * 1.1;
+    return {
+      block,
+      lines: [
+        {
+          baseline: above + height,
+          height,
+          depth,
+          runs,
+          ratio: 0,
+          width,
+          indent,
+        },
+      ],
+      height: spaceBefore + above + height + depth + below,
+      spaceBefore,
+      y: 0,
+      rendered,
+      indent,
+      marker: "",
+      raw,
+    };
+  }
+
   /** Fenced code and the focused block: one source line per display line. */
   private buildPreformatted(
     block: Block,
@@ -342,6 +672,7 @@ export class Typesetter {
   ): LaidBlock {
     const { style, key } = styleForSpan(this.theme, block, null);
     const lineHeight = style.size * style.lineHeight;
+    const v = this.vmetrics(style, key);
     const lines: LaidLine[] = [];
     const text = rendered.text;
     let at = 0;
@@ -354,7 +685,9 @@ export class Typesetter {
       const isFence = hideFence && (li === 0 || li === src.length - 1) && /^\s*(`{3,}|~{3,})/.test(lineText);
       if (!isFence) {
         lines.push({
-          baseline: n * lineHeight + style.size * 0.82,
+          baseline: n * lineHeight + v.ascent,
+          height: v.ascent,
+          depth: v.descent,
           ratio: 0,
           width: this.measurer.width(lineText, style, key),
           indent,
@@ -414,6 +747,8 @@ export class Typesetter {
       const joinable =
         !run.synthetic &&
         !prev.synthetic &&
+        !run.math &&
+        !prev.math &&
         isLatinWordPiece(prev.text) &&
         isLatinWordPiece(run.text) &&
         prev.styleKey === run.styleKey &&
@@ -431,18 +766,136 @@ export class Typesetter {
     return out;
   }
 
+  /**
+   * Expand each formula placeholder into one placeholder per breakable piece.
+   *
+   * A formula reaches this point as a single U+FFFC. TeX allows an inline
+   * formula to break after an outer-level binary operator or relation, so a
+   * formula that offers such a point is handed to the optimiser as several
+   * boxes with `\binoppenalty` or `\relpenalty` between them. From the
+   * breaker's side nothing is new — that is the point of having modelled a
+   * formula as a box in the first place.
+   *
+   * The source map gives every piece the formula's own starting offset, so
+   * clicking anywhere in a formula puts the caret at its opening delimiter and
+   * reveals the source, however the formula happens to be split at the time.
+   */
+  private expandMath(
+    rendered: RenderedBlock,
+    style: TextStyle,
+    key: string,
+    numbering: Numbering,
+  ): { rendered: RenderedBlock; pieces: Map<number, MathPiece> } {
+    if (!rendered.text.includes(OBJECT_REPLACEMENT)) {
+      return { rendered, pieces: new Map() };
+    }
+
+    const pieces = new Map<number, MathPiece>();
+    let text = "";
+    const map: number[] = [];
+    // Where each original character ended up, so spans can be moved with it.
+    const shifted = new Int32Array(rendered.text.length + 1);
+
+    for (let i = 0; i < rendered.text.length; i++) {
+      shifted[i] = text.length;
+      if (rendered.text[i] !== OBJECT_REPLACEMENT) {
+        text += rendered.text[i];
+        map.push(rendered.map[i]);
+        continue;
+      }
+      const built = this.buildMathPieces(rendered, i, style, key, numbering);
+      for (const piece of built) {
+        pieces.set(text.length, piece);
+        text += OBJECT_REPLACEMENT;
+        map.push(rendered.map[i]);
+      }
+    }
+    shifted[rendered.text.length] = text.length;
+    map.push(rendered.map[rendered.map.length - 1]);
+
+    const spans = rendered.spans.map((span) => ({
+      ...span,
+      start: shifted[span.start],
+      end: shifted[span.end],
+    }));
+
+    return { rendered: { text, spans, map: Int32Array.from(map) }, pieces };
+  }
+
+  /** Lay out the formula at `charIndex` and split it if TeX would allow. */
+  private buildMathPieces(
+    rendered: RenderedBlock,
+    charIndex: number,
+    style: TextStyle,
+    key: string,
+    numbering: Numbering,
+  ): MathPiece[] {
+    const span = rendered.spans.find(
+      (s) => s.kind === "math" && charIndex >= s.start && charIndex < s.end,
+    );
+    // References are resolved before the cache key is built, so a formula
+    // whose citation now points at a different number is a different entry.
+    const latex = resolveLatex(span?.math ?? "", numbering.labels);
+    const display = span?.display ?? false;
+    const ex = this.measurer.exHeight(style);
+    const cacheKey = `${key}|${display ? "d" : "i"}|${ex.toFixed(2)}|${latex}`;
+    const hit = this.pieceCache.get(cacheKey);
+    if (hit) return hit;
+
+    const { geometry, segments } = this.options.breakInsideMath
+      ? renderMathSegments(latex, display)
+      : { geometry: renderMath(latex, display), segments: [] };
+    const scale =
+      geometry.viewBoxWidth > 0 && geometry.widthEx > 0
+        ? (geometry.widthEx * ex) / geometry.viewBoxWidth
+        : ex / MATHJAX_EX_UNITS;
+    const height = (geometry.heightEx - geometry.depthEx) * ex;
+    const depth = geometry.depthEx * ex;
+
+    const common = { geometry, scale, source: latex, display };
+    let built: MathPiece[];
+    if (segments.length < 2) {
+      built = [
+        { ...common, width: geometry.widthEx * ex, height, depth, penaltyAfter: NaN },
+      ];
+    } else {
+      // Every piece is given the whole formula's height and depth. That is
+      // conservative — a piece with no tall part gets more leading than it
+      // strictly needs — but it can never let two lines collide, and formulas
+      // that break at an outer-level operator are usually of even height
+      // anyway.
+      built = segments.map((segment) => ({
+        ...common,
+        segment,
+        width: segment.width * scale,
+        height,
+        depth,
+        penaltyAfter: segment.penaltyAfter ?? NaN,
+      }));
+    }
+
+    if (this.pieceCache.size > 2000) this.pieceCache.clear();
+    this.pieceCache.set(cacheKey, built);
+    return built;
+  }
+
+  private pieceCache = new Map<string, MathPiece[]>();
+
   /** The real work: hand the paragraph to the Knuth-Plass core. */
   private breakParagraph(
     block: Block,
     rendered: RenderedBlock,
     measure: number,
     indent: number,
+    numbering: Numbering,
   ): LaidLine[] {
     if (!engine) throw new Error("engine not initialised");
-    const text = rendered.text;
-    if (!text.length) return [];
+    if (!rendered.text.length) return [];
 
     const base = styleForSpan(this.theme, block, null);
+    const expanded = this.expandMath(rendered, base.style, base.key, numbering);
+    rendered = expanded.rendered;
+    const pieces = expanded.pieces;
     engine.configure(
       base.style.size,
       this.options.justify && block.type !== "heading",
@@ -453,11 +906,16 @@ export class Typesetter {
       this.options.tolerance,
       this.options.maxExpand,
       this.options.punctStyle,
+      base.style.size * base.style.lineHeight,
+      base.style.size * 0.08,
     );
 
+    const text = rendered.text;
     const tokens = engine.tokenize(text);
     const count = tokens.length / 3;
-    const advances = new Float32Array(count);
+    // Four floats per token: advance, height, depth, and the penalty for
+    // breaking after it — the last is how a split formula's pieces are joined.
+    const metrics = new Float32Array(count * 4);
 
     // Resolve which span a byte offset falls in, so bold and code runs are
     // measured with the face they will be drawn in.
@@ -493,36 +951,59 @@ export class Typesetter {
       }
 
       const st = styleAt(tokens[t]);
+      const v = this.vmetrics(st.style, st.key);
+
+      // A formula arrives as U+FFFC. Its box is whatever MathJax laid out,
+      // measured in ex against this style so it sits at the right optical
+      // size, and it brings a height and a depth that the line must respect.
+      if (tokens[t + 2] === CLASS_OBJECT) {
+        const piece = pieces.get(toChar(tokens[t]));
+        metrics[i * 4] = piece?.width ?? 0;
+        metrics[i * 4 + 1] = Math.max(piece?.height ?? 0, v.ascent * 0.2);
+        metrics[i * 4 + 2] = piece?.depth ?? 0;
+        metrics[i * 4 + 3] = piece?.penaltyAfter ?? NaN;
+        i += 1;
+        t += 3;
+        continue;
+      }
+
       if (n === 1) {
         const slice = text.slice(toChar(tokens[t]), toChar(tokens[t + 1]));
-        advances[i] = this.measurer.width(slice, st.style, st.key);
+        metrics[i * 4] = this.measurer.width(slice, st.style, st.key);
       } else {
         const from = toChar(tokens[t]);
         let previous = 0;
         for (let k = 0; k < n; k++) {
           const upto = toChar(tokens[t + k * 3 + 1]);
           const cumulative = this.measurer.width(text.slice(from, upto), st.style, st.key);
-          advances[i + k] = cumulative - previous;
+          metrics[(i + k) * 4] = cumulative - previous;
           previous = cumulative;
         }
+      }
+      for (let k = 0; k < n; k++) {
+        metrics[(i + k) * 4 + 1] = v.ascent;
+        metrics[(i + k) * 4 + 2] = v.descent;
+        metrics[(i + k) * 4 + 3] = NaN;
       }
       i += n;
       t += n * 3;
     }
 
-    engine.prepare(advances, this.measurer.spaceWidth(base.style, base.key));
+    engine.prepare(metrics, this.measurer.spaceWidth(base.style, base.key));
     const flat = engine.layout(measure);
 
     // Decode the flat buffer the core returned.
     const lines: LaidLine[] = [];
     const lineCount = flat[0];
-    const lineHeight = base.style.size * base.style.lineHeight;
     let p = 1;
     for (let l = 0; l < lineCount; l++) {
       const runCount = flat[p];
       const ratio = flat[p + 1];
       const width = flat[p + 2];
-      p += 6;
+      const baseline = flat[p + 6];
+      const height = flat[p + 7];
+      const depth = flat[p + 8];
+      p += 9;
       const runs: LaidRun[] = [];
       for (let r = 0; r < runCount; r++) {
         const x = flat[p];
@@ -547,19 +1028,23 @@ export class Typesetter {
         const cs = toChar(s);
         const ce = toChar(e);
         const st = styleAt(s);
+        const slice = text.slice(cs, ce);
         runs.push({
           x,
-          text: text.slice(cs, ce),
+          text: slice,
           docStart: rendered.map[cs] ?? 0,
           docEnd: rendered.map[ce] ?? rendered.map[rendered.map.length - 1],
           style: st.style,
           styleKey: st.key,
           scaleX,
           synthetic: false,
+          math: slice === OBJECT_REPLACEMENT ? pieces.get(cs) : undefined,
         });
       }
       lines.push({
-        baseline: l * lineHeight + base.style.size * 0.82,
+        baseline,
+        height,
+        depth,
         runs: this.coalesce(runs),
         ratio,
         width,

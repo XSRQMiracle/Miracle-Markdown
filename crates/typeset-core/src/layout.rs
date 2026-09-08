@@ -1,7 +1,7 @@
 //! Turning chosen breakpoints into drawable positions.
 
 use crate::linebreak::Breakpoint;
-use crate::{Kind, Paragraph};
+use crate::{Config, Kind, Paragraph};
 
 /// One `fillText` call for the host: a whole Latin word, or a single CJK glyph.
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +19,12 @@ pub struct DrawRun {
 #[derive(Debug, Clone)]
 pub struct Line {
     pub runs: Vec<DrawRun>,
+    /// Distance from this line's baseline up to the top of its tallest ink.
+    pub height: f32,
+    /// Distance from the baseline down to the bottom of its deepest ink.
+    pub depth: f32,
+    /// The baseline's offset from the top of the block, after interline glue.
+    pub baseline: f32,
     /// Adjustment ratio the line was set at, for diagnostics and for the
     /// "show badness" debugging overlay.
     pub ratio: f32,
@@ -30,7 +36,7 @@ pub struct Line {
 }
 
 /// Distribute each line's stretch or shrink and emit final positions.
-pub fn layout_lines(para: &Paragraph, breaks: &[Breakpoint], line_width: f32) -> Vec<Line> {
+pub fn layout_lines(para: &Paragraph, breaks: &[Breakpoint]) -> Vec<Line> {
     let items = &para.items;
     let atoms = &para.atoms;
     let max_expand = para.config.max_expand;
@@ -146,8 +152,26 @@ pub fn layout_lines(para: &Paragraph, breaks: &[Breakpoint], line_width: f32) ->
             ink = x;
         }
 
+        // The line is as tall as the tallest thing on it and as deep as the
+        // deepest — which for a line of plain text is just the font's ascent
+        // and descent, and for one containing a fraction is considerably more.
+        let mut height: f32 = 0.0;
+        let mut depth: f32 = 0.0;
+        for it in &items[bp.start..end] {
+            if it.kind != Kind::Box {
+                continue;
+            }
+            if let Some(atom) = atoms.get(it.atom as usize) {
+                height = height.max(atom.height);
+                depth = depth.max(atom.depth);
+            }
+        }
+
         lines.push(Line {
             runs,
+            height,
+            depth,
+            baseline: 0.0, // filled in by the vertical pass below
             ratio: bp.ratio,
             width: ink,
             hyphenated: bp.hyphenated,
@@ -155,5 +179,41 @@ pub fn layout_lines(para: &Paragraph, breaks: &[Breakpoint], line_width: f32) ->
             source_end,
         });
     }
+
+    place_baselines(&mut lines, &para.config);
     lines
+}
+
+/// Position each line's baseline using TeX's interline glue.
+///
+/// TeX does not stack lines on a fixed grid. It aims for `baselineskip`
+/// between consecutive baselines, but computes that as a *gap*: subtract the
+/// previous line's depth and this line's height from `baselineskip` and use
+/// what is left. When that remainder falls below `lineskiplimit` — which is to
+/// say, when the two lines would touch — it abandons the target and inserts
+/// `lineskip` of clearance instead.
+///
+/// This is what keeps a line carrying a tall formula from crashing into the
+/// one above it, while leaving ordinary text on an even rhythm: for lines
+/// whose height and depth are the same throughout, the arithmetic reduces
+/// exactly to a constant baseline-to-baseline distance.
+fn place_baselines(lines: &mut [Line], config: &Config) {
+    let mut previous_depth: Option<f32> = None;
+    let mut y = 0.0;
+    for line in lines.iter_mut() {
+        match previous_depth {
+            // TeX suppresses interline glue before the first box, so the first
+            // baseline sits exactly its own height below the top of the block.
+            None => y = line.height,
+            Some(depth) => {
+                let mut gap = config.baseline_skip - depth - line.height;
+                if gap < config.line_skip_limit {
+                    gap = config.line_skip;
+                }
+                y += depth + gap + line.height;
+            }
+        }
+        line.baseline = y;
+        previous_depth = Some(line.depth);
+    }
 }

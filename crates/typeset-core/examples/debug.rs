@@ -3,13 +3,14 @@ use typeset_core::*;
 const EM: f32 = 16.0;
 
 fn measure(text: &str, tokens: &[Token]) -> Vec<f32> {
-    tokens.iter().map(|t| {
+    tokens.iter().flat_map(|t| {
         let s = &text[t.start as usize..t.end as usize];
-        match t.class {
+        let w = match t.class {
             CharClass::Cjk | CharClass::PunctLeft | CharClass::PunctRight | CharClass::PunctCenter => EM,
             CharClass::Space => EM / 3.0,
             _ => s.chars().count() as f32 * EM * 0.5,
-        }
+        };
+        [w, EM * 0.8, EM * 0.2, f32::NAN]
     }).collect()
 }
 
@@ -52,7 +53,7 @@ fn run(label: &str, text: &str, ems: f32) {
     let adv = measure(text, &tokens);
     let para = prepare(text, &tokens, &adv, EM / 3.0, cfg);
     let breaks = break_lines(&para, width);
-    let lines = layout_lines(&para, &breaks, width);
+    let lines = layout_lines(&para, &breaks);
 
     let kp: Vec<f32> = breaks[..breaks.len().saturating_sub(1)].iter().map(|b| b.ratio).collect();
     let gr = greedy(&para, width);

@@ -109,6 +109,12 @@ export class Editor {
     this.invalidate();
   }
 
+  /** Re-typeset after the math engine has loaded or its options changed. */
+  invalidateMath(): void {
+    this.typesetter.invalidate();
+    this.invalidate();
+  }
+
   setTheme(patch: Partial<Theme>): void {
     Object.assign(this.typesetter.theme, patch);
     this.typesetter.invalidate();

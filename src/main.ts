@@ -7,6 +7,8 @@ import { Editor, type StatusInfo } from "./editor/editor.js";
 import { initEngine, type TypesetOptions } from "./engine/typeset.js";
 import { SAMPLE } from "./sample.js";
 import { isDesktop, openDocument, saveDocument } from "./platform.js";
+import { DEFAULT_MATH_OPTIONS, initMath, type MathOptions } from "./engine/mathjax.js";
+import { buildMathPanel } from "./ui/math-panel.js";
 
 const stage = document.getElementById("stage") as HTMLElement;
 const canvas = document.getElementById("surface") as HTMLCanvasElement;
@@ -23,7 +25,23 @@ type ToggleKey = keyof Pick<
   "justify" | "cjkLatinSpacing" | "punctSqueeze" | "protrusion" | "hyphenate" | "showBadness"
 >;
 
-const TOGGLES: Array<{ key: ToggleKey; label: string; hint: string }> = [
+/** A toolbar switch, addressed either by a plain option or by its own pair of
+ *  accessors when the option is nested. */
+interface Toggle {
+  label: string;
+  hint: string;
+  get(editor: Editor): boolean;
+  set(editor: Editor, on: boolean): void;
+}
+
+const flag = (key: ToggleKey, label: string, hint: string): Toggle => ({
+  label,
+  hint,
+  get: (editor) => editor.options[key],
+  set: (editor, on) => editor.setOptions({ [key]: on } as Partial<TypesetOptions>),
+});
+
+const TOGGLE_DEFS: Array<{ key: ToggleKey; label: string; hint: string }> = [
   { key: "justify", label: "两端对齐", hint: "关闭后退回左对齐，断行仍然是全局最优的" },
   { key: "cjkLatinSpacing", label: "中西间距", hint: "汉字与拉丁字母之间的四分之一空格" },
   { key: "punctSqueeze", label: "标点挤压", hint: "全角标点让出空白的半个字身" },
@@ -39,15 +57,28 @@ async function main() {
   editor.setText(SAMPLE);
   await editor.ready();
 
+  const TOGGLES: Toggle[] = [
+    ...TOGGLE_DEFS.map((t) => flag(t.key, t.label, t.hint)),
+    {
+      label: "中文软换行",
+      hint:
+        "源码里段落中间的换行，在中文上下文中不产生空格。CommonMark 规定换行等于一个空格，" +
+        "这对以空格分词的文字是对的，对中文是错的——那个换行只是作者折行的方式。" +
+        "关闭后回到 CommonMark 的字面行为。",
+      get: (e) => e.options.inline.cjkSoftBreaks,
+      set: (e, on) => e.setOptions({ inline: { ...e.options.inline, cjkSoftBreaks: on } }),
+    },
+  ];
+
   for (const t of TOGGLES) {
     const button = document.createElement("button");
     button.className = "toggle";
     button.textContent = t.label;
     button.title = t.hint;
-    const sync = () => button.setAttribute("aria-pressed", String(editor.options[t.key]));
+    const sync = () => button.setAttribute("aria-pressed", String(t.get(editor)));
     sync();
     button.addEventListener("click", () => {
-      editor.setOptions({ [t.key]: !editor.options[t.key] } as Partial<TypesetOptions>);
+      t.set(editor, !t.get(editor));
       sync();
       editor.focus();
     });
@@ -120,6 +151,24 @@ async function main() {
   if (import.meta.env.DEV) {
     (window as unknown as { editor: Editor }).editor = editor;
   }
+
+  // MathJax loads in the background. Until it arrives, formulas render as
+  // their own source, which is the right thing to show anyway while one is
+  // being typed; once it is ready the document re-typesets with real boxes.
+  const mathOptions: MathOptions = { ...DEFAULT_MATH_OPTIONS };
+  const reloadMath = async () => {
+    await initMath(mathOptions);
+    editor.invalidateMath();
+  };
+  void reloadMath();
+
+  buildMathPanel(
+    document.getElementById("math-panel") as HTMLElement,
+    document.getElementById("math-button") as HTMLElement,
+    editor,
+    mathOptions,
+    reloadMath,
+  );
 
   editor.focus();
   window.addEventListener("resize", () => editor.invalidate());

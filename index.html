@@ -59,6 +59,53 @@
 
       .sep { width: 1px; height: 18px; background: var(--chrome-border); }
 
+      /* The math settings popover. Grouped the way the decisions actually
+         divide: what counts as a formula, what LaTeX is available, and how
+         equations are numbered. */
+      #math-panel {
+        position: absolute;
+        top: 42px;
+        z-index: 10;
+        min-width: 330px;
+        padding: 12px 14px 14px;
+        background: #fff;
+        border: 1px solid var(--chrome-border);
+        border-radius: 8px;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.13);
+        font-size: 12.5px;
+      }
+      #math-panel[hidden] { display: none; }
+      #math-panel h4 {
+        margin: 14px 0 7px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      #math-panel h4:first-child { margin-top: 0; }
+      #math-panel label {
+        display: flex;
+        align-items: baseline;
+        gap: 7px;
+        padding: 3px 0;
+        cursor: pointer;
+      }
+      #math-panel label span.hint {
+        color: var(--muted);
+        font-size: 11.5px;
+        line-height: 1.35;
+      }
+      #math-panel select { font: inherit; margin-left: auto; }
+      #math-panel .row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+      #math-panel .note {
+        margin-top: 10px;
+        padding-top: 9px;
+        border-top: 1px solid var(--chrome-border);
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
       label.slider { display: flex; align-items: center; gap: 6px; color: var(--muted); }
       label.slider input { width: 84px; }
 
@@ -112,6 +159,10 @@
         </div>
         <span class="sep"></span>
         <div class="toggles" id="toggles"></div>
+        <span class="sep"></span>
+        <div class="toggles">
+          <button class="toggle" id="math-button" title="公式设置">公式 ▾</button>
+        </div>
         <span class="spacer"></span>
         <label class="slider">
           字号
@@ -124,6 +175,7 @@
       </header>
       <div id="stage">
         <canvas id="surface"></canvas>
+        <div id="math-panel" hidden></div>
       </div>
       <footer>
         <span id="status">正在加载排版引擎…</span>

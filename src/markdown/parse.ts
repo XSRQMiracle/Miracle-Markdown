@@ -18,6 +18,7 @@ export type BlockType =
   | "quote"
   | "list"
   | "rule"
+  | "math"
   | "blank";
 
 export interface Block {
@@ -34,12 +35,28 @@ export interface Block {
   source: string;
   /** Language tag on a fenced code block. */
   lang: string;
+  /** LaTeX source of a block of kind "math", delimiters already removed. */
+  math: string;
 }
 
-export type SpanKind = "text" | "strong" | "em" | "code" | "link" | "strike";
+export type SpanKind = "text" | "strong" | "em" | "code" | "link" | "strike" | "math";
+
+/**
+ * The character standing in for an inline formula in a block's rendered text.
+ *
+ * Unicode defines U+FFFC for exactly this: a placeholder occupying the place
+ * of content the text stream cannot represent. Using it means the formula
+ * needs no special case in the tokenizer — it is one more atom in the
+ * horizontal list, with a width, a height and a depth like any other.
+ */
+export const OBJECT_REPLACEMENT = "\uFFFC";
 
 export interface Span {
   kind: SpanKind;
+  /** LaTeX source, on spans of kind "math". */
+  math?: string;
+  /** Whether a math span is set in display style. */
+  display?: boolean;
   /** Range within the block's *rendered* text. */
   start: number;
   end: number;
@@ -60,6 +77,8 @@ export interface RenderedBlock {
 }
 
 const FENCE = /^(\s*)(`{3,}|~{3,})\s*(\S*)/;
+/** A display formula opened by $$ or by \[ on its own line. */
+const MATH_OPEN = /^\s*(\$\$|\\\[)/;
 const HEADING = /^(#{1,6})\s+(.*)$/;
 const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
 const QUOTE = /^\s*>\s?(.*)$/;
@@ -92,13 +111,60 @@ export function parseBlocks(doc: string): Block[] {
     const line = lines[i];
     const start = offsets[i];
 
+    // Display math, opened by $$ or \[. Both may close on the same line.
+    const mathOpen = MATH_OPEN.exec(line);
+    if (mathOpen) {
+      const opener = mathOpen[1];
+      const closer = opener === "$$" ? "$$" : "\\]";
+      const afterOpen = start + line.indexOf(opener) + opener.length;
+      const sameLine = line.indexOf(closer, line.indexOf(opener) + opener.length);
+      let end: number;
+      let bodyEnd: number;
+      if (sameLine >= 0) {
+        bodyEnd = start + sameLine;
+        end = bodyEnd + closer.length;
+        i++;
+      } else {
+        let j = i + 1;
+        while (j < count && !lines[j].includes(closer)) j++;
+        if (j < count) {
+          bodyEnd = offsets[j] + lines[j].indexOf(closer);
+          end = bodyEnd + closer.length;
+          i = j + 1;
+        } else {
+          // Unterminated: treat the rest of the document as the formula so the
+          // reader can see what they are typing rather than losing it.
+          bodyEnd = doc.length;
+          end = doc.length;
+          i = count;
+        }
+      }
+      blocks.push(
+        block("math", doc.slice(start, end), start, end, {
+          math: doc.slice(afterOpen, bodyEnd),
+        }),
+      );
+      continue;
+    }
+
     const fence = FENCE.exec(line);
     if (fence) {
       const closer = fence[2][0];
       let j = i + 1;
       while (j < count && !new RegExp(`^\\s*${closer}{3,}\\s*$`).test(lines[j])) j++;
       const end = j < count ? offsets[j] + lines[j].length : doc.length;
-      blocks.push(block("code", doc.slice(start, end), start, end, { lang: fence[3] }));
+      const info = fence[3].toLowerCase();
+      if (info === "math" || info === "latex" || info === "katex") {
+        const bodyStart = offsets[i] + line.length + 1;
+        const bodyEnd = j < count ? Math.max(bodyStart, offsets[j] - 1) : doc.length;
+        blocks.push(
+          block("math", doc.slice(start, end), start, end, {
+            math: doc.slice(bodyStart, bodyEnd),
+          }),
+        );
+      } else {
+        blocks.push(block("code", doc.slice(start, end), start, end, { lang: fence[3] }));
+      }
       i = j + 1;
       continue;
     }
@@ -168,6 +234,7 @@ export function parseBlocks(doc: string): Block[] {
       lines[j].trim() !== "" &&
       !HEADING.test(lines[j]) &&
       !FENCE.test(lines[j]) &&
+      !MATH_OPEN.test(lines[j]) &&
       !RULE.test(lines[j]) &&
       !QUOTE.test(lines[j]) &&
       !UL.test(lines[j]) &&
@@ -221,6 +288,7 @@ function block(
     end,
     source,
     lang: extra.lang ?? "",
+    math: extra.math ?? "",
   };
 }
 
@@ -233,7 +301,11 @@ function block(
  * question of where the caret goes "inside" a pair of asterisks, and keeps
  * the mapping an identity.
  */
-export function renderBlock(b: Block, raw: boolean): RenderedBlock {
+export function renderBlock(
+  b: Block,
+  raw: boolean,
+  options: InlineOptions = DEFAULT_INLINE_OPTIONS,
+): RenderedBlock {
   if (raw || b.type === "code") {
     const map = identityMap(b.source.length, b.start);
     return { text: b.source, spans: [plainSpan(0, b.source.length)], map };
@@ -250,7 +322,7 @@ export function renderBlock(b: Block, raw: boolean): RenderedBlock {
       body = m[2];
     }
   } else if (b.type === "quote") {
-    return stripPerLine(b, /^\s*>\s?/);
+    return stripPerLine(b, /^\s*>\s?/, options);
   } else if (b.type === "list") {
     const m = UL.exec(b.source) ?? OL.exec(b.source);
     if (m) {
@@ -260,12 +332,11 @@ export function renderBlock(b: Block, raw: boolean): RenderedBlock {
     }
   }
 
-  const inline = parseInline(body, base);
-  return inline;
+  return parseInline(body, base, undefined, options);
 }
 
 /** Remove a leading marker from every line, e.g. the `>` of a blockquote. */
-function stripPerLine(b: Block, marker: RegExp): RenderedBlock {
+function stripPerLine(b: Block, marker: RegExp, options: InlineOptions): RenderedBlock {
   let text = "";
   const map: number[] = [];
   let at = b.start;
@@ -279,16 +350,22 @@ function stripPerLine(b: Block, marker: RegExp): RenderedBlock {
     }
     at += line.length + 1;
     if (n + 1 < lines.length) {
-      // A newline inside the quote becomes an ordinary space.
-      text += " ";
-      map.push(at - 1);
+      // The same rule the running text follows: a break between wide
+      // characters is how the author wrapped the file, not a space.
+      const next = lines[n + 1].replace(marker, "");
+      const before = text.length ? text[text.length - 1] : "";
+      const wide = isWide(before) || isWide(next.charAt(0));
+      if (!options.cjkSoftBreaks || !wide) {
+        text += " ";
+        map.push(at - 1);
+      }
     }
   });
   map.push(b.end);
   // Hand the stripped text on for inline parsing, carrying the map with it —
   // and keep the map that comes back, since emphasis removal shortens it
   // further.
-  return parseInline(text, -1, map);
+  return parseInline(text, -1, map, options);
 }
 
 function identityMap(length: number, base: number): Int32Array {
@@ -310,6 +387,49 @@ function plainSpan(start: number, end: number): Span {
   };
 }
 
+/** How the inline scanner should treat math delimiters. */
+export interface InlineOptions {
+  /** Recognise dollar-delimited formulas at all. */
+  inlineMath: boolean;
+  /** Recognise TeX's own \( \) and \[ \] delimiters. */
+  texDelimiters: boolean;
+  /**
+   * Strict dollar parsing, following Pandoc's rule: the opening delimiter may
+   * not be followed by whitespace, the closing one may not be preceded by it,
+   * and the closing one may not be followed by a digit.
+   *
+   * That last clause is what keeps "it costs $5 and $10" out of math mode,
+   * and it is the reason a strict and a lenient mode both need to exist: a
+   * document written under lenient rules can contain formulas that strict
+   * parsing would no longer see.
+   */
+  strictDollar: boolean;
+  /**
+   * Drop a source line break that touches a CJK character, instead of turning
+   * it into a space.
+   *
+   * CommonMark says a newline inside a paragraph is a space, which is right
+   * for scripts that separate words with one and wrong for Chinese and
+   * Japanese, where a line break in the source is only how the author chose
+   * to wrap the file. Leave it on and a paragraph reads the same however it
+   * is wrapped; turn it off for CommonMark's literal behaviour.
+   *
+   * Pandoc's `east_asian_line_breaks` drops the newline only when the
+   * characters on *both* sides are wide. We drop it when *either* side is,
+   * because we also insert the quarter em between Han and Latin ourselves: on
+   * a boundary like "意思；\n`\eqref`" Pandoc's rule leaves a space that the
+   * mixed-script spacing then widens further, and the gap reads as a mistake.
+   */
+  cjkSoftBreaks: boolean;
+}
+
+export const DEFAULT_INLINE_OPTIONS: InlineOptions = {
+  inlineMath: true,
+  texDelimiters: true,
+  strictDollar: true,
+  cjkSoftBreaks: true,
+};
+
 /** A stretch of source that carries formatting. */
 interface Format {
   kind: Exclude<SpanKind, "text">;
@@ -317,9 +437,23 @@ interface Format {
   from: number;
   to: number;
   href: string;
+  /** LaTeX source, on math formats. */
+  latex?: string;
+  display?: boolean;
 }
 
-const PUNCT = /[!-/:-@[-`{-~\u2000-\u206f\u3000-\u303f\uff00-\uffef]/;
+const PUNCT = /[!-/:-@[-`{-~ -⁯　-〿＀-￯]/;
+
+/**
+ * East Asian wide characters: Han, kana, Hangul, CJK punctuation and the
+ * fullwidth forms. These are the ones whose neighbours never need a space.
+ */
+const WIDE =
+  /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︐-﹯＀-｠￠-￦]/;
+
+function isWide(c: string): boolean {
+  return c.length > 0 && WIDE.test(c);
+}
 
 function isSpace(c: string | undefined): boolean {
   return c === undefined || /\s/.test(c);
@@ -342,6 +476,7 @@ export function parseInline(
   body: string,
   base: number,
   outerMap?: number[],
+  options: InlineOptions = DEFAULT_INLINE_OPTIONS,
 ): RenderedBlock {
   const src = (i: number): number =>
     outerMap ? (outerMap[i] ?? outerMap[outerMap.length - 1]) : base + i;
@@ -349,6 +484,9 @@ export function parseInline(
   const formats: Format[] = [];
   /** Source ranges to omit from the output: delimiters and link targets. */
   const drops: Array<[number, number]> = [];
+  /** Source ranges replaced wholesale by a single placeholder character —
+   *  the formulas, which have no textual form. */
+  const swaps: Array<{ from: number; to: number }> = [];
   /** Source positions that are literal because a backslash escaped them. */
   const escaped = new Set<number>();
 
@@ -358,11 +496,48 @@ export function parseInline(
   while (i < body.length) {
     const c = body[i];
 
+    if (options.texDelimiters && c === "\\" && (body[i + 1] === "(" || body[i + 1] === "[")) {
+      const display = body[i + 1] === "[";
+      const close = body.indexOf(display ? "\\]" : "\\)", i + 2);
+      if (close > 0) {
+        swaps.push({ from: i, to: close + 2 });
+        formats.push({
+          kind: "math",
+          from: i,
+          to: close + 2,
+          href: "",
+          latex: body.slice(i + 2, close),
+          display,
+        });
+        i = close + 2;
+        continue;
+      }
+    }
+
     if (c === "\\" && i + 1 < body.length) {
       drops.push([i, i + 1]);
       escaped.add(i + 1);
       i += 2;
       continue;
+    }
+
+    // Math is scanned before emphasis and code so that a formula's contents
+    // are never reinterpreted as markdown.
+    if (options.inlineMath && c === "$") {
+      const found = scanDollarMath(body, i, options.strictDollar);
+      if (found) {
+        swaps.push({ from: i, to: found.end });
+        formats.push({
+          kind: "math",
+          from: i,
+          to: found.end,
+          href: "",
+          latex: body.slice(found.bodyStart, found.bodyEnd),
+          display: found.display,
+        });
+        i = found.end;
+        continue;
+      }
     }
 
     if (c === "`") {
@@ -464,14 +639,70 @@ export function parseInline(
   liveDrops.sort((x, y) => x[0] - y[0]);
 
   // ---- pass two: emit ---------------------------------------------------
+  swaps.sort((a, b) => a.from - b.from);
+
+  /** The first character that will survive into the output at or after `from`. */
+  const nextEmitted = (from: number): string => {
+    let j = from;
+    while (j < body.length) {
+      const drop = liveDrops.find(([a, b]) => j >= a && j < b);
+      if (drop) {
+        j = drop[1];
+        continue;
+      }
+      if (swaps.some((w) => j >= w.from && j < w.to)) return OBJECT_REPLACEMENT;
+      if (body[j] === "\n") {
+        j++;
+        continue;
+      }
+      return body[j];
+    }
+    return "";
+  };
   let text = "";
   const map: number[] = [];
   const active: Format[][] = [];
   let d = 0;
+  let w = 0;
   for (let k = 0; k < body.length; k++) {
+    // A formula collapses to one placeholder character, which carries the
+    // whole span's source position so the caret can still find it.
+    while (w < swaps.length && swaps[w].to <= k) w++;
+    if (w < swaps.length && k === swaps[w].from) {
+      text += OBJECT_REPLACEMENT;
+      map.push(src(k));
+      active.push(live.filter((f) => f.from === swaps[w].from && f.kind === "math"));
+      k = swaps[w].to - 1;
+      continue;
+    }
     while (d < liveDrops.length && liveDrops[d][1] <= k) d++;
     if (d < liveDrops.length && k >= liveDrops[d][0] && k < liveDrops[d][1]) continue;
-    text += body[k] === "\n" ? " " : body[k];
+
+    if (body[k] === "\n") {
+      // A continuation line's leading whitespace is not content; CommonMark
+      // strips it, and keeping it would put the indentation of the source
+      // file into the middle of a sentence.
+      let j = k + 1;
+      while (j < body.length && (body[j] === " " || body[j] === "\t")) j++;
+
+      // Judge the break by what actually surrounds it in the finished text,
+      // not by the raw source: a delimiter or a formula may sit between.
+      const before = text.length ? text[text.length - 1] : "";
+      const after = nextEmitted(j);
+      // Whitespace the author already typed is enough; a break adjacent to it
+      // adds nothing.
+      const redundant = before === "" || before === " ";
+      const wide = options.cjkSoftBreaks && (isWide(before) || isWide(after));
+      if (!redundant && !wide) {
+        text += " ";
+        map.push(src(k));
+        active.push([]);
+      }
+      k = j - 1;
+      continue;
+    }
+
+    text += body[k];
     map.push(src(k));
     active.push(live.filter((f) => k >= f.from && k < f.to));
   }
@@ -500,6 +731,21 @@ function sameFormat(a: Format[], b: Format[]): boolean {
 function spanFrom(fs: Format[], start: number, end: number): Span {
   const has = (k: Format["kind"]) => fs.some((f) => f.kind === k);
   const link = fs.find((f) => f.kind === "link");
+  const math = fs.find((f) => f.kind === "math");
+  if (math) {
+    return {
+      kind: "math",
+      math: math.latex ?? "",
+      display: math.display ?? false,
+      start,
+      end,
+      strong: false,
+      em: false,
+      code: false,
+      strike: false,
+      href: "",
+    };
+  }
   return {
     kind: link
       ? "link"
@@ -520,6 +766,62 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
     strike: has("strike"),
     href: link?.href ?? "",
   };
+}
+
+/**
+ * Decide whether the dollar at `at` opens a formula, and find its end.
+ *
+ * Two dollars open display math wherever they appear, following Pandoc. A
+ * single dollar is governed by `strict`, which is the difference between
+ * reading "$5 and $10" as a price and as a formula.
+ */
+function scanDollarMath(
+  body: string,
+  at: number,
+  strict: boolean,
+): { end: number; bodyStart: number; bodyEnd: number; display: boolean } | null {
+  const display = body[at + 1] === "$";
+  const delimiter = display ? "$$" : "$";
+  const bodyStart = at + delimiter.length;
+  if (bodyStart >= body.length) return null;
+
+  if (!display && strict && isSpace(body[bodyStart])) return null;
+
+  let k = bodyStart;
+  while (k < body.length) {
+    if (body[k] === "\\") {
+      k += 2;
+      continue;
+    }
+    // A blank line ends a paragraph, so it also ends any formula.
+    if (body[k] === "\n" && body[k + 1] === "\n") return null;
+    if (body[k] !== "$") {
+      k++;
+      continue;
+    }
+    if (display) {
+      if (body[k + 1] === "$") {
+        return { end: k + 2, bodyStart, bodyEnd: k, display: true };
+      }
+      k++;
+      continue;
+    }
+    if (k === bodyStart) return null; // an empty span is not a formula
+    if (strict) {
+      if (isSpace(body[k - 1])) {
+        k++;
+        continue;
+      }
+      // The clause that saves prices: a closing delimiter immediately before
+      // a digit is far more likely to be currency than mathematics.
+      if (body[k + 1] !== undefined && /\d/.test(body[k + 1])) {
+        k++;
+        continue;
+      }
+    }
+    return { end: k + 1, bodyStart, bodyEnd: k, display: false };
+  }
+  return null;
 }
 
 /** Index of the `]` matching the `[` at `from`, honouring nesting. */

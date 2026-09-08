@@ -102,6 +102,20 @@ export class Measurer {
     return this.ctx.measureText(token.slice(0, chars)).width;
   }
 
+  /**
+   * The x-height of a style, in pixels.
+   *
+   * Math is sized in `ex` because that is what makes a formula look like it
+   * belongs in the sentence: matching x-heights, not em sizes, is what keeps
+   * the symbols optically the same weight as the words around them.
+   */
+  exHeight(style: TextStyle): number {
+    this.use(style);
+    const m = this.ctx.measureText("x");
+    const ascent = m.actualBoundingBoxAscent;
+    return ascent && ascent > 0 ? ascent : style.size * 0.45;
+  }
+
   /** Ascent and descent for a style, for baseline placement. */
   vmetrics(style: TextStyle): { ascent: number; descent: number } {
     this.use(style);
