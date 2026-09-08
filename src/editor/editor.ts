@@ -33,7 +33,9 @@ import {
   setHeading,
   stepHeading,
   toggleInline,
+  toggleList,
   toggleQuote,
+  type ListKind,
   toggleLink,
   type Edit,
 } from "../markdown/edit.js";
@@ -288,6 +290,12 @@ export class Editor {
   toggleQuote(): void {
     if (this.blockedBlock()) return;
     this.applyEdit(toggleQuote(this.text, this.range()));
+  }
+
+  /** Make the lines the selection touches list items, or plain lines. */
+  toggleList(kind: ListKind): void {
+    if (this.blockedBlock()) return;
+    this.applyEdit(toggleList(this.text, this.range(), kind));
   }
 
   /** The selection, low end first. */

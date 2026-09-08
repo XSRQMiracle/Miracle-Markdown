@@ -5,7 +5,7 @@
 // selection with a space on the end, markup already there, a formula caught in
 // the middle — cheap to pin down.
 import assert from "node:assert/strict";
-import { clearFormat, setHeading, stepHeading, toggleInline, toggleLink, toggleQuote } from "../src/markdown/edit.js";
+import { clearFormat, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote } from "../src/markdown/edit.js";
 
 let failures = 0;
 function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
@@ -97,6 +97,25 @@ assert.equal(step("x", 1), "###### x", "a paragraph promotes to the smallest hea
 assert.equal(step("### x", -1), "#### x", "demoting makes it smaller");
 assert.equal(step("###### x", -1), "x", "and falls out to a paragraph");
 assert.equal(step("x", -1), "x", "which has nowhere further to go");
+
+// --- lists ----------------------------------------------------------------
+const list = (text: string, kind: "bullet" | "ordered" | "task", start = 0, end = text.length) =>
+  apply(text, toggleList(text, { start, end }, kind));
+assert.equal(list("a\nb", "bullet"), "- a\n- b", "lines become items");
+assert.equal(list("- a\n- b", "bullet"), "a\nb", "and the same key takes the markers off");
+assert.equal(list("a\nb", "ordered"), "1. a\n2. b", "a numbered list counts");
+assert.equal(list("- a\n- b", "ordered"), "1. a\n2. b", "and restyles a bulleted one in place");
+assert.equal(list("1. a\n2. b", "bullet"), "- a\n- b", "in both directions");
+assert.equal(list("a", "task"), "- [ ] a", "a task item carries a box");
+assert.equal(list("- [x] a", "task"), "a", "which comes off again, ticked or not");
+assert.equal(list("- [x] a", "bullet"), "- a", "and a task list flattens to bullets");
+assert.equal(list("- a", "task"), "- [ ] a", "or gains boxes");
+assert.equal(list("  a", "bullet"), "  - a", "indentation is kept");
+assert.equal(list("> a", "bullet"), "> - a", "and so is a quote marker");
+assert.equal(list("a\n\nb", "ordered"), "1. a\n\n2. b", "blank lines are left alone but not counted");
+assert.equal(list("7) x", "ordered"), "x", "an existing number is a list already, so it toggles off");
+assert.equal(list("- a\n2. b", "ordered"), "1. a\n2. b", "a half-numbered range is numbered from one");
+assert.equal(toggleList("", { start: 0, end: 0 }, "bullet"), null, "an empty line is nothing to list");
 
 // --- blockquote -----------------------------------------------------------
 const quote = (text: string, start = 0, end = text.length) => apply(text, toggleQuote(text, { start, end }));

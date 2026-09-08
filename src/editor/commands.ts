@@ -32,7 +32,10 @@ export type CommandId =
   | "paragraph"
   | "increaseHeading"
   | "decreaseHeading"
-  | "quote";
+  | "quote"
+  | "unorderedList"
+  | "orderedList"
+  | "taskList";
 
 export interface Command {
   /** Menu label. */
@@ -68,4 +71,7 @@ export const COMMANDS: Record<CommandId, Command> = {
   increaseHeading: { label: "提升标题级别", run: (e) => e.stepHeading(1) },
   decreaseHeading: { label: "降低标题级别", run: (e) => e.stepHeading(-1) },
   quote: { label: "引用", run: (e) => e.toggleQuote() },
+  unorderedList: { label: "无序列表", run: (e) => e.toggleList("bullet") },
+  orderedList: { label: "有序列表", run: (e) => e.toggleList("ordered") },
+  taskList: { label: "任务列表", run: (e) => e.toggleList("task") },
 };

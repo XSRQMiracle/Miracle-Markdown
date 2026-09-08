@@ -135,4 +135,9 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Ctrl+=", command: "increaseHeading" },
   { chord: "Ctrl+-", command: "decreaseHeading" },
   { chord: "Ctrl+Shift+q", command: "quote" },
+  { chord: "Ctrl+Shift+]", command: "unorderedList" },
+  { chord: "Ctrl+Shift+[", command: "orderedList" },
+  // Typora leaves the task list unbound; ⌘⇧X is what the editors that do bind
+  // it have settled on.
+  { chord: "Mod+Shift+x", command: "taskList" },
 ];

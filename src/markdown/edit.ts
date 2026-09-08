@@ -215,6 +215,45 @@ export function stepHeading(text: string, sel: Range, direction: 1 | -1): Edit |
   return setHeading(text, sel, next, false);
 }
 
+export type ListKind = "bullet" | "ordered" | "task";
+
+const TASK_ITEM = /^(?:[-*+])[ \t]+\[[ xX]\][ \t]+/;
+const BULLET_ITEM = /^(?:[-*+])[ \t]+/;
+const ORDERED_ITEM = /^\d+[.)][ \t]+/;
+
+/** Which kind of list item a line is, if it is one at all. */
+function listKind(body: string): ListKind | null {
+  if (TASK_ITEM.test(body)) return "task";
+  if (BULLET_ITEM.test(body)) return "bullet";
+  if (ORDERED_ITEM.test(body)) return "ordered";
+  return null;
+}
+
+/**
+ * Make the lines the selection touches list items, or plain lines again.
+ *
+ * Asking for the kind they already are removes the markers; asking for a
+ * different kind restyles them in place, so a bulleted list becomes a
+ * numbered one without going through a paragraph on the way.
+ */
+export function toggleList(text: string, sel: Range, kind: ListKind): Edit | null {
+  const lines = linesIn(text, sel);
+  const body = (line: string) => line.slice(LEAD.exec(line)![1].length);
+  const content = lines.filter((l) => l.text.trim());
+  const already = content.length > 0 && content.every((l) => listKind(body(l.text)) === kind);
+
+  let n = 0;
+  return mapLines(text, sel, (line) => {
+    if (!line.trim()) return line;
+    const lead = LEAD.exec(line)![1];
+    const rest = line.slice(lead.length).replace(MARKER, "");
+    if (already) return lead + rest;
+    n++;
+    const marker = kind === "ordered" ? `${n}. ` : kind === "task" ? "- [ ] " : "- ";
+    return lead + marker + rest;
+  });
+}
+
 /**
  * Quote the lines the selection touches, or unquote them.
  *
