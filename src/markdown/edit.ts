@@ -215,6 +215,61 @@ export function stepHeading(text: string, sel: Range, direction: 1 | -1): Edit |
   return setHeading(text, sel, next, false);
 }
 
+/** A line that opens a fenced block: a code fence, or a display formula. */
+const FENCE_OPEN = /^\s*(?:```+|~~~+|\$\$|\\\[)/;
+/** A line that closes one. */
+const FENCE_CLOSE = /^\s*(?:```+|~~~+|\$\$|\\\])\s*$/;
+
+/**
+ * Put the lines the selection touches inside a fenced block.
+ *
+ * With nothing to enclose the fence is still written, with the caret on the
+ * empty line between the halves — which is where the author was going to type
+ * anyway.
+ */
+export function wrapFenced(text: string, sel: Range, open: string, close: string): Edit {
+  const lines = linesIn(text, sel);
+  const from = lines[0].start;
+  const to = lines[lines.length - 1].end;
+  const inner = text.slice(from, to);
+  const insert = `${open}\n${inner}\n${close}`;
+  const at = from + open.length + 1;
+  return {
+    from,
+    to,
+    insert,
+    select: inner ? { start: at, end: at + inner.length } : { start: at, end: at },
+  };
+}
+
+/** Take the fence off a block, leaving what was inside it. */
+export function unwrapFenced(text: string, block: Range): Edit | null {
+  const lines = text.slice(block.start, block.end).split("\n");
+  // A one-line formula carries both delimiters: `$$ x $$`.
+  if (lines.length === 1) {
+    const bare = lines[0].replace(/^\s*(?:\$\$|\\\[)\s?/, "").replace(/\s?(?:\$\$|\\\])\s*$/, "");
+    if (bare === lines[0]) return null;
+    return {
+      from: block.start,
+      to: block.end,
+      insert: bare,
+      select: { start: block.start, end: block.start + bare.length },
+    };
+  }
+  const first = FENCE_OPEN.test(lines[0]) ? 1 : 0;
+  const last = lines.length > first && FENCE_CLOSE.test(lines[lines.length - 1])
+    ? lines.length - 1
+    : lines.length;
+  if (first === 0 && last === lines.length) return null;
+  const insert = lines.slice(first, last).join("\n");
+  return {
+    from: block.start,
+    to: block.end,
+    insert,
+    select: { start: block.start, end: block.start + insert.length },
+  };
+}
+
 export type ListKind = "bullet" | "ordered" | "task";
 
 const TASK_ITEM = /^(?:[-*+])[ \t]+\[[ xX]\][ \t]+/;

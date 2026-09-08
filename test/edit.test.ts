@@ -5,7 +5,7 @@
 // selection with a space on the end, markup already there, a formula caught in
 // the middle — cheap to pin down.
 import assert from "node:assert/strict";
-import { clearFormat, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote } from "../src/markdown/edit.js";
+import { clearFormat, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote, unwrapFenced, wrapFenced } from "../src/markdown/edit.js";
 
 let failures = 0;
 function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
@@ -97,6 +97,26 @@ assert.equal(step("x", 1), "###### x", "a paragraph promotes to the smallest hea
 assert.equal(step("### x", -1), "#### x", "demoting makes it smaller");
 assert.equal(step("###### x", -1), "x", "and falls out to a paragraph");
 assert.equal(step("x", -1), "x", "which has nowhere further to go");
+
+// --- fenced blocks --------------------------------------------------------
+{
+  const fence = (text: string, start = 0, end = text.length) =>
+    apply(text, wrapFenced(text, { start, end }, "```", "```"));
+  assert.equal(fence("code"), "```\ncode\n```", "the selection goes inside a fence");
+  assert.equal(fence("a\nb"), "```\na\nb\n```", "however many lines");
+  assert.equal(fence(""), "```\n\n```", "and an empty line still gets one");
+  assert.deepEqual(wrapFenced("", { start: 0, end: 0 }, "$$", "$$").select, { start: 3, end: 3 },
+    "with the caret on the line between the halves");
+
+  const unwrap = (text: string) => apply(text, unwrapFenced(text, { start: 0, end: text.length }));
+  assert.equal(unwrap("```\ncode\n```"), "code", "and comes back out");
+  assert.equal(unwrap("```js\ncode\n```"), "code", "language tag and all");
+  assert.equal(unwrap("~~~\ncode\n~~~"), "code", "whichever character fenced it");
+  assert.equal(unwrap("$$\nx = 1\n$$"), "x = 1", "a display formula too");
+  assert.equal(unwrap("$$ x = 1 $$"), "x = 1", "including one written on a single line");
+  assert.equal(unwrap("```\ncode"), "code", "an unclosed fence loses the half it has");
+  assert.equal(unwrapFenced("plain", { start: 0, end: 5 }), null, "and plain text has nothing to lose");
+}
 
 // --- lists ----------------------------------------------------------------
 const list = (text: string, kind: "bullet" | "ordered" | "task", start = 0, end = text.length) =>

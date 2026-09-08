@@ -22,7 +22,12 @@ import {
   type SelectionRect,
   type Viewport,
 } from "../render/canvas.js";
-import { listItemMarker, sourceRangeOwnsPosition, type BlockType } from "../markdown/parse.js";
+import {
+  listItemMarker,
+  sourceRangeOwnsPosition,
+  type Block,
+  type BlockType,
+} from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
 import { wordAt, wordBoundary } from "./words.js";
 import { compileSearch, expandReplacement, findMatches, type Match, type SearchQuery } from "./search.js";
@@ -35,6 +40,8 @@ import {
   toggleInline,
   toggleList,
   toggleQuote,
+  unwrapFenced,
+  wrapFenced,
   type ListKind,
   toggleLink,
   type Edit,
@@ -296,6 +303,27 @@ export class Editor {
   toggleList(kind: ListKind): void {
     if (this.blockedBlock()) return;
     this.applyEdit(toggleList(this.text, this.range(), kind));
+  }
+
+  /**
+   * Put the selection in a code fence or a display formula, or take it out.
+   *
+   * The way out has to come from the parse rather than from the text: the
+   * caret inside a fence sees only its content, and the delimiters that have
+   * to go are the block's, wherever they are.
+   */
+  toggleFenced(kind: "code" | "math"): void {
+    if (this.dirty) this.relayout();
+    const at = this.range().start;
+    const block = this.blockAt(at);
+    if (block && block.type === kind) {
+      this.applyEdit(unwrapFenced(this.text, { start: block.start, end: block.end }));
+      return;
+    }
+    // Anywhere else that takes its text literally, a fence would be content.
+    if (block && VERBATIM.includes(block.type)) return;
+    const fence = kind === "code" ? "```" : "$$";
+    this.applyEdit(wrapFenced(this.text, this.range(), fence, fence));
   }
 
   /** The selection, low end first. */
@@ -1448,16 +1476,18 @@ export class Editor {
     return /^\s*>\s?/.exec(this.text.slice(lineStart, this.selEnd))?.[0] ?? "> ";
   }
 
-  /** The kind of block a position sits in, by the same ownership rule as
-   *  `locate` — a shared boundary belongs to the block that follows. */
-  private blockTypeAt(offset: number): BlockType | null {
+  /** The block a position sits in, by the same ownership rule as `locate` —
+   *  a shared boundary belongs to the block that follows. */
+  private blockAt(offset: number): Block | null {
     for (let i = 0; i < this.blocks.length; i++) {
       const b = this.blocks[i];
-      if (sourceRangeOwnsPosition(b.block, this.blocks[i + 1]?.block, offset)) {
-        return b.block.type;
-      }
+      if (sourceRangeOwnsPosition(b.block, this.blocks[i + 1]?.block, offset)) return b.block;
     }
     return null;
+  }
+
+  private blockTypeAt(offset: number): BlockType | null {
+    return this.blockAt(offset)?.type ?? null;
   }
 
   /** Move by one grapheme, so surrogate pairs are not split. */

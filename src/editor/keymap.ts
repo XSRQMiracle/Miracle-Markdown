@@ -140,4 +140,6 @@ export const BINDINGS: readonly Binding[] = [
   // Typora leaves the task list unbound; ⌘⇧X is what the editors that do bind
   // it have settled on.
   { chord: "Mod+Shift+x", command: "taskList" },
+  { chord: "Ctrl+Shift+k", command: "codeFence" },
+  { chord: "Ctrl+Shift+m", command: "mathBlock" },
 ];

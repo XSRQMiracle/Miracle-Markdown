@@ -35,7 +35,9 @@ export type CommandId =
   | "quote"
   | "unorderedList"
   | "orderedList"
-  | "taskList";
+  | "taskList"
+  | "codeFence"
+  | "mathBlock";
 
 export interface Command {
   /** Menu label. */
@@ -74,4 +76,6 @@ export const COMMANDS: Record<CommandId, Command> = {
   unorderedList: { label: "无序列表", run: (e) => e.toggleList("bullet") },
   orderedList: { label: "有序列表", run: (e) => e.toggleList("ordered") },
   taskList: { label: "任务列表", run: (e) => e.toggleList("task") },
+  codeFence: { label: "代码块", run: (e) => e.toggleFenced("code") },
+  mathBlock: { label: "公式块", run: (e) => e.toggleFenced("math") },
 };
