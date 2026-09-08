@@ -21,7 +21,8 @@ export type CommandId =
   | "emphasis"
   | "inlineCode"
   | "strike"
-  | "clearFormat";
+  | "clearFormat"
+  | "hyperlink";
 
 export interface Command {
   /** Menu label. */
@@ -41,4 +42,5 @@ export const COMMANDS: Record<CommandId, Command> = {
   inlineCode: { label: "代码", run: (e) => e.toggleInline("`") },
   strike: { label: "删除线", run: (e) => e.toggleInline("~~") },
   clearFormat: { label: "清除样式", run: (e) => e.clearFormat() },
+  hyperlink: { label: "超链接", run: (e) => e.toggleLink() },
 };

@@ -111,4 +111,8 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Mod+Shift+`", command: "inlineCode" },
   { chord: "Alt+Shift+5", command: "strike" },
   { chord: "Mod+\\", command: "clearFormat" },
+  // Typora binds a literal Ctrl+K on both platforms; ⌘K is the Mac
+  // convention, and nothing else here wants it.
+  { chord: "Ctrl+k", command: "hyperlink" },
+  { chord: "Mod+k", command: "hyperlink" },
 ];

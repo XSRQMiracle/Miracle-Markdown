@@ -5,7 +5,7 @@
 // selection with a space on the end, markup already there, a formula caught in
 // the middle — cheap to pin down.
 import assert from "node:assert/strict";
-import { clearFormat, toggleInline } from "../src/markdown/edit.js";
+import { clearFormat, toggleInline, toggleLink } from "../src/markdown/edit.js";
 
 let failures = 0;
 function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
@@ -61,6 +61,18 @@ shows("```a```", [3, 4], wrap("```a```", 3, 4, "`"), "but a run of backticks is 
   assert.equal(text.slice(0, back.from) + back.insert + text.slice(back.to), "word",
     "wrapping and unwrapping is a round trip");
 }
+
+// --- links ----------------------------------------------------------------
+const link = (text: string, start: number, end = start) => toggleLink(text, { start, end });
+shows("read this", [5, 9], link("read this", 5, 9), "the selection becomes the label", "read [this](|)");
+shows("", [0, 0], link("", 0, 0), "with nothing selected the caret goes to the destination", "[](|)");
+shows("https://a.example", [0, 17], link("https://a.example", 0, 17),
+  "a selected URL becomes the destination instead", "[|](https://a.example)");
+shows("mailto:a@b.c", [0, 12], link("mailto:a@b.c", 0, 12), "and so does an address", "[|](mailto:a@b.c)");
+shows("a [b](/c) d", [3, 4], link("a [b](/c) d", 3, 4), "a link the selection sits in comes apart", "a [b] d");
+shows("a [b](/c) d", [2, 9], link("a [b](/c) d", 2, 9), "however much of it is selected", "a [b] d");
+shows("a [b](/c) d", [7, 8], link("a [b](/c) d", 7, 8), "including from inside the destination", "a [b] d");
+shows("![alt](/p)", [2, 5], link("![alt](/p)", 2, 5), "but an image is not a link", "![[alt](|)](/p)");
 
 // --- clearing -------------------------------------------------------------
 const clear = (text: string) => {

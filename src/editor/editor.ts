@@ -28,7 +28,7 @@ import { wordAt, wordBoundary } from "./words.js";
 import { compileSearch, expandReplacement, findMatches, type Match, type SearchQuery } from "./search.js";
 import { BINDINGS, commandFor } from "./keymap.js";
 import { COMMANDS, type CommandId } from "./commands.js";
-import { clearFormat, toggleInline, type Edit } from "../markdown/edit.js";
+import { clearFormat, toggleInline, toggleLink, type Edit } from "../markdown/edit.js";
 import {
   DEFAULT_OPTIONS,
   DEFAULT_THEME,
@@ -262,6 +262,15 @@ export class Editor {
       }
     }
     this.applyEdit(toggleInline(this.text, { start: lo, end: hi }, open, close));
+  }
+
+  /** Make the selection a link, or take the link off it. */
+  toggleLink(): void {
+    if (this.dirty) this.relayout();
+    const lo = Math.min(this.selStart, this.selEnd);
+    const type = this.blockTypeAt(lo);
+    if (type && VERBATIM.includes(type)) return;
+    this.applyEdit(toggleLink(this.text, { start: lo, end: Math.max(this.selStart, this.selEnd) }));
   }
 
   /** Strip inline markup from the selection. */

@@ -106,6 +106,62 @@ function wraps(text: string, start: number, end: number, open: string, close: st
   return emphasis && open.length <= 2 && before === 3 && after === 3;
 }
 
+/** Something that can only have been meant as a URL. */
+const URL_LIKE = /^(?:[a-z][a-z0-9+.-]*:\/\/|mailto:|www\.)\S+$/i;
+
+/**
+ * Make the selection a link, or take the link off it.
+ *
+ * A selection that is itself a URL becomes the destination and the caret goes
+ * to the empty label; anything else becomes the label and the caret goes to
+ * the empty destination. Either way the next thing typed is the part that is
+ * still missing.
+ */
+export function toggleLink(text: string, sel: Range): Edit {
+  const inside = linkAround(text, sel);
+  if (inside) {
+    const label = text.slice(inside.label.start, inside.label.end);
+    return {
+      from: inside.start,
+      to: inside.end,
+      insert: label,
+      select: { start: inside.start, end: inside.start + label.length },
+    };
+  }
+
+  const { start, end } = trimRange(text, sel);
+  const inner = text.slice(start, end);
+  if (URL_LIKE.test(inner)) {
+    return { from: start, to: end, insert: `[](${inner})`, select: { start: start + 1, end: start + 1 } };
+  }
+  return {
+    from: start,
+    to: end,
+    insert: `[${inner}]()`,
+    select: { start: start + inner.length + 3, end: start + inner.length + 3 },
+  };
+}
+
+/** The inline link the selection sits inside, label and all. */
+function linkAround(text: string, sel: Range): { start: number; end: number; label: Range } | null {
+  // Walk back to the `[` that could open a label containing the selection,
+  // stopping at a line break: a link's label does not span one here.
+  for (let open = sel.start; open >= 0; open--) {
+    const c = text[open];
+    if (c === "\n") break;
+    if (c !== "[" || text[open - 1] === "!" || text[open - 1] === "\\") continue;
+    const close = text.indexOf("]", open);
+    if (close < 0 || text[close + 1] !== "(") break;
+    const shut = text.indexOf(")", close);
+    if (shut < 0 || text.slice(close, shut).includes("\n")) break;
+    if (sel.start >= open && sel.end <= shut + 1) {
+      return { start: open, end: shut + 1, label: { start: open + 1, end: close } };
+    }
+    break;
+  }
+  return null;
+}
+
 /** The selection with any whitespace at its edges given back. */
 function trimRange(text: string, sel: Range): Range {
   let { start, end } = sel;
