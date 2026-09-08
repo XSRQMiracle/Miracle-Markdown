@@ -286,6 +286,23 @@ function fixture(text='aOLDz', start=4, end=1) {
   // A table row is a line, so the same command deletes it.
   assert.equal(del('| a |\n| - |\n| x |', 14, line), '| a |\n| - |', 'and a table row too');
 }
+// --- tabbing through a table ----------------------------------------------
+{
+  const TABLE = '| a | b |\n| --- | --- |\n| c | d |';
+  const tab = (at: number, shiftKey = false) => {
+    const {editor:e,event} = fixture(TABLE, at, at);
+    event('keydown', {key:'Tab', preventDefault(){}, shiftKey});
+    return [e.getText(), TABLE.slice(Math.min(e.selStart,e.selEnd), Math.max(e.selStart,e.selEnd))] as const;
+  };
+  assert.deepEqual(tab(2)[1], 'b', 'Tab selects the next cell');
+  assert.deepEqual(tab(6, true)[1], 'a', 'and Shift+Tab the one before');
+  assert.deepEqual(tab(6)[1], 'c', 'from the end of a row it wraps to the next');
+  assert.deepEqual(tab(26, true)[1], 'b', 'and back the same way');
+  assert.deepEqual(tab(2, true), [TABLE, ''], 'the first cell has nowhere to go back to');
+  // Tab out of the last cell writes another row.
+  assert.equal(tab(30)[0], TABLE + '\n|  |  |', 'a table grows by being tabbed through');
+}
+
 // --- smart punctuation ----------------------------------------------------
 {
   const typing = (text: string, start: number, end = start) => {

@@ -412,6 +412,49 @@ export class Editor {
     return edit !== null;
   }
 
+  /**
+   * Walk the cells of a table with Tab.
+   *
+   * The cell's contents are selected rather than the caret merely placed, so
+   * that typing replaces what is there — which is what makes tabbing through
+   * a table to fill it in work at all. Tab out of the last cell writes
+   * another row, so a table grows by being typed into.
+   *
+   * Returns whether it handled the key.
+   */
+  private moveCell(direction: 1 | -1): boolean {
+    if (this.dirty) this.relayout();
+    const at = this.range().start;
+    const block = this.blockAt(at);
+    if (!block || block.type !== "table") return false;
+
+    const cells = block.rows.flat();
+    if (!cells.length) return false;
+    // The delimiter row has no cells of its own, so a caret on it counts as
+    // being at the end of the header.
+    let index = -1;
+    for (let i = 0; i < cells.length; i++) if (cells[i].start <= at) index = i;
+    const next = index + direction;
+
+    if (next < 0) return true;
+    if (next >= cells.length) {
+      this.applyEdit(insertTableRow(this.text, block.end, block.rows[0]?.length ?? 1));
+      return true;
+    }
+    const cell = cells[next];
+    if (cell.text) this.select(cell.start, cell.end);
+    else {
+      // An empty cell's text sits at the end of its padding, which would put
+      // the caret hard against the closing pipe. One space in from the
+      // opening one keeps what is typed padded on both sides.
+      let from = cell.start;
+      while (from > 0 && this.text[from - 1] === " ") from--;
+      const at = Math.min(from + 1, cell.start);
+      this.select(at, at);
+    }
+    return true;
+  }
+
   /** Put a fresh table where the caret is. */
   insertTable(): void {
     if (this.blockedBlock()) return;
@@ -1561,8 +1604,10 @@ export class Editor {
         return;
       case "Tab":
         e.preventDefault();
-        // Tab is indentation where there is something to indent — a list
-        // item, or a run of lines — and a plain indent everywhere else.
+        // In a table Tab walks the cells; that is what it is for there.
+        if (this.moveCell(e.shiftKey ? -1 : 1)) return;
+        // Otherwise it is indentation where there is something to indent — a
+        // list item, or a run of lines — and a plain indent everywhere else.
         if (e.shiftKey) this.indent(-1);
         else if (!this.indentable() || !this.indent(1)) this.insert(INDENT, false);
         return;
