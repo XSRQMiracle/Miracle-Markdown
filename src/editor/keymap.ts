@@ -142,4 +142,6 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Mod+Shift+x", command: "taskList" },
   { chord: "Ctrl+Shift+k", command: "codeFence" },
   { chord: "Ctrl+Shift+m", command: "mathBlock" },
+  { chord: "Mod+]", command: "indent" },
+  { chord: "Mod+[", command: "outdent" },
 ];

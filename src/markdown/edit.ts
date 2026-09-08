@@ -309,6 +309,56 @@ export function toggleList(text: string, sel: Range, kind: ListKind): Edit | nul
   });
 }
 
+/** One level of list nesting, matching what the parser counts. */
+export const INDENT = "  ";
+/** Blockquote markers only — unlike LEAD this leaves the indentation, which
+ *  is the very thing an indent command has to move. */
+const QUOTED = /^((?:[ \t]*>[ \t]?)*)/;
+
+/**
+ * Indent or outdent the lines the selection touches.
+ *
+ * Indenting refuses on the first item of a list, as Typora does: an item with
+ * nothing above it to nest under would only be an item with too much space in
+ * front of it. Returning nothing there is what lets Tab fall through to
+ * inserting a plain indent instead.
+ *
+ * Outdenting takes a level of list indent if there is one, and otherwise a
+ * level of blockquote — the two ways a line can be nested.
+ */
+export function indentLines(text: string, sel: Range, direction: 1 | -1): Edit | null {
+  const lines = linesIn(text, sel);
+  if (direction > 0) {
+    const first = lines[0];
+    const lead = LEAD.exec(first.text)![1];
+    if (listKind(first.text.slice(lead.length)) && !hasItemAbove(text, first.start)) return null;
+    return mapLines(text, sel, (line) => {
+      if (!line.trim()) return line;
+      const at = QUOTED.exec(line)![1].length;
+      return line.slice(0, at) + INDENT + line.slice(at);
+    });
+  }
+  return mapLines(text, sel, (line) => {
+    const at = QUOTED.exec(line)![1].length;
+    const outdented = line.slice(0, at) + line.slice(at).replace(/^(?: {1,2}|\t)/, "");
+    if (outdented !== line) return outdented;
+    return line.replace(/^(\s*)>[ \t]?/, "$1");
+  });
+}
+
+/** Whether the line above is a list item this one could nest under. */
+function hasItemAbove(text: string, lineStart: number): boolean {
+  let at = lineStart;
+  while (at > 0) {
+    const stop = at - 1;
+    const from = text.lastIndexOf("\n", stop - 1) + 1;
+    const line = text.slice(from, stop);
+    if (line.trim()) return listKind(line.slice(LEAD.exec(line)![1].length)) !== null;
+    at = from;
+  }
+  return false;
+}
+
 /**
  * Quote the lines the selection touches, or unquote them.
  *

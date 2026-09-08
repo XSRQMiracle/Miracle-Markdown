@@ -233,4 +233,18 @@ function fixture(text='aOLDz', start=4, end=1) {
   f.key({key:'b', metaKey:true});
   assert.deepEqual(f.state(), ['```\ncode\n```', 4, 8], 'a code fence is left alone');
 }
+// --- indentation ----------------------------------------------------------
+{
+  const tab = (text: string, start: number, end = start, shiftKey = false) => {
+    const {editor:e,event} = fixture(text, start, end);
+    event('keydown', {key:'Tab', preventDefault(){}, shiftKey});
+    return e.getText();
+  };
+  assert.equal(tab('- a\n- b', 7), '- a\n  - b', 'Tab nests a list item');
+  assert.equal(tab('- a', 3), '- a  ', 'but on the first item it writes an indent');
+  assert.equal(tab('plain', 5), 'plain  ', 'and in a paragraph it always does');
+  assert.equal(tab('a\nb', 0, 3), '  a\n  b', 'a selected run of lines indents together');
+  assert.equal(tab('  a\n  b', 0, 7, true), 'a\nb', 'and Shift+Tab brings it back');
+  assert.equal(tab('- a\n  - b', 9, 9, true), '- a\n- b', 'Shift+Tab outdents an item');
+}
 console.log('all editor transaction tests passing');

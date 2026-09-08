@@ -37,7 +37,9 @@ export type CommandId =
   | "orderedList"
   | "taskList"
   | "codeFence"
-  | "mathBlock";
+  | "mathBlock"
+  | "indent"
+  | "outdent";
 
 export interface Command {
   /** Menu label. */
@@ -78,4 +80,6 @@ export const COMMANDS: Record<CommandId, Command> = {
   taskList: { label: "任务列表", run: (e) => e.toggleList("task") },
   codeFence: { label: "代码块", run: (e) => e.toggleFenced("code") },
   mathBlock: { label: "公式块", run: (e) => e.toggleFenced("math") },
+  indent: { label: "增加缩进", run: (e) => e.indent(1) },
+  outdent: { label: "减少缩进", run: (e) => e.indent(-1) },
 };

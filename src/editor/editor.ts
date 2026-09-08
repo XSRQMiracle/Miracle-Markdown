@@ -35,6 +35,8 @@ import { BINDINGS, commandFor } from "./keymap.js";
 import { COMMANDS, type CommandId } from "./commands.js";
 import {
   clearFormat,
+  indentLines,
+  INDENT,
   setHeading,
   stepHeading,
   toggleInline,
@@ -326,12 +328,28 @@ export class Editor {
     this.applyEdit(wrapFenced(this.text, this.range(), fence, fence));
   }
 
+  /** Indent or outdent the lines the selection touches. */
+  indent(direction: 1 | -1): boolean {
+    if (this.blockedBlock()) return false;
+    const edit = indentLines(this.text, this.range(), direction);
+    this.applyEdit(edit);
+    return edit !== null;
+  }
+
   /** The selection, low end first. */
   private range(): { start: number; end: number } {
     return {
       start: Math.min(this.selStart, this.selEnd),
       end: Math.max(this.selStart, this.selEnd),
     };
+  }
+
+  /** Whether Tab should indent rather than write spaces: a run of lines is
+   *  selected, or the caret sits in a list. */
+  private indentable(): boolean {
+    const { start, end } = this.range();
+    if (this.text.slice(start, end).includes("\n")) return true;
+    return this.blockTypeAt(start) === "list";
   }
 
   /** Whether the caret sits in a block whose text is taken literally, where a
@@ -1343,7 +1361,10 @@ export class Editor {
         return;
       case "Tab":
         e.preventDefault();
-        this.insert("  ", false);
+        // Tab is indentation where there is something to indent — a list
+        // item, or a run of lines — and a plain indent everywhere else.
+        if (e.shiftKey) this.indent(-1);
+        else if (!this.indentable() || !this.indent(1)) this.insert(INDENT, false);
         return;
     }
   }

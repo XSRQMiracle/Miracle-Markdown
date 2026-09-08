@@ -5,7 +5,7 @@
 // selection with a space on the end, markup already there, a formula caught in
 // the middle — cheap to pin down.
 import assert from "node:assert/strict";
-import { clearFormat, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote, unwrapFenced, wrapFenced } from "../src/markdown/edit.js";
+import { clearFormat, indentLines, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote, unwrapFenced, wrapFenced } from "../src/markdown/edit.js";
 
 let failures = 0;
 function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
@@ -136,6 +136,23 @@ assert.equal(list("a\n\nb", "ordered"), "1. a\n\n2. b", "blank lines are left al
 assert.equal(list("7) x", "ordered"), "x", "an existing number is a list already, so it toggles off");
 assert.equal(list("- a\n2. b", "ordered"), "1. a\n2. b", "a half-numbered range is numbered from one");
 assert.equal(toggleList("", { start: 0, end: 0 }, "bullet"), null, "an empty line is nothing to list");
+
+// --- indentation ----------------------------------------------------------
+const shift = (text: string, dir: 1 | -1, start = 0, end = text.length) =>
+  apply(text, indentLines(text, { start, end }, dir));
+assert.equal(shift("- a\n- b", 1, 4, 4), "- a\n  - b", "an item nests under the one above it");
+assert.equal(shift("- a\n  - b", -1, 6, 6), "- a\n- b", "and comes back out");
+assert.equal(indentLines("- a", { start: 0, end: 0 }, 1), null,
+  "the first item of a list has nothing to nest under");
+assert.equal(indentLines("text\n- a", { start: 5, end: 5 }, 1), null, "nor does one under a paragraph");
+assert.equal(shift("- a\n- b\n- c", 1, 4, 11), "- a\n  - b\n  - c", "a run of items moves together");
+assert.equal(shift("plain", 1), "  plain", "a plain line simply indents");
+assert.equal(shift("  plain", -1), "plain");
+assert.equal(shift("\tplain", -1), "plain", "a tab counts as one level");
+assert.equal(shift("> - a\n> - b", 1, 6, 6), "> - a\n>   - b", "inside a quote the marker stays put");
+assert.equal(shift("> a", -1), "a", "with nothing else to give back, a quote level goes");
+assert.equal(shift("a\n\nb", 1), "  a\n\n  b", "blank lines are left alone");
+assert.equal(indentLines("a", { start: 0, end: 0 }, -1), null, "and an unindented line cannot outdent");
 
 // --- blockquote -----------------------------------------------------------
 const quote = (text: string, start = 0, end = text.length) => apply(text, toggleQuote(text, { start, end }));
