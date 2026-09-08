@@ -850,8 +850,14 @@ function stripPerLine(b: Block, marker: RegExp, options: InlineOptions): Rendere
       // characters is how the author wrapped the file, not a space.
       const next = lines[n + 1].replace(marker, "");
       const before = text.length ? text[text.length - 1] : "";
-      const wide = isWide(before) || isWide(next.charAt(0));
-      if (!options.cjkSoftBreaks || !wide) {
+      if (options.softBreak === "break") {
+        text += LINE_SEPARATOR;
+        map.push(at - 1);
+        return;
+      }
+      const wide = options.softBreak === "smart" &&
+        (isWide(before) || isWide(next.charAt(0)));
+      if (!wide) {
         text += " ";
         map.push(at - 1);
       }
@@ -951,22 +957,27 @@ export interface InlineOptions {
    */
   strictDollar: boolean;
   /**
-   * Drop a source line break that touches a CJK character, instead of turning
-   * it into a space.
+   * What a single line break inside a paragraph means.
    *
-   * CommonMark says a newline inside a paragraph is a space, which is right
-   * for scripts that separate words with one and wrong for Chinese and
-   * Japanese, where a line break in the source is only how the author chose
-   * to wrap the file. Leave it on and a paragraph reads the same however it
-   * is wrapped; turn it off for CommonMark's literal behaviour.
+   * The three answers that exist, because implementations genuinely disagree:
+   *
+   *  - "space" is CommonMark's: the newline is a space. Right for scripts
+   *    that separate words with one.
+   *  - "break" is Typora's default: the newline is a line break, and the
+   *    paragraph is laid out the way it was typed.
+   *  - "smart" is this editor's, and the default: a space, except where the
+   *    break touches a wide character, where it is dropped outright. A
+   *    Chinese paragraph then reads the same however the file is wrapped,
+   *    which is what the author meant by wrapping it.
    *
    * Pandoc's `east_asian_line_breaks` drops the newline only when the
-   * characters on *both* sides are wide. We drop it when *either* side is,
-   * because we also insert the quarter em between Han and Latin ourselves: on
-   * a boundary like "意思；\n`\eqref`" Pandoc's rule leaves a space that the
-   * mixed-script spacing then widens further, and the gap reads as a mistake.
+   * characters on *both* sides are wide. "smart" drops it when *either* side
+   * is, because this editor also inserts the quarter em between Han and Latin
+   * itself: on a boundary like "意思；\n`\eqref`" Pandoc's rule leaves a space
+   * that the mixed-script spacing then widens further, and the gap reads as a
+   * mistake.
    */
-  cjkSoftBreaks: boolean;
+  softBreak: "space" | "break" | "smart";
 }
 
 export const DEFAULT_INLINE_OPTIONS: InlineOptions = {
@@ -977,7 +988,7 @@ export const DEFAULT_INLINE_OPTIONS: InlineOptions = {
   inlineMath: true,
   texDelimiters: true,
   strictDollar: true,
-  cjkSoftBreaks: true,
+  softBreak: "smart",
 };
 
 /** One level of an in-progress list, for numbering ordered items. */
@@ -1459,7 +1470,12 @@ export function parseInline(
       const before = text.length ? text[text.length - 1] : "";
       const after = nextEmitted(j);
       const redundant = before === "" || before === " ";
-      const wide = options.cjkSoftBreaks && (isWide(before) || isWide(after));
+      if (options.softBreak === "break") {
+        if (text.length) emit(LINE_SEPARATOR, k, unformatted);
+        k = j - 1;
+        continue;
+      }
+      const wide = options.softBreak === "smart" && (isWide(before) || isWide(after));
       if (!redundant && !wide) emit(" ", k, unformatted);
       k = j - 1;
       continue;

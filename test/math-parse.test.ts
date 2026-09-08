@@ -202,8 +202,9 @@ eq(rendered("`\\$x\\$`"), "\\$x\\$", "code spans keep escaped-looking math delim
 // Chinese in Markdown.
 // ---------------------------------------------------------------------------
 
-const cjkOn = { ...strict, cjkSoftBreaks: true };
-const cjkOff = { ...strict, cjkSoftBreaks: false };
+const cjkOn = { ...strict, softBreak: "smart" as const };
+const cjkOff = { ...strict, softBreak: "space" as const };
+const literal = { ...strict, softBreak: "break" as const };
 
 eq(rendered("中文一行\n中文二行", cjkOn), "中文一行中文二行", "a break between Han characters vanishes");
 eq(rendered("中文一行\n中文二行", cjkOff), "中文一行 中文二行", "and becomes a space when the rule is off");
@@ -213,6 +214,11 @@ eq(rendered("意思；\n继续", cjkOn), "意思；继续", "including the fullw
 // Latin text still needs its space — this is the case the rule must not break.
 eq(rendered("one two\nthree four", cjkOn), "one two three four", "Latin keeps its space");
 eq(rendered("end.\nStart", cjkOn), "end. Start", "including across a sentence boundary");
+
+// Typora's own default is the third answer: the newline is a line break, and
+// the paragraph is laid out the way it was typed.
+eq(rendered("中文一行\n中文二行", literal), "中文一行\u2028中文二行", "or the break is kept as one");
+eq(rendered("one two\nthree", literal), "one two\u2028three", "in Latin as well");
 
 // A boundary with CJK on one side only. Dropping the break is right here
 // because the quarter em of mixed-script spacing is inserted separately; a

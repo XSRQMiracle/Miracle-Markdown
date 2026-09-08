@@ -76,15 +76,6 @@ async function main() {
   const TOGGLES: Toggle[] = [
     ...TOGGLE_DEFS.map((t) => flag(t.key, t.label, t.hint)),
     {
-      label: "中文软换行",
-      hint:
-        "源码里段落中间的换行，在中文上下文中不产生空格。CommonMark 规定换行等于一个空格，" +
-        "这对以空格分词的文字是对的，对中文是错的——那个换行只是作者折行的方式。" +
-        "关闭后回到 CommonMark 的字面行为。",
-      get: (e) => e.options.inline.cjkSoftBreaks,
-      set: (e, on) => e.setOptions({ inline: { ...e.options.inline, cjkSoftBreaks: on } }),
-    },
-    {
       label: "智能标点",
       hint:
         "键盘上只有一个竖直引号和一个连字符，而排版需要区分它们。开启后输入时直接替换为" +

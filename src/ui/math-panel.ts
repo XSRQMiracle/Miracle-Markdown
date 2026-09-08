@@ -47,6 +47,28 @@ export function buildMathPanel(
   // the bullet its author typed, and so it does here.
   const choices: Array<{ title: string; rows: Choice[] }> = [
     {
+      title: "空格与换行",
+      rows: [
+        {
+          label: "段内单个换行",
+          hint:
+            "源码里段落中间的一个换行算什么。CommonMark 说算一个空格；Typora 默认原样换行；" +
+            "「中文感知」是本编辑器的默认：算空格，但换行紧邻宽字符时直接丢掉 —— " +
+            "中文段落于是无论文件怎么折行，读起来都一样。",
+          options: [
+            ["smart", "中文感知（推荐）"],
+            ["space", "算一个空格（CommonMark）"],
+            ["break", "原样换行（Typora）"],
+          ],
+          get: () => editor.options.inline.softBreak,
+          set: (v) =>
+            editor.setOptions({
+              inline: { ...editor.options.inline, softBreak: v as "space" | "break" | "smart" },
+            }),
+        },
+      ],
+    },
+    {
       title: "Markdown 语法偏好",
       rows: [
         {
