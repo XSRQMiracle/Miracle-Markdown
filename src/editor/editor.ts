@@ -1762,6 +1762,7 @@ export class Editor {
     if (type && VERBATIM.includes(type)) return false;
 
     if (lo !== hi) {
+      if (!this.editingOptions.autoPairMarkdown) return false;
       const smart = this.editingOptions.smartPunctuation ? smartPair(ch) : null;
       if (smart) {
         this.replace(lo, hi, smart[0] + this.text.slice(lo, hi) + smart[1], false);
@@ -1776,6 +1777,8 @@ export class Editor {
       this.select(lo + ch.length, hi + ch.length);
       return true;
     }
+
+    if (!this.editingOptions.autoPairBrackets) return false;
 
     if (CLOSERS.has(ch) && this.text[lo] === ch) {
       this.moveTo(lo + 1, false);
@@ -1916,6 +1919,10 @@ export interface EditingOptions {
   smartPunctuation: boolean;
   /** How the editor writes the markdown its commands generate. */
   writing: WritingStyle;
+  /** Close a bracket, a quote or a backtick as it is typed. */
+  autoPairBrackets: boolean;
+  /** Let a markdown delimiter typed over a selection wrap it. */
+  autoPairMarkdown: boolean;
   /** Show the whole document as markdown source rather than typeset. */
   sourceMode: boolean;
   /** Veil everything but the line being written. */
@@ -1926,6 +1933,8 @@ export interface EditingOptions {
 
 export const DEFAULT_EDITING_OPTIONS: EditingOptions = {
   smartPunctuation: true,
+  autoPairBrackets: true,
+  autoPairMarkdown: true,
   writing: { ...DEFAULT_WRITING_STYLE },
   sourceMode: false,
   focusMode: false,

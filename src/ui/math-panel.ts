@@ -105,6 +105,25 @@ export function buildMathPanel(
 
   const groups: Array<{ title: string; checks: Check[] }> = [
     {
+      title: "成对符号",
+      checks: [
+        {
+          label: "自动补全括号与引号",
+          hint: "键入 ( [ { ` 时补上另一半，键入右半时跨过已有的那个。",
+          get: () => editor.editing.autoPairBrackets,
+          set: (on) => editor.setEditing({ autoPairBrackets: on }),
+        },
+        {
+          label: "选中后键入符号即包裹",
+          hint:
+            "选中一段文字再键入 * ` _ ~ $ 或引号，就用它把选中的文字包起来 —— " +
+            "这是意图唯一明确的情形，所以接受的符号也最宽。",
+          get: () => editor.editing.autoPairMarkdown,
+          set: (on) => editor.setEditing({ autoPairMarkdown: on }),
+        },
+      ],
+    },
+    {
       title: "Markdown 扩展语法",
       checks: [
         {
