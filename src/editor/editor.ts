@@ -26,6 +26,8 @@ import { listItemMarker, sourceRangeOwnsPosition, type BlockType } from "../mark
 import { normalizeLineEndings } from "../markdown/document.js";
 import { wordAt, wordBoundary } from "./words.js";
 import { compileSearch, expandReplacement, findMatches, type Match, type SearchQuery } from "./search.js";
+import { BINDINGS, commandFor } from "./keymap.js";
+import { COMMANDS, type CommandId } from "./commands.js";
 import {
   DEFAULT_OPTIONS,
   DEFAULT_THEME,
@@ -220,6 +222,13 @@ export class Editor {
 
   getText(): string {
     return this.text;
+  }
+
+  selectAll(): void {
+    this.lastEditAt = -Infinity;
+    this.selStart = 0;
+    this.selEnd = this.text.length;
+    this.invalidate();
   }
 
   /** The selected source text, for seeding a search with it. */
@@ -797,7 +806,12 @@ export class Editor {
     this.replace(lo, hi, s, coalesce && lo === hi);
   }
 
-  private undo(): void {
+  /** Run a command by name. Public so a toolbar or a test can reach it. */
+  run(id: CommandId): void {
+    COMMANDS[id].run(this);
+  }
+
+  undo(): void {
     this.lastEditAt = -Infinity;
     const snap = this.undoStack.pop();
     if (!snap) return;
@@ -810,7 +824,7 @@ export class Editor {
     this.invalidate();
   }
 
-  private redo(): void {
+  redo(): void {
     this.lastEditAt = -Infinity;
     const snap = this.redoStack.pop();
     if (!snap) return;
@@ -1110,25 +1124,20 @@ export class Editor {
   private onKeyDown(e: KeyboardEvent): void {
     if (this.composing || e.isComposing) return;
     if (!e.metaKey && !e.ctrlKey) this.interacted = true;
-    const mod = e.metaKey || e.ctrlKey;
     const lo = Math.min(this.selStart, this.selEnd);
     const hi = Math.max(this.selStart, this.selEnd);
 
-    if (mod && e.key.toLowerCase() === "z") {
+    const apple = applePlatform();
+
+    // The bound commands come first: some of them claim keys that would
+    // otherwise be ordinary editing (Tab in a list, ⌥↑ on a block).
+    const command = commandFor(e, BINDINGS, apple);
+    if (command) {
       e.preventDefault();
-      e.shiftKey ? this.redo() : this.undo();
-      return;
-    }
-    if (mod && e.key === "a") {
-      e.preventDefault();
-      this.lastEditAt = -Infinity;
-      this.selStart = 0;
-      this.selEnd = this.text.length;
-      this.invalidate();
+      this.run(command);
       return;
     }
 
-    const apple = applePlatform();
     const byWord = apple ? e.altKey : e.ctrlKey && !e.altKey;
     const byLine = apple && e.metaKey;
     const byDocument = apple ? e.metaKey : e.ctrlKey;
