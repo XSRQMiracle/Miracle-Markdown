@@ -19,10 +19,12 @@ import {
   type TextStyle,
 } from "./measure.js";
 import { renderMath, renderMathSegments } from "./mathjax.js";
+import { fitImage, requestImage, type ImageStatus } from "./images.js";
 import { sourceLineEnds } from "./source-layout.js";
 import type { MathGeometry, MathSegment } from "./math.js";
 import {
   parseBlocks,
+  parseInline,
   blockIndexAtPosition,
   fenceCloser,
   renderBlock,
@@ -32,6 +34,7 @@ import {
   type Block,
   type RenderedBlock,
   type Span,
+  type ColumnAlign,
 } from "../markdown/parse.js";
 
 export interface Theme {
@@ -134,11 +137,55 @@ export interface MathRun {
   segment?: MathSegment;
 }
 
-/** One placeholder's worth of formula: its box and how it may break. */
-interface MathPiece extends MathRun {
+/** A picture, ready to draw. */
+export interface ImageRun {
+  source: CanvasImageSource | null;
+  /** Drawn size in CSS pixels, already fitted to the measure. */
+  width: number;
+  height: number;
+  status: ImageStatus;
+  src: string;
+  alt: string;
+  /** Measured alt-text presentation while loading or after a failure. */
+  fallback?: { text: string; style: TextStyle };
+}
+
+/**
+ * One placeholder's worth of content: its box, how it may break, and which
+ * kind of object it stands for. The line breaker reads only the box; the
+ * discriminator is for the renderer.
+ */
+interface ObjectBox {
+  width: number;
+  height: number;
+  depth: number;
   /** TeX's penalty for breaking after this piece; NaN when it may not. */
   penaltyAfter: number;
 }
+
+interface MathPiece extends MathRun, ObjectBox {
+  kind: "math";
+}
+
+interface ImagePiece extends ObjectBox {
+  kind: "image";
+  image: ImageRun;
+}
+
+/** A footnote's raised number, at the reference or before its definition. */
+export interface NoteRun {
+  text: string;
+  style: TextStyle;
+  /** How far above the baseline the number sits. */
+  raise: number;
+}
+
+interface NotePiece extends ObjectBox {
+  kind: "note";
+  note: NoteRun;
+}
+
+type ObjectPiece = MathPiece | ImagePiece | NotePiece;
 
 export interface LaidRun {
   x: number;
@@ -155,6 +202,10 @@ export interface LaidRun {
   synthetic: boolean;
   /** Present on a run that draws a formula rather than text. */
   math?: MathRun;
+  /** Present on a run that draws a picture rather than text. */
+  image?: ImageRun;
+  /** Present on a run that draws a footnote's raised number. */
+  note?: NoteRun;
 }
 
 export interface LaidLine {
@@ -187,6 +238,21 @@ export interface LaidBlock {
   indent: number;
   marker: string;
   raw: boolean;
+  /** Column geometry, so the renderer can draw the rules a table needs. */
+  table?: TableLayout;
+  /** A footnote definition's own number, drawn before its text. */
+  note?: NoteRun;
+}
+
+/** Where a table's columns sit, and which lines begin each row. */
+export interface TableLayout {
+  columns: number;
+  /** Left edge of each column, relative to the block's indent. */
+  x: number[];
+  widths: number[];
+  /** Index into `lines` at which each row starts. */
+  rowStarts: number[];
+  padding: number;
 }
 
 // These are kept as sources rather than as shared RegExp objects on purpose.
@@ -275,8 +341,35 @@ mode: TypesetOptions["numbering"],
   // Derived from the resolved values, so a block holding a reference
   // re-typesets exactly when the number it cites moves — and not when some
   // unrelated paragraph is edited.
-  const version = [...labels].map(([k, v]) => k + "=" + v).join(",");
-  return { tags, labels, version };
+  const notes = numberFootnotes(parsed);
+  const version = [...labels].map(([k, v]) => k + "=" + v).join(",") +
+    "|" + [...notes].map(([k, v]) => k + "=" + v).join(",");
+  return { tags, labels, notes, version };
+}
+
+/**
+ * Number the footnotes.
+ *
+ * By first reference rather than by where the definitions sit, which is the
+ * convention every typesetter follows: a reader meets the marks in reading
+ * order, so 1 must be the first one they see. A definition nobody cites still
+ * earns a number, at the end, so that editing it is not confusing.
+ */
+function numberFootnotes(parsed: Block[]): Map<string, string> {
+  const notes = new Map<string, string>();
+  const reference = new RegExp(String.raw`\[\^([^\]\s]+)\]`, "g");
+  for (const block of parsed) {
+    if (block.type === "footnote") continue;
+    for (const match of block.source.matchAll(reference)) {
+      if (!notes.has(match[1])) notes.set(match[1], String(notes.size + 1));
+    }
+  }
+  for (const block of parsed) {
+    if (block.type === "footnote" && block.label && !notes.has(block.label)) {
+      notes.set(block.label, String(notes.size + 1));
+    }
+  }
+  return notes;
 }
 
 /**
@@ -317,6 +410,8 @@ export interface Numbering {
   tags: Map<number, string>;
   /** Label to the number it resolves to. */
   labels: Map<string, string>;
+  /** Footnote label to its number, in order of first reference. */
+  notes: Map<string, string>;
   /** Changes exactly when some label's number changes. */
   version: string;
 }
@@ -374,7 +469,11 @@ function styleForSpan(
   span: Span | null,
 ): { style: TextStyle; key: string } {
   const heading = block.type === "heading";
-  const code = block.type === "code" || span?.code;
+  const code =
+    block.type === "code" ||
+    block.type === "frontmatter" ||
+    block.type === "html" ||
+    span?.code;
 
   let size = theme.bodySize;
   if (heading) {
@@ -382,6 +481,10 @@ function styleForSpan(
     size = Math.round(theme.bodySize * scale);
   } else if (code) {
     size = Math.round(theme.bodySize * 0.88);
+  } else if (block.type === "footnote") {
+    // A note is an aside. Sizing it here rather than shrinking the finished
+    // runs means a formula inside one is measured at the size it is drawn.
+    size = Math.round(theme.bodySize * 0.86);
   }
 
   const family = code
@@ -393,7 +496,9 @@ function styleForSpan(
   const italic = !!span?.em;
   const color = span?.href
     ? theme.accentColor
-    : block.type === "quote"
+    // Front matter is the document's metadata rather than its prose, so it is
+    // set back like a quotation instead of competing with the opening line.
+    : block.type === "quote" || block.type === "frontmatter" || block.type === "footnote"
       ? theme.mutedColor
       : theme.color;
 
@@ -406,6 +511,14 @@ function styleForSpan(
     lineHeight: heading ? 1.35 : code ? 1.55 : theme.lineHeight,
   };
   return { style, key: cssFont(style) };
+}
+
+/** How far into its column a line sits, given the column's alignment. */
+function alignmentOffset(align: ColumnAlign, lineWidth: number, columnWidth: number): number {
+  const slack = Math.max(0, columnWidth - lineWidth);
+  if (align === "right") return slack;
+  if (align === "center") return slack / 2;
+  return 0;
 }
 
 /** Extra space above a block, in pixels. TeX's vertical glue. */
@@ -485,7 +598,8 @@ export class Typesetter {
     if (doc.endsWith("\n") && parsed.at(-1)?.end !== doc.length) {
       parsed.push({
         type: "blank", start: doc.length, end: doc.length, source: "",
-        level: 0, ordered: false, marker: "", lang: "", math: "",
+        level: 0, ordered: false, marker: "", lang: "", math: "", task: "none",
+        rows: [], align: [], label: "",
       });
     }
     const focusedBlock = blockIndexAtPosition(parsed, focusedPosition);
@@ -560,6 +674,15 @@ export class Typesetter {
           : 0;
     const measure = Math.max(width - indent, theme.bodySize * 4);
 
+    if (block.type === "footnote") {
+      const laid = this.buildFootnote(block, rendered, spaceBefore, measure, indent, numbering);
+      if (laid) return laid;
+    }
+
+    if (block.type === "table") {
+      return this.buildTable(block, rendered, spaceBefore, measure, indent, raw, numbering);
+    }
+
     if (block.type === "math") {
       return this.buildDisplayMath(
         block,
@@ -588,7 +711,9 @@ export class Typesetter {
 
     // Code keeps its own line structure: breaking it optimally would be
     // actively wrong.
-    if (block.type === "code") {
+    // Both keep their own line structure: breaking either optimally would be
+    // actively wrong.
+    if (block.type === "code" || block.type === "frontmatter" || block.type === "html") {
       return this.buildPreformatted(block, rendered, spaceBefore, indent, raw);
     }
 
@@ -703,6 +828,186 @@ export class Typesetter {
       indent,
       marker: "",
       raw: false,
+    };
+  }
+
+  /**
+   * Lay out a table.
+   *
+   * Each cell is broken as a paragraph of its own at its column's width, so
+   * everything the engine already does inside a paragraph — optimal breaking,
+   * mixed-script spacing, formulas — works inside a cell without a second
+   * implementation. A row is then as tall as its deepest cell, and the row's
+   * lines are ordinary lines whose runs happen to sit at column offsets. Hit
+   * testing, selection and the caret need no special case.
+   */
+  private buildTable(
+    block: Block,
+    rendered: RenderedBlock,
+    spaceBefore: number,
+    measure: number,
+    indent: number,
+    raw: boolean,
+    numbering: Numbering,
+  ): LaidBlock {
+    const theme = this.theme;
+    const columns = block.align.length;
+    if (!columns || !block.rows.length) {
+      return this.buildPreformatted(block, rendered, spaceBefore, indent, raw);
+    }
+
+    const base = styleForSpan(theme, block, null);
+    const padding = theme.bodySize * 0.7;
+    const cells = block.rows.map((row, r) =>
+      Array.from({ length: columns }, (_, c) => {
+        const cell = row[c];
+        if (!cell) return null;
+        const inline = parseInline(cell.text, cell.start, undefined, this.options.inline);
+        // The header is set bold. Marking the spans rather than the block
+        // keeps one style resolver for every kind of run.
+        return r === 0
+          ? { ...inline, spans: inline.spans.map((span) => ({ ...span, strong: true })) }
+          : inline;
+      }),
+    );
+
+    // A column is as wide as its widest cell wants to be, then every column
+    // is scaled back together if the table overflows. Scaling proportionally
+    // rather than clipping keeps a wide column wide.
+    // The header is set bold, so it has to be measured bold: sizing a column
+    // from the lighter face makes the heading it was sized for wrap.
+    const header = styleForSpan(theme, block, {
+      kind: "text", start: 0, end: 0,
+      strong: true, em: false, code: false, strike: false, href: "",
+    });
+    const natural = Array.from({ length: columns }, (_, c) =>
+      Math.max(
+        ...cells.map((row, r) => {
+          const cell = row[c];
+          if (!cell) return 0;
+          const style = r === 0 ? header : base;
+          return this.measurer.width(cell.text, style.style, style.key);
+        }),
+        theme.bodySize,
+      ),
+    );
+    const available = Math.max(measure - padding * (columns - 1), theme.bodySize * columns);
+    const total = natural.reduce((a, b) => a + b, 0);
+    const widths = total <= available
+      ? natural
+      : natural.map((w) => (w / total) * available);
+
+    const x: number[] = [];
+    for (let c = 0, at = 0; c < columns; c++) {
+      x.push(at);
+      at += widths[c] + padding;
+    }
+
+    const lines: LaidLine[] = [];
+    const rowStarts: number[] = [];
+    let y = 0;
+    for (let r = 0; r < cells.length; r++) {
+      rowStarts.push(lines.length);
+      const broken = cells[r].map((cell, c) =>
+        cell && cell.text
+          ? this.breakParagraph(block, cell, widths[c], 0, numbering)
+          : [],
+      );
+      const depth = Math.max(1, ...broken.map((l) => l.length));
+      for (let k = 0; k < depth; k++) {
+        const runs: LaidRun[] = [];
+        let height = base.style.size * 0.8;
+        let lineDepth = base.style.size * 0.2;
+        for (let c = 0; c < columns; c++) {
+          const line = broken[c][k];
+          if (!line) continue;
+          height = Math.max(height, line.height);
+          lineDepth = Math.max(lineDepth, line.depth);
+          const shift = x[c] + alignmentOffset(block.align[c], line.width, widths[c]);
+          for (const run of line.runs) runs.push({ ...run, x: run.x + shift });
+        }
+        // Rows stack on their own rhythm rather than the paragraph breaker's,
+        // since each cell was broken in isolation and knows nothing of its
+        // neighbours' depth.
+        y += k === 0 ? height : height + theme.bodySize * 0.25;
+        lines.push({
+          docStart: lines.length ? lines[lines.length - 1].docEnd : block.start,
+          docEnd: block.end,
+          baseline: y,
+          height,
+          depth: lineDepth,
+          runs,
+          ratio: 0,
+          width: measure,
+          indent,
+        });
+        y += lineDepth;
+      }
+      y += theme.bodySize * 0.55;
+    }
+
+    return {
+      block,
+      lines,
+      height: spaceBefore + y,
+      spaceBefore,
+      y: 0,
+      rendered,
+      indent,
+      marker: "",
+      raw,
+      table: { columns, x, widths, rowStarts, padding },
+    };
+  }
+
+  /**
+   * A footnote definition: its text, indented, with its number in the margin.
+   *
+   * The definition stays where the author wrote it rather than being gathered
+   * at the foot of the document. Moving blocks would break the one invariant
+   * the editor rests on — that a block's source range is contiguous and covers
+   * the caret — and in a live editor a note that leaps away as you type it is
+   * worse than one that sits in place.
+   */
+  private buildFootnote(
+    block: Block,
+    rendered: RenderedBlock,
+    spaceBefore: number,
+    measure: number,
+    indent: number,
+    numbering: Numbering,
+  ): LaidBlock | null {
+    const theme = this.theme;
+    const base = styleForSpan(theme, block, null);
+    const marker = this.buildNotePiece(numbering.notes.get(block.label) ?? "?", base.style);
+    const gutter = theme.bodySize * 1.4;
+    const lines = this.breakParagraph(
+      block,
+      rendered,
+      Math.max(measure - gutter, theme.bodySize * 4),
+      indent,
+      numbering,
+    );
+    if (!lines.length) return null;
+
+    // Only the horizontal shift is applied here; the size and colour came
+    // from the style resolver, so every run already agrees with its box.
+    const shifted = lines.map((line) => ({
+      ...line,
+      runs: line.runs.map((run) => ({ ...run, x: run.x + gutter })),
+    }));
+    const last = shifted[shifted.length - 1];
+    return {
+      block,
+      lines: shifted,
+      height: spaceBefore + last.baseline + last.depth,
+      spaceBefore,
+      y: 0,
+      rendered,
+      indent,
+      marker: "",
+      raw: false,
+      note: marker.note,
     };
   }
 
@@ -841,17 +1146,18 @@ export class Typesetter {
    * clicking anywhere in a formula puts the caret at its opening delimiter and
    * reveals the source, however the formula happens to be split at the time.
    */
-  private expandMath(
+  private expandObjects(
     rendered: RenderedBlock,
     style: TextStyle,
     key: string,
     numbering: Numbering,
-  ): { rendered: RenderedBlock; pieces: Map<number, MathPiece> } {
+    measure: number,
+  ): { rendered: RenderedBlock; pieces: Map<number, ObjectPiece> } {
     if (!rendered.text.includes(OBJECT_REPLACEMENT)) {
       return { rendered, pieces: new Map() };
     }
 
-    const pieces = new Map<number, MathPiece>();
+    const pieces = new Map<number, ObjectPiece>();
     let text = "";
     const map: number[] = [];
     // Where each original character ended up, so spans can be moved with it.
@@ -864,7 +1170,12 @@ export class Typesetter {
         map.push(rendered.map[i]);
         continue;
       }
-      const built = this.buildMathPieces(rendered, i, style, key, numbering);
+      const span = rendered.spans.find((s) => i >= s.start && i < s.end);
+      const built: ObjectPiece[] = span?.kind === "image"
+        ? [this.buildImagePiece(span, style, measure)]
+        : span?.kind === "note"
+          ? [this.buildNotePiece(numbering.notes.get(span.label ?? "") ?? "?", style)]
+          : this.buildMathPieces(rendered, i, style, key, numbering);
       for (const piece of built) {
         pieces.set(text.length, piece);
         text += OBJECT_REPLACEMENT;
@@ -909,7 +1220,7 @@ export class Typesetter {
     const common = this.mathRun(geometry, latex, display, style);
     let built: MathPiece[];
     if (common.fallback || segments.length < 2) {
-      built = [{ ...common, penaltyAfter: NaN }];
+      built = [{ ...common, kind: "math", penaltyAfter: NaN }];
     } else {
       // Every piece is given the whole formula's height and depth. That is
       // conservative — a piece with no tall part gets more leading than it
@@ -918,6 +1229,7 @@ export class Typesetter {
       // anyway.
       built = segments.map((segment) => ({
         ...common,
+        kind: "math" as const,
         segment,
         width: segment.width * common.scale,
         penaltyAfter: segment.penaltyAfter ?? NaN,
@@ -930,6 +1242,77 @@ export class Typesetter {
   }
 
   private pieceCache = new Map<string, MathPiece[]>();
+
+  /**
+   * A footnote's raised number.
+   *
+   * Set smaller and lifted rather than drawn at full size on the baseline: a
+   * mark that reads as part of the sentence would be mistaken for content.
+   * The box reserves the lifted height, so the line above stays clear.
+   */
+  private buildNotePiece(text: string, style: TextStyle): NotePiece {
+    const raised: TextStyle = { ...style, size: Math.max(8, style.size * 0.68) };
+    const key = cssFont(raised);
+    const raise = style.size * 0.36;
+    const v = this.vmetrics(raised, key);
+    return {
+      kind: "note",
+      width: this.measurer.width(text, raised, key),
+      height: v.ascent + raise,
+      depth: Math.max(0, v.descent - raise),
+      penaltyAfter: NaN,
+      note: { text, style: raised, raise },
+    };
+  }
+
+  /**
+   * Lay out a picture.
+   *
+   * The intrinsic size arrives asynchronously, so the box is whatever is known
+   * now: the alt text while the file decodes or after it fails, the fitted
+   * picture once it is there. `onImageSettled` re-typesets when that changes,
+   * which is the same handshake the math bridge uses while MathJax loads.
+   *
+   * An image sits on the baseline rather than straddling it, as a browser
+   * places one, so the line above is never encroached upon.
+   */
+  private buildImagePiece(span: Span, style: TextStyle, measure: number): ImagePiece {
+    const src = span.href ?? "";
+    const alt = span.alt ?? "";
+    const loaded = requestImage(src);
+    const key = cssFont(style);
+
+    if (loaded.status !== "ready" || loaded.width <= 0) {
+      const text = alt || (loaded.status === "error" ? "\u26a0 " + src : src);
+      const v = this.vmetrics(style, key);
+      return {
+        kind: "image",
+        width: this.measurer.width(text, style, key),
+        height: v.ascent,
+        depth: v.descent,
+        penaltyAfter: NaN,
+        image: {
+          source: null,
+          width: 0,
+          height: 0,
+          status: loaded.status,
+          src,
+          alt,
+          fallback: { text, style },
+        },
+      };
+    }
+
+    const fitted = fitImage(loaded.width, loaded.height, measure);
+    return {
+      kind: "image",
+      width: fitted.width,
+      height: fitted.height,
+      depth: 0,
+      penaltyAfter: NaN,
+      image: { source: loaded.source, ...fitted, status: "ready", src, alt },
+    };
+  }
 
   /** Resolve the painted representation before anyone consumes its metrics. */
   private mathRun(
@@ -977,7 +1360,7 @@ export class Typesetter {
     if (!rendered.text.length) return [];
 
     const base = styleForSpan(this.theme, block, null);
-    const expanded = this.expandMath(rendered, base.style, base.key, numbering);
+    const expanded = this.expandObjects(rendered, base.style, base.key, numbering, measure);
     rendered = expanded.rendered;
     const pieces = expanded.pieces;
     engine.configure(
@@ -1117,6 +1500,7 @@ export class Typesetter {
         const ce = toChar(e);
         const st = styleAt(s);
         const slice = text.slice(cs, ce);
+        const object = slice === OBJECT_REPLACEMENT ? pieces.get(cs) : undefined;
         runs.push({
           x,
           text: slice,
@@ -1127,7 +1511,9 @@ export class Typesetter {
           spanId: st.id,
           scaleX,
           synthetic: false,
-          math: slice === OBJECT_REPLACEMENT ? pieces.get(cs) : undefined,
+          math: object?.kind === "math" ? object : undefined,
+          image: object?.kind === "image" ? object.image : undefined,
+          note: object?.kind === "note" ? object.note : undefined,
         });
       }
       lines.push({

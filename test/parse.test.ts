@@ -1,4 +1,4 @@
-import { parseBlocks, renderBlock, parseInline } from "../src/markdown/parse.js";
+import { parseBlocks, renderBlock, parseInline, LINE_SEPARATOR } from "../src/markdown/parse.js";
 
 let failures = 0;
 function eq(actual: unknown, expected: unknown, label: string) {
@@ -166,7 +166,8 @@ eq(
   eq(rendered, literal.map((c) => "\\" + c), "non-punctuation characters keep the slash");
 }
 eq(parseInline("`\\*`", 0).text, "\\*", "code span content is opaque to escapes");
-eq(parseInline("a\\\nb", 0).text, "a b", "backslash-newline keeps the legacy soft-break fallback");
+eq(parseInline("a\\\nb", 0).text, "a" + LINE_SEPARATOR + "b",
+   "backslash-newline is a hard break, and the slash itself is not content");
 
 // --- the source map --------------------------------------------------------
 {
@@ -296,6 +297,383 @@ eq(parseInline("a\\\nb", 0).text, "a b", "backslash-newline keeps the legacy sof
   }
   eq(ok, true, "every rendered character maps back to the identical source character");
 }
+
+
+// --- ordered list numbering ------------------------------------------------
+// CommonMark takes an ordered list's start from its first item and ignores
+// every number after it, which is what lets an author reorder items without
+// renumbering the source by hand.
+const markers = (doc: string) =>
+  parseBlocks(doc).filter((b) => b.type === "list").map((b) => b.marker);
+
+eq(markers("1. a\n1. b\n1. c"), ["1.", "2.", "3."], "repeated 1. counts up");
+eq(markers("1. a\n2. b\n3. c"), ["1.", "2.", "3."], "already-correct numbers are kept");
+eq(markers("1. a\n7. b\n2. c"), ["1.", "2.", "3."], "later numbers are ignored");
+eq(markers("5. a\n1. b"), ["5.", "6."], "the first item sets the start");
+eq(markers("1) a\n1) b"), ["1)", "2)"], "the delimiter the author chose is kept");
+eq(markers("- a\n- b"), ["\u2022", "\u2022"], "bullets stay bullets");
+
+// A nested list keeps its own count, and the outer level resumes.
+eq(
+  markers("1. a\n  1. x\n  1. y\n1. b"),
+  ["1.", "1.", "2.", "2."],
+  "a nested list counts separately and the outer one carries on",
+);
+
+// Anything that is not a list ends the run.
+eq(markers("1. a\n\npara\n\n1. b"), ["1.", "1."], "a paragraph between items restarts");
+eq(markers("1. a\n\n1. b"), ["1.", "2."], "but a blank line alone does not");
+eq(markers("1. a\n- b\n1. c"), ["1.", "\u2022", "1."], "switching to bullets restarts the count");
+
+// The source is untouched: only the printed marker is computed.
+{
+  const doc = "1. first\n1. second";
+  const [, second] = parseBlocks(doc).filter((b) => b.type === "list");
+  eq(second.source, "1. second", "the block still holds what the author typed");
+  eq(renderBlock(second, false).text, "second", "and renders its own text");
+  eq(renderBlock(second, true).text, "1. second", "raw mode shows the typed number");
+}
+
+
+// --- autolinks -------------------------------------------------------------
+// The scheme is what separates a link from markup that merely looks like one,
+// so HTML sitting in a paragraph must survive untouched.
+const autoHref = (body: string) =>
+  parseInline(body, 0).spans.find((s) => s.kind === "link")?.href;
+
+eq(parseInline("<https://example.com>", 0).text, "https://example.com",
+   "the angle brackets are removed");
+eq(autoHref("<https://example.com>"), "https://example.com", "and the URL becomes the href");
+eq(autoHref("<http://a.b/c?d=e#f>"), "http://a.b/c?d=e#f", "query and fragment survive");
+eq(autoHref("<ftp://host/path>"), "ftp://host/path", "any scheme qualifies");
+eq(autoHref("<mailto:a@b.c>"), "mailto:a@b.c", "an explicit mailto is a URI autolink");
+
+// Email autolinks carry no scheme; the renderer supplies it.
+eq(parseInline("<user@example.com>", 0).text, "user@example.com", "an email keeps its text");
+eq(autoHref("<user@example.com>"), "mailto:user@example.com", "and gains a mailto href");
+
+// Not autolinks.
+eq(autoHref("<div>"), undefined, "a bare tag has no scheme and is not a link");
+eq(parseInline("<div>", 0).text, "<div>", "and survives verbatim");
+eq(autoHref("<not a url>"), undefined, "spaces disqualify a candidate");
+eq(autoHref("<https://a b>"), undefined, "including inside the URL");
+eq(autoHref("< https://x>"), undefined, "a leading space disqualifies it");
+eq(autoHref("<a:b>"), undefined, "a one-letter scheme is too short");
+
+// Interaction with the constructs scanned around it.
+eq(parseInline("`<https://x>`", 0).text, "<https://x>", "a code span stays literal");
+eq(parseInline("see <https://x> now", 0).text, "see https://x now", "inside a sentence");
+{
+  const r = parseInline("[label](<https://x>)", 0);
+  eq(r.text, "label", "an angle destination is still a destination, not an autolink");
+  eq(r.spans.find((s) => s.kind === "link")?.href, "https://x", "and keeps its href");
+}
+{
+  // CommonMark forbids a link inside a link; the outer one owns the text.
+  const r = parseInline("[<https://x>](y)", 0);
+  eq(r.spans.filter((s) => s.kind === "link").length >= 1, true,
+     "a nested autolink does not create a second link format");
+  eq(r.text, "<https://x>", "and the label keeps its literal angle brackets");
+}
+{
+  const body = "a <https://x> b";
+  const r = parseInline(body, 100);
+  eq(r.map.length, r.text.length + 1, "the source map still covers every character");
+  eq(r.map[r.text.indexOf("https")], 100 + body.indexOf("https"),
+     "and the URL text maps past the opening bracket");
+}
+
+
+// --- task lists ------------------------------------------------------------
+const tasks = (doc: string) =>
+  parseBlocks(doc).filter((b) => b.type === "list").map((b) => b.task);
+
+eq(tasks("- [ ] open"), ["todo"], "an empty box is a pending task");
+eq(tasks("- [x] done"), ["done"], "a lowercase x ticks it");
+eq(tasks("- [X] done"), ["done"], "and so does uppercase");
+eq(tasks("- plain"), ["none"], "a bullet without a box is not a task");
+eq(tasks("- [ ]nospace"), ["none"], "GFM requires the space after the bracket");
+eq(tasks("- [y] bad"), ["none"], "only a space or an x count");
+eq(tasks("1. [x] numbered"), ["none"], "a checkbox belongs to a bullet, not a number");
+eq(tasks("- [ ] a\n- [x] b\n- c"), ["todo", "done", "none"], "mixed items in one list");
+
+// The checkbox is drawn as a marker, so it leaves the text.
+{
+  const doc = "- [x] buy milk";
+  const [b] = parseBlocks(doc);
+  const r = renderBlock(b, false);
+  eq(r.text, "buy milk", "the box and bullet are both stripped");
+  eq(r.map[0], doc.indexOf("buy"), "the first character maps past both");
+  eq(r.map.length, r.text.length + 1, "the map still covers every character");
+  eq(renderBlock(b, true).text, doc, "raw mode shows the source unchanged");
+}
+{
+  // The bracket must go before inline parsing, or it opens a link label.
+  const [b] = parseBlocks("- [ ] see [docs](x) later");
+  const r = renderBlock(b, false);
+  eq(r.text, "see docs later", "a real link in the item still parses");
+  eq(r.spans.some((s) => s.kind === "link"), true, "and keeps its link span");
+}
+{
+  const [b] = parseBlocks("- [x] **bold** text");
+  eq(renderBlock(b, false).text, "bold text", "emphasis after a checkbox still works");
+}
+
+
+// --- YAML front matter -----------------------------------------------------
+// Three dashes are a thematic break everywhere except the very first line of
+// a document, and even there only when something closes them.
+const kinds = (doc: string) => parseBlocks(doc).map((b) => b.type);
+
+eq(kinds("---\ntitle: x\n---\n\nbody"),
+   ["frontmatter", "blank", "paragraph"], "front matter opens a document");
+eq(kinds("---\ntitle: x\n...\n\nbody"),
+   ["frontmatter", "blank", "paragraph"], "YAML's other terminator closes it too");
+eq(kinds("---\nno terminator\n\nbody"),
+   ["rule", "paragraph", "blank", "paragraph"], "without a closer it stays a rule");
+eq(kinds("intro\n\n---\ntitle: x\n---"),
+   ["paragraph", "blank", "rule", "paragraph", "rule"],
+   "dashes below the first line are still a break");
+eq(kinds("---"), ["rule"], "a lone divider is a rule");
+
+{
+  const doc = "---\ntitle: 排版\ntags: [a, b]\n---\nbody";
+  const [front] = parseBlocks(doc);
+  eq(front.source, "---\ntitle: 排版\ntags: [a, b]\n---",
+     "the block covers the fences and everything between");
+  eq(front.start, 0, "starting at the document's first character");
+  eq(doc.slice(front.end), "\nbody", "and ending at its closing fence");
+  const r = renderBlock(front, false);
+  eq(r.text, front.source, "metadata is shown verbatim, brackets and all");
+  eq(r.map.length, r.text.length + 1, "with a complete source map");
+  eq(kinds(doc)[1], "paragraph", "the document continues normally after it");
+}
+
+
+// --- images ----------------------------------------------------------------
+// An image is a link that resolves to a picture, so it becomes a placeholder
+// like a formula: the alt text is a fallback, not content.
+const OBJ_CHAR = "￼";
+const imageSpan = (body: string) =>
+  parseInline(body, 0).spans.find((s) => s.kind === "image");
+
+eq(parseInline("![cat](cat.png)", 0).text, OBJ_CHAR, "an image collapses to one placeholder");
+eq(imageSpan("![cat](cat.png)")?.href, "cat.png", "the destination becomes the source");
+eq(imageSpan("![cat](cat.png)")?.alt, "cat", "and the label becomes the alt text");
+eq(imageSpan("![](x.png)")?.alt, "", "an empty label is allowed");
+eq(imageSpan('![a](x.png "title")')?.href, "x.png", "a title does not leak into the source");
+eq(imageSpan("![a](<my file.png>)")?.href, "my file.png", "an angle destination may hold spaces");
+
+eq(parseInline("before ![x](y.png) after", 0).text, "before " + OBJ_CHAR + " after",
+   "an image inside a sentence");
+eq(parseInline("[link](y)", 0).text, "link", "a link without the bang is still a link");
+eq(imageSpan("[link](y)"), undefined, "and produces no image span");
+// CommonMark keeps the escaped bang as literal text and links the rest.
+eq(parseInline("\\![x](y)", 0).text, "!x", "an escaped bang leaves a literal ! and a link");
+eq(imageSpan("\\![x](y)"), undefined, "which is not an image");
+eq(parseInline("\\![x](y)", 0).spans.some((s) => s.kind === "link"), true,
+   "the link after it still parses");
+eq(parseInline("`![x](y)`", 0).text, "![x](y)", "a code span keeps it literal");
+eq(parseInline("![unclosed](x", 0).text, "![unclosed](x", "an unterminated image stays literal");
+
+{
+  const body = "see ![cat](cat.png) here";
+  const r = parseInline(body, 50);
+  const at = r.text.indexOf(OBJ_CHAR);
+  eq(r.map[at], 50 + body.indexOf("!"), "the placeholder maps to the opening bang");
+  eq(r.map.length, r.text.length + 1, "the source map still covers every character");
+  const span = r.spans.find((s) => s.kind === "image");
+  eq(span ? [span.start, span.end] : null, [at, at + 1],
+     "the image span covers just the placeholder");
+}
+{
+  // Alt text is opaque: it is a fallback string, never markdown to render.
+  const span = imageSpan("![**bold** alt](x.png)");
+  eq(span?.alt, "**bold** alt", "alt text keeps its markers");
+  eq(parseInline("![**bold** alt](x.png)", 0).text, OBJ_CHAR, "and produces no extra text");
+}
+
+
+// --- tables ----------------------------------------------------------------
+// A header row is indistinguishable from a paragraph until the delimiter row
+// beneath it is read, so the decision needs both lines.
+const tableOf = (doc: string) => parseBlocks(doc).find((b) => b.type === "table");
+const grid = (doc: string) =>
+  tableOf(doc)?.rows.map((row) => row.map((c) => c.text));
+
+eq(grid("| a | b |\n|---|---|\n| 1 | 2 |"),
+   [["a", "b"], ["1", "2"]], "the delimiter row is structure, not content");
+eq(tableOf("| a | b |\n|---|---|")?.align, ["left", "left"], "plain dashes align left");
+eq(tableOf("| a | b | c |\n|:--|:-:|--:|")?.align, ["left", "center", "right"],
+   "colons choose the alignment");
+eq(grid("a | b\n--- | ---\n1 | 2"),
+   [["a", "b"], ["1", "2"]], "the outer pipes are optional");
+eq(grid("| a || b |\n|---|---|---|"), [["a", "", "b"]], "an empty middle cell is kept");
+eq(grid("| a \\| b |\n|---|"), [["a \\| b"]], "an escaped pipe stays inside its cell");
+
+// Not tables.
+eq(tableOf("| a | b |"), undefined, "a header row alone is not a table");
+eq(tableOf("| a | b |\n| c | d |"), undefined, "without a delimiter row it is a paragraph");
+eq(tableOf("| a | b |\n|---|"), undefined, "the two rows must agree on the column count");
+eq(tableOf("no pipes here\n---"), undefined,
+   "a delimiter row needs pipes above it to make a table");
+eq(parseBlocks("no pipes here\n---").map((b) => b.type), ["paragraph", "rule"],
+   "the dashes stay a thematic break");
+
+// A table interrupts a paragraph, and the paragraph keeps its own lines.
+{
+  const doc = "intro text\n\n| a |\n|---|\n| 1 |\n\nafter";
+  eq(parseBlocks(doc).map((b) => b.type),
+     ["paragraph", "blank", "table", "blank", "paragraph"], "a table is its own block");
+}
+{
+  const doc = "lead line\n| a |\n|---|\n| 1 |";
+  eq(parseBlocks(doc).map((b) => b.type), ["paragraph", "table"],
+     "a table interrupts the paragraph above it");
+  eq(parseBlocks(doc)[0].source, "lead line", "and the paragraph keeps only its own line");
+}
+
+// Cells carry the offsets their text came from, which is what the caret needs.
+{
+  const doc = "| alpha | beta |\n|---|---|\n| one | two |";
+  const t = tableOf(doc)!;
+  for (const row of t.rows) {
+    for (const cell of row) {
+      eq(doc.slice(cell.start, cell.end), cell.text, `cell ${JSON.stringify(cell.text)} maps to its source`);
+    }
+  }
+  eq(t.source, doc, "the block covers the whole table");
+}
+
+
+// --- hard line breaks ------------------------------------------------------
+// A break the author asked for is not a breakpoint the optimiser may decline,
+// so it is carried as U+2028 rather than as the space a soft break becomes.
+const SEP = LINE_SEPARATOR;
+
+eq(parseInline("a  \nb", 0).text, "a" + SEP + "b", "two trailing spaces make a hard break");
+eq(parseInline("a   \nb", 0).text, "a" + SEP + "b", "so do more than two");
+eq(parseInline("a\\\nb", 0).text, "a" + SEP + "b", "and so does a trailing backslash");
+eq(parseInline("a \nb", 0).text, "a b", "one trailing space is still a soft break");
+eq(parseInline("a\nb", 0).text, "a b", "and so is none");
+
+// The spaces exist only to carry the instruction, so they are not content.
+eq(parseInline("a  \nb", 0).text.indexOf("  "), -1, "the trailing run is dropped");
+{
+  const body = "a  \nb";
+  const r = parseInline(body, 0);
+  eq(r.map.length, r.text.length + 1, "the source map still covers every character");
+  eq(r.map[r.text.indexOf("b")], body.indexOf("b"), "text after the break maps correctly");
+}
+
+// A hard break holds where a soft one would have been discarded.
+eq(parseInline("中文  \n继续", 0).text, "中文" + SEP + "继续",
+   "a hard break survives the CJK soft-break rule");
+eq(parseInline("中文\n继续", 0).text, "中文继续", "which still discards an unasked-for one");
+
+// Not breaks.
+eq(parseInline("`a  \nb`", 0).text.includes(SEP), false,
+   "trailing spaces inside a code span are content, not an instruction");
+eq(parseInline("a  \n`b`", 0).text.includes(SEP), true,
+   "but a break before a code span still holds");
+eq(parseInline("  \na", 0).text, "a", "a break with nothing before it is dropped");
+
+
+// --- footnotes -------------------------------------------------------------
+const OBJ2 = "￼";
+const noteSpan = (body: string) =>
+  parseInline(body, 0).spans.find((s) => s.kind === "note");
+
+eq(parseInline("text[^1] more", 0).text, "text" + OBJ2 + " more",
+   "a reference has no textual form of its own");
+eq(noteSpan("text[^1]")?.label, "1", "the label is carried on the span");
+eq(noteSpan("text[^note-a]")?.label, "note-a", "labels may be words");
+eq(noteSpan("text[^1]"), noteSpan("text[^1]") ? noteSpan("text[^1]") : undefined, "stable");
+eq(parseInline("[link](x)", 0).spans.some((s) => s.kind === "note"), false,
+   "an ordinary link is not a footnote");
+eq(parseInline("[^ bad]", 0).text, "[^ bad]", "a label may not contain spaces");
+eq(parseInline("`[^1]`", 0).text, "[^1]", "a code span keeps it literal");
+
+// Definitions are their own blocks and shed their label.
+{
+  const doc = "body text[^a]\n\n[^a]: the note itself";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["paragraph", "blank", "footnote"],
+     "a definition is its own block");
+  const def = blocks.find((b) => b.type === "footnote")!;
+  eq(def.label, "a", "carrying its label");
+  const r = renderBlock(def, false);
+  eq(r.text, "the note itself", "and shedding it from the text");
+  eq(r.map[0], doc.indexOf("the note"), "the first character maps past the label");
+  eq(renderBlock(def, true).text, "[^a]: the note itself", "raw mode shows the label");
+}
+{
+  const doc = "[^a]: first line\ncontinued here\n\nafter";
+  const blocks = parseBlocks(doc);
+  eq(blocks[0].type, "footnote", "a definition runs on like a paragraph");
+  eq(renderBlock(blocks[0], false).text, "first line continued here",
+     "over a lazy continuation");
+}
+{
+  eq(parseBlocks("para\n[^a]: note").map((b) => b.type), ["paragraph", "footnote"],
+     "a definition interrupts the paragraph above it");
+}
+{
+  const body = "see[^x] here";
+  const r = parseInline(body, 30);
+  const at = r.text.indexOf(OBJ2);
+  eq(r.map[at], 30 + body.indexOf("[^x]"), "the placeholder maps to the opening bracket");
+  eq(r.map.length, r.text.length + 1, "the source map still covers every character");
+}
+
+
+// --- HTML blocks -----------------------------------------------------------
+// Shown as written. What matters here is where a block starts and stops, and
+// above all that an autolink is not mistaken for a tag.
+const htmlOf = (doc: string) => parseBlocks(doc).find((b) => b.type === "html");
+const types = (doc: string) => parseBlocks(doc).map((b) => b.type);
+
+eq(htmlOf("<div>\nhello\n</div>")?.source, "<div>\nhello\n</div>",
+   "a block tag runs to the blank line");
+eq(types("<div>\nx\n</div>\n\nafter"), ["html", "blank", "paragraph"],
+   "and the document continues after it");
+eq(htmlOf("<!-- a comment -->")?.source, "<!-- a comment -->", "a comment is a block");
+eq(htmlOf("<!--\nspanning\nlines\n-->")?.source, "<!--\nspanning\nlines\n-->",
+   "a comment ends at its own terminator, not at a blank line");
+eq(htmlOf("<script>\nlet x = 1;\n\nlet y = 2;\n</script>")?.source,
+   "<script>\nlet x = 1;\n\nlet y = 2;\n</script>",
+   "raw text runs through blank lines to its close tag");
+eq(htmlOf("<br />")?.source, "<br />", "a self-closing tag alone on a line");
+eq(htmlOf("<span class=\"a\">")?.source, "<span class=\"a\">", "attributes are allowed");
+
+// The case that must not regress: an autolink is not a tag.
+eq(htmlOf("<https://example.com>"), undefined, "a URL in angle brackets is not HTML");
+eq(parseInline("<https://example.com>", 0).spans.find((s) => s.kind === "link")?.href,
+   "https://example.com", "it is still an autolink");
+eq(htmlOf("<user@example.com>"), undefined, "nor is an email address");
+eq(htmlOf("2 < 3 and 4 > 1"), undefined, "nor is arithmetic");
+
+// Rendering is verbatim, with an exact map.
+{
+  const doc = "<div class=\"note\">\n  <b>bold</b>\n</div>";
+  const b = htmlOf(doc)!;
+  const r = renderBlock(b, false);
+  eq(r.text, doc, "the markup is shown exactly as written");
+  eq(r.map.length, r.text.length + 1, "with a complete source map");
+  eq(r.spans.some((s) => s.kind === "strong"), false, "and no inline parsing inside it");
+}
+
+// Interrupting a paragraph: every kind but a lone tag may.
+eq(types("text\n<div>\nx"), ["paragraph", "html"], "a block tag interrupts a paragraph");
+// A block tag and a lone tag reach the same branch by different routes, and
+// only the first may break into a paragraph; check the classification itself
+// rather than trusting the outcome to distinguish them.
+eq(types("text\n<table>\nx"), ["paragraph", "html"], "including one that is also a markdown word");
+eq(types("text\n<custom-element>\nx"), ["paragraph"],
+   "an unknown tag is the lone-tag kind, which does not interrupt");
+eq(types("text\n<!-- c -->"), ["paragraph", "html"], "and so does a comment");
+eq(types("text\n<em>emphasis</em>"), ["paragraph"],
+   "but a lone inline tag stays in the paragraph it continues");
 
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

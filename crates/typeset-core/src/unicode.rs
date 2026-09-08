@@ -39,6 +39,9 @@ pub enum CharClass {
     /// inline formula. It behaves like a western word for spacing purposes,
     /// which is what CLReq asks for when non-Han content meets Han.
     Object,
+    /// U+2028 LINE SEPARATOR: a break the author asked for, as opposed to one
+    /// the optimiser chose. Unicode defines it for exactly this.
+    Break,
     /// Anything else (western punctuation, symbols).
     Other,
 }
@@ -125,6 +128,9 @@ pub fn classify(c: char, style: PunctStyle, full_width: bool) -> CharClass {
     }
     if c == '\u{FFFC}' {
         return CharClass::Object;
+    }
+    if c == '\u{2028}' {
+        return CharClass::Break;
     }
     if is_left_aligned_punct(c, style, full_width) {
         return CharClass::PunctLeft;
