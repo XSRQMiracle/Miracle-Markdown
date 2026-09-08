@@ -155,6 +155,60 @@
       }
       #find-bar.invalid .field { border-color: #c0503c; }
 
+      /* The shortcut sheet. Generated from the command table, so it cannot
+         drift out of date. */
+      #shortcuts {
+        position: absolute;
+        inset: 24px;
+        z-index: 11;
+        overflow: auto;
+        padding: 18px 22px 22px;
+        background: #fff;
+        border: 1px solid var(--chrome-border);
+        border-radius: 10px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+      }
+      #shortcuts[hidden] { display: none; }
+      #shortcuts h3 { margin: 0 0 14px; font-size: 14px; }
+      #shortcuts h4 {
+        margin: 0 0 6px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+      }
+      .sheet-columns {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 18px 28px;
+        align-items: start;
+      }
+      .sheet-columns section { break-inside: avoid; }
+      .sheet-row {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 2px 0;
+        line-height: 1.5;
+      }
+      .sheet-row kbd {
+        flex: 0 0 92px;
+        font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--ink);
+        text-align: right;
+      }
+      .sheet-row span { color: #55534d; }
+
+      footer button.link {
+        border: 0;
+        background: none;
+        padding: 0;
+        font: inherit;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      footer button.link:hover { color: var(--ink); }
+
       label.slider { display: flex; align-items: center; gap: 6px; color: var(--muted); }
       label.slider input { width: 84px; }
 
@@ -236,6 +290,7 @@
       <div id="stage">
         <canvas id="surface"></canvas>
         <div id="math-panel" hidden></div>
+        <div id="shortcuts" hidden></div>
         <div id="find-bar" hidden>
           <div class="field">
             <input id="find-input" type="text" placeholder="查找" spellcheck="false" aria-label="查找" />
@@ -261,6 +316,7 @@
         <span id="status">正在加载排版引擎…</span>
         <span id="mode"></span>
         <span class="spacer"></span>
+        <button class="link" id="shortcut-button" title="快捷键一览（F1）">⌨ 快捷键</button>
         <span id="perf"></span>
       </footer>
     </div>

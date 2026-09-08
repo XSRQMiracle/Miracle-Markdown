@@ -20,6 +20,7 @@ import { onImageSettled } from "./engine/images.js";
 import { DocumentSession } from "./markdown/session.js";
 import { confirmUnsavedDocument, showDocumentError } from "./ui/document-dialog.js";
 import { buildFindBar } from "./ui/find-bar.js";
+import { buildShortcutSheet } from "./ui/shortcut-sheet.js";
 
 const stage = document.getElementById("stage") as HTMLElement;
 const canvas = document.getElementById("surface") as HTMLCanvasElement;
@@ -140,6 +141,12 @@ async function main() {
   saveButton.addEventListener("click", () => void fileAction(() => session.save()));
   saveAsButton.addEventListener("click", () => void fileAction(() => session.save(true)));
   const findBar = buildFindBar(document.getElementById("find-bar") as HTMLElement, editor);
+  const apple = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const sheet = buildShortcutSheet(document.getElementById("shortcuts") as HTMLElement, apple);
+  document.getElementById("shortcut-button")!.addEventListener("click", () => {
+    sheet.toggle();
+    if (!sheet.isOpen) editor.focus();
+  });
   window.addEventListener("keydown", (e) => {
     if (document.querySelector("dialog[open]")) return;
     // F3 and Shift+F3 step through the matches on Windows and Linux, where
@@ -151,6 +158,18 @@ async function main() {
     }
     // Escape closes the search from anywhere, including the document itself,
     // which is where the caret is once a match has been stepped to.
+    if (e.key === "F1") {
+      e.preventDefault();
+      sheet.toggle();
+      if (!sheet.isOpen) editor.focus();
+      return;
+    }
+    if (e.key === "Escape" && sheet.isOpen) {
+      e.preventDefault();
+      sheet.close();
+      editor.focus();
+      return;
+    }
     if (e.key === "Escape" && findBar.isOpen) {
       e.preventDefault();
       findBar.close();
