@@ -502,6 +502,7 @@ function styleForSpan(
     lineHeight: heading ? 1.35 : code ? 1.55 : theme.lineHeight,
   };
   if (span?.highlight) style.background = theme.highlightColor;
+  if (span?.underline) style.underline = true;
   // A superscript is set smaller and lifted, a subscript smaller and dropped.
   // The size is taken from the surrounding text rather than from the theme so
   // that one inside a heading stays in proportion to the heading.
@@ -514,7 +515,8 @@ function styleForSpan(
   // it leaves the metrics alone.
   return {
     style,
-    key: cssFont(style) + (style.background ?? "") + (style.raise ? `^${style.raise}` : ""),
+    key: cssFont(style) + (style.background ?? "") + (style.raise ? `^${style.raise}` : "") +
+      (style.underline ? "_" : ""),
   };
 }
 
@@ -921,7 +923,7 @@ export class Typesetter {
     const header = styleForSpan(theme, block, {
       kind: "text", start: 0, end: 0,
       strong: true, em: false, code: false, strike: false, highlight: false,
-      sub: false, sup: false, href: "",
+      sub: false, sup: false, underline: false, href: "",
     });
     const natural = Array.from({ length: columns }, (_, c) =>
       Math.max(

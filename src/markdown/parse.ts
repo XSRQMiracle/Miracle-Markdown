@@ -74,6 +74,7 @@ export type SpanKind =
   | "highlight"
   | "sub"
   | "sup"
+  | "underline"
   | "math"
   | "image";
 
@@ -117,6 +118,7 @@ export interface Span {
   highlight: boolean;
   sub: boolean;
   sup: boolean;
+  underline: boolean;
   href: string;
 }
 
@@ -900,6 +902,7 @@ function plainSpan(start: number, end: number): Span {
     highlight: false,
     sub: false,
     sup: false,
+    underline: false,
     href: "",
   };
 }
@@ -1060,6 +1063,8 @@ export function parseInline(
   const delimiters = new InlineDelimiterIndex(body);
   /** Newlines the author marked as breaks, by backslash or trailing spaces. */
   const hardBreaks = new Set<number>();
+  /** Where a <br> was written, in place of which a break is emitted. */
+  const tagBreaks = new Set<number>();
   /** Label-local scan boundaries, including the emphasis stack they own. */
   const linkLabels: Array<{ start: number; close: number; end: number; openStart: number }> = [];
 
@@ -1183,6 +1188,31 @@ export function parseInline(
           i = target.end;
           continue;
         }
+      }
+    }
+
+    // Inline HTML. Typora renders a handful of tags rather than showing
+    // their source, and does it with no preference to turn off — they are
+    // how markdown has always written the things it has no syntax for.
+    if (c === "<") {
+      const br = INLINE_BREAK.exec(body.slice(i, limit));
+      if (br) {
+        // A <br> is a hard break like any other. All of the tag but its last
+        // character is dropped; that character is what the break is emitted
+        // in place of, so it survives the merging of adjacent dropped ranges
+        // and the emitter can still find it.
+        const at = i + br[0].length - 1;
+        drops.push([i, at]);
+        tagBreaks.add(at);
+        i = at + 1;
+        continue;
+      }
+      const tag = matchInlineTag(body, i, limit);
+      if (tag) {
+        drops.push([i, tag.contentAt], [tag.close, tag.end]);
+        formats.push({ kind: tag.kind, from: tag.contentAt, to: tag.close, href: "" });
+        i = tag.contentAt;
+        continue;
       }
     }
 
@@ -1387,6 +1417,14 @@ export function parseInline(
       continue;
     }
 
+    if (tagBreaks.has(k)) {
+      if (text.length) emit(LINE_SEPARATOR, k, unformatted);
+      let j = k + 1;
+      while (j < body.length && (body[j] === " " || body[j] === "\t")) j++;
+      k = j - 1;
+      continue;
+    }
+
     if (body[k] === "\n" && hardBreaks.has(k) && text.length) {
       emit(LINE_SEPARATOR, k, unformatted);
       let j = k + 1;
@@ -1425,7 +1463,9 @@ class FormatSweep {
   private active = new Set<number>();
   private changes = new Set<number>();
   private links: number[] = [];
-  private counts = { strong: 0, em: 0, code: 0, strike: 0, highlight: 0, sub: 0, sup: 0 };
+  private counts = {
+    strong: 0, em: 0, code: 0, strike: 0, highlight: 0, sub: 0, sup: 0, underline: 0,
+  };
   private format: Span | undefined;
 
   constructor(private formats: Format[]) {
@@ -1448,7 +1488,7 @@ class FormatSweep {
         if (kind === "link") this.addLink(id);
       } else this.active.delete(id);
       if (kind === "strong" || kind === "em" || kind === "code" || kind === "strike" ||
-        kind === "highlight" || kind === "sub" || kind === "sup") {
+        kind === "highlight" || kind === "sub" || kind === "sup" || kind === "underline") {
         this.counts[kind] += entering ? 1 : -1;
       }
       // A format wholly hidden between emitted characters does not split a
@@ -1467,6 +1507,7 @@ class FormatSweep {
     const highlight = this.counts.highlight > 0;
     const sub = this.counts.sub > 0;
     const sup = this.counts.sup > 0;
+    const underline = this.counts.underline > 0;
     return this.format = {
       ...unformatted,
       kind: link ? "link"
@@ -1478,7 +1519,7 @@ class FormatSweep {
         : sup ? "sup"
         : sub ? "sub"
         : "text",
-      strong, em, code, strike, highlight, sub, sup, href: link?.href ?? "",
+      strong, em, code, strike, highlight, sub, sup, underline, href: link?.href ?? "",
     };
   }
 
@@ -1528,6 +1569,7 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       highlight: false,
       sub: false,
       sup: false,
+      underline: false,
       href: "",
     };
   }
@@ -1545,6 +1587,7 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       highlight: false,
       sub: false,
       sup: false,
+      underline: false,
     };
   }
   if (math) {
@@ -1561,6 +1604,7 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       highlight: false,
       sub: false,
       sup: false,
+      underline: false,
       href: "",
     };
   }
@@ -1591,8 +1635,81 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
     highlight: has("highlight"),
     sub: has("sub"),
     sup: has("sup"),
+    underline: has("underline"),
     href: link?.href ?? "",
   };
+}
+
+/** `<br>`, in the spellings HTML accepts for it. */
+const INLINE_BREAK = /^<\s*(?:br|wbr)\s*\/?>/i;
+
+/**
+ * The HTML tags that stand for something this editor already sets, and what
+ * they stand for. Anything else — a `<div>`, a `<span style=…>` — is left as
+ * literal source, which is what a markdown editor showing its own source
+ * ought to do with markup it cannot draw.
+ */
+const INLINE_TAGS: Record<string, Exclude<SpanKind, "text">> = {
+  u: "underline",
+  ins: "underline",
+  b: "strong",
+  strong: "strong",
+  i: "em",
+  em: "em",
+  cite: "em",
+  mark: "highlight",
+  sub: "sub",
+  sup: "sup",
+  code: "code",
+  kbd: "code",
+  samp: "code",
+  del: "strike",
+  s: "strike",
+  strike: "strike",
+};
+
+/**
+ * A pair of inline HTML tags around some content.
+ *
+ * Only a bare tag with no attributes opens a pair: `<u>` is markup this
+ * editor can draw, while `<u class=…>` carries more meaning than an underline
+ * and is better left visible. The closing tag must be the matching one, and
+ * nested pairs of the same name are counted so `<b>a<b>b</b>c</b>` closes
+ * where it should.
+ */
+function matchInlineTag(
+  body: string,
+  from: number,
+  limit: number,
+): { kind: Exclude<SpanKind, "text">; contentAt: number; close: number; end: number } | null {
+  const open = /^<([A-Za-z][A-Za-z0-9]*)>/.exec(body.slice(from, limit));
+  if (!open) return null;
+  const name = open[1].toLowerCase();
+  const kind = INLINE_TAGS[name];
+  if (!kind) return null;
+  const contentAt = from + open[0].length;
+  const closing = `</${name}>`;
+  let depth = 1;
+  let at = contentAt;
+  while (at < limit) {
+    if (body[at] !== "<") {
+      at++;
+      continue;
+    }
+    const rest = body.slice(at, limit);
+    if (rest.toLowerCase().startsWith(closing)) {
+      if (--depth === 0) {
+        return at > contentAt
+          ? { kind, contentAt, close: at, end: at + closing.length }
+          : null;
+      }
+      at += closing.length;
+      continue;
+    }
+    if (new RegExp(`^<${name}>`, "i").test(rest)) depth++;
+    at++;
+  }
+  return null;
 }
 
 /** How long the run of `c` starting at `i` is. */

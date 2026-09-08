@@ -77,6 +77,41 @@ function eq(actual: unknown, expected: unknown, label: string) {
      [[true, false], [true, true], [true, false]], "emphasis around a subscript");
 }
 
+// --- inline HTML ----------------------------------------------------------
+// Markdown has always written the things it has no syntax for as HTML, so a
+// handful of tags are drawn rather than shown. There is no option: Typora has
+// none either.
+{
+  const html = (src: string) => parseInline(src, 0, undefined, DEFAULT_INLINE_OPTIONS);
+  eq(html("<u>under</u>").text, "under", "the tags go and the words stay");
+  eq(html("<u>under</u>").spans.map((s) => s.underline), [true]);
+  eq(html("a <b>bold</b> c").spans.map((s) => [s.strong, s.underline]),
+     [[false, false], [true, false], [false, false]], "b is strong");
+  eq(html("<mark>hi</mark>").spans.map((s) => s.highlight), [true], "mark is a highlight");
+  eq(html("H<sub>2</sub>O").spans.map((s) => s.sub), [false, true, false],
+     "and sub needs no preference when written as HTML");
+  eq(html("<kbd>⌘</kbd>").spans.map((s) => s.code), [true], "kbd is set as code");
+  eq(html("<em>a</em> <i>b</i>").text, "a b", "either spelling of the same thing");
+
+  // Nesting of the same tag closes where it should.
+  eq(html("<b>a<b>b</b>c</b>").text, "abc", "a nested pair closes at the right end");
+  eq(html("<b>a</b>b").text, "ab");
+
+  // What it refuses.
+  eq(html("<div>block</div>").text, "<div>block</div>", "a tag it cannot draw stays visible");
+  eq(html("<u class=x>a</u>").text, "<u class=x>a</u>", "and so does one carrying more than markup");
+  eq(html("<u></u>").text, "<u></u>", "an empty pair is not a pair");
+  eq(html("<u>never closed").text, "<u>never closed", "nor is an unclosed one");
+  eq(html("a < b").text, "a < b", "a lone angle bracket is arithmetic");
+  eq(html("<https://example.com>").spans.map((s) => s.kind), ["link"],
+     "an autolink is still an autolink");
+
+  // <br> is a hard break like any other.
+  eq(html("a<br>b").text, "a\u2028b", "br breaks the line");
+  eq(html("a<br/>b").text, "a\u2028b", "however it is spelled");
+  eq(html("a<BR />b").text, "a\u2028b");
+}
+
 // --- inline delimiters -----------------------------------------------------
 eq(parseInline("**bold**", 0).text, "bold", "strong markers are removed");
 eq(parseInline("*em*", 0).text, "em", "emphasis markers are removed");

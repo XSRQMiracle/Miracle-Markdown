@@ -22,6 +22,7 @@ export type CommandId =
   | "inlineCode"
   | "strike"
   | "highlight"
+  | "underline"
   | "superscript"
   | "subscript"
   | "clearFormat"
@@ -84,6 +85,9 @@ export const COMMANDS: Record<CommandId, Command> = {
   inlineCode: { label: "代码", group: "格式", run: (e) => e.toggleInline("`") },
   strike: { label: "删除线", group: "格式", run: (e) => e.toggleInline("~~") },
   highlight: { label: "高亮", group: "格式", run: (e) => e.toggleInline("==") },
+  // Markdown has no underline, so this writes the HTML that markdown has
+  // always written for it — which the parser now draws.
+  underline: { label: "下划线", group: "格式", run: (e) => e.toggleInline("<u>", "</u>") },
   superscript: { label: "上标", group: "格式", run: (e) => e.toggleInline("^") },
   subscript: { label: "下标", group: "格式", run: (e) => e.toggleInline("~") },
   clearFormat: { label: "清除样式", group: "格式", run: (e) => e.clearFormat() },

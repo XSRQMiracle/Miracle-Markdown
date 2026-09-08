@@ -26,6 +26,8 @@ export interface TextStyle {
   background?: string;
   /** Baseline shift, positive upwards — superscripts and subscripts. */
   raise?: number;
+  /** Ruled under, for <u> and for links. */
+  underline?: boolean;
 }
 
 export const FALLBACK_SERIF =

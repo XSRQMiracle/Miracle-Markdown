@@ -207,11 +207,11 @@ export class Renderer {
           } else {
             ctx.fillText(run.text, x, baseline);
           }
-          if (run.style.color === theme.accentColor) {
-            // Underline links along their own baseline rather than with a
-            // CSS-style box, so the rule sits where the type wants it.
+          if (run.style.underline || run.style.color === theme.accentColor) {
+            // Underline links and <u> along their own baseline rather than
+            // with a CSS-style box, so the rule sits where the type wants it.
             const w = ctx.measureText(run.text).width * run.scaleX;
-            ctx.fillRect(x, y + run.style.size * 0.13, w, Math.max(1, run.style.size / 20));
+            ctx.fillRect(x, baseline + run.style.size * 0.13, w, Math.max(1, run.style.size / 20));
           }
         }
       }
