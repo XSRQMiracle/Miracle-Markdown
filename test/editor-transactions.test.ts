@@ -285,4 +285,18 @@ function fixture(text='aOLDz', start=4, end=1) {
   // A table row is a line, so the same command deletes it.
   assert.equal(del('| a |\n| - |\n| x |', 14, line), '| a |\n| - |', 'and a table row too');
 }
+// --- line-wise copy and cut -----------------------------------------------
+{
+  const clip = (text: string, start: number, end: number, type: 'copy' | 'cut') => {
+    const {editor:e,event} = fixture(text, start, end);
+    let written = '';
+    event(type, {preventDefault(){}, clipboardData:{setData:(_: string, v: string) => { written = v; }}});
+    return [written, e.getText()] as const;
+  };
+  assert.deepEqual(clip('a\nb\nc', 2, 2, 'copy'), ['b\n', 'a\nb\nc'],
+    'with nothing selected, copy takes the whole line');
+  assert.deepEqual(clip('a\nb\nc', 2, 2, 'cut'), ['b\n', 'a\nc'], 'and cut removes it');
+  assert.deepEqual(clip('a\nb', 2, 2, 'cut'), ['b', 'a\n'], 'the last line has no newline to take');
+  assert.deepEqual(clip('a\nb\nc', 0, 1, 'copy'), ['a', 'a\nb\nc'], 'a real selection is untouched by all this');
+}
 console.log('all editor transaction tests passing');

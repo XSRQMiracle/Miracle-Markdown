@@ -435,6 +435,21 @@ export class Editor {
     this.selectWord();
   }
 
+  /**
+   * What copy and cut act on.
+   *
+   * With nothing selected that is the whole line, newline and all — the
+   * convention every editor has settled on, and the reason ⌘X ⌘V moves a line
+   * rather than doing nothing at all.
+   */
+  private clipboardRange(): { from: number; to: number } {
+    const { start, end } = this.range();
+    if (start !== end) return { from: start, to: end };
+    const from = this.text.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    const stop = this.text.indexOf("\n", start);
+    return { from, to: stop < 0 ? this.text.length : stop + 1 };
+  }
+
   /** The selection, low end first. */
   private range(): { start: number; end: number } {
     return {
@@ -1334,18 +1349,16 @@ export class Editor {
 
     this.input.addEventListener("copy", (e) => {
       e.preventDefault();
-      const lo = Math.min(this.selStart, this.selEnd);
-      const hi = Math.max(this.selStart, this.selEnd);
-      e.clipboardData?.setData("text/plain", this.text.slice(lo, hi));
+      const { from, to } = this.clipboardRange();
+      e.clipboardData?.setData("text/plain", this.text.slice(from, to));
     });
 
     this.input.addEventListener("cut", (e) => {
       e.preventDefault();
       this.finishComposition();
-      const lo = Math.min(this.selStart, this.selEnd);
-      const hi = Math.max(this.selStart, this.selEnd);
-      e.clipboardData?.setData("text/plain", this.text.slice(lo, hi));
-      if (lo !== hi) this.replace(lo, hi, "");
+      const { from, to } = this.clipboardRange();
+      e.clipboardData?.setData("text/plain", this.text.slice(from, to));
+      if (from !== to) this.replace(from, to, "");
     });
 
     this.input.addEventListener("blur", () => {
