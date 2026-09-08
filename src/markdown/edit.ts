@@ -366,10 +366,78 @@ export function insertParagraph(text: string, block: Range, before: boolean): Ed
   return { from: block.end, to: block.end, insert: "\n\n", select: { start: at, end: at } };
 }
 
+/** The cells of a line written as a table row, or null if it is not one. */
+export function tableRowCells(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|") || trimmed.length < 2) return null;
+  const inner = trimmed.endsWith("|") ? trimmed.slice(1, -1) : trimmed.slice(1);
+  const cells: string[] = [];
+  let cell = "";
+  for (let i = 0; i < inner.length; i++) {
+    if (inner[i] === "\\" && inner[i + 1] === "|") {
+      cell += "\\|";
+      i++;
+    } else if (inner[i] === "|") {
+      cells.push(cell);
+      cell = "";
+    } else cell += inner[i];
+  }
+  cells.push(cell);
+  return cells;
+}
+
+/** The `| --- | --- |` row that turns a line of cells into a table. */
+function delimiterRow(columns: number): string {
+  return `|${" --- |".repeat(Math.max(1, columns))}`;
+}
+
+/** An empty row of `columns` cells, padded so the cells stay legible when
+ *  the author types into them. */
+function emptyRow(columns: number): string {
+  return `|${"  |".repeat(Math.max(1, columns))}`;
+}
+
+/**
+ * Finish a table the author has begun by typing its header row.
+ *
+ * Typing `| a | b |` and pressing Return is how a table is made in Typora,
+ * and it is the one input rule worth having here: everything else it converts
+ * on Return — a heading, a list, a quote — is already what the source says.
+ */
+export function completeTable(text: string, line: Line): Edit | null {
+  const cells = tableRowCells(line.text);
+  if (!cells || cells.length < 2) return null;
+  // A delimiter row is not a header, and a line of empty cells is not worth
+  // making a table out of.
+  if (cells.every((c) => /^\s*:?-*:?\s*$/.test(c))) return null;
+  const n = cells.length;
+  const insert = `\n${delimiterRow(n)}\n${emptyRow(n)}`;
+  const at = line.end + delimiterRow(n).length + 4;
+  return { from: line.end, to: line.end, insert, select: { start: at, end: at } };
+}
+
+/** A fresh table, on lines of its own. */
+export function insertTable(text: string, line: Line, columns = 2, rows = 1): Edit {
+  const table = [emptyRow(columns), delimiterRow(columns), ...Array(rows).fill(emptyRow(columns))];
+  const blank = !line.text.trim();
+  const from = blank ? line.start : line.end;
+  const insert = (blank ? "" : "\n\n") + table.join("\n");
+  return {
+    from,
+    to: blank ? line.end : line.end,
+    insert,
+    // The caret goes in the first header cell, which is where the writing
+    // starts.
+    select: { start: from + (blank ? 0 : 2) + 2, end: from + (blank ? 0 : 2) + 2 },
+  };
+}
+
 /** An empty row under the one the caret is on. */
 export function insertTableRow(text: string, lineEnd: number, columns: number): Edit {
-  const row = `|${" |".repeat(Math.max(1, columns))}`;
-  const at = lineEnd + 2;
+  const row = emptyRow(columns);
+  // Past the newline and into the first cell, between its two spaces, so
+  // what is typed there comes out padded like the rest.
+  const at = lineEnd + 3;
   return { from: lineEnd, to: lineEnd, insert: `\n${row}`, select: { start: at, end: at } };
 }
 

@@ -5,7 +5,7 @@
 // selection with a space on the end, markup already there, a formula caught in
 // the middle — cheap to pin down.
 import assert from "node:assert/strict";
-import { clearFormat, indentLines, moveLines, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote, unwrapFenced, wrapFenced } from "../src/markdown/edit.js";
+import { clearFormat, completeTable, indentLines, insertTable, moveLines, tableRowCells, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote, unwrapFenced, wrapFenced } from "../src/markdown/edit.js";
 
 let failures = 0;
 function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
@@ -136,6 +136,41 @@ assert.equal(list("a\n\nb", "ordered"), "1. a\n\n2. b", "blank lines are left al
 assert.equal(list("7) x", "ordered"), "x", "an existing number is a list already, so it toggles off");
 assert.equal(list("- a\n2. b", "ordered"), "1. a\n2. b", "a half-numbered range is numbered from one");
 assert.equal(toggleList("", { start: 0, end: 0 }, "bullet"), null, "an empty line is nothing to list");
+
+// --- tables ---------------------------------------------------------------
+{
+  assert.deepEqual(tableRowCells("| a | b |"), [" a ", " b "], "a row is split into cells");
+  assert.deepEqual(tableRowCells("| a \\| b |"), [" a \\| b "], "an escaped pipe is not a divider");
+  assert.equal(tableRowCells("plain"), null, "and a line that is not a row is not one");
+
+  const line = (text: string) => ({ start: 0, end: text.length, text });
+  const finish = (text: string) => {
+    const edit = completeTable(text, line(text));
+    return edit ? text.slice(0, edit.from) + edit.insert + text.slice(edit.to) : null;
+  };
+  assert.equal(finish("| a | b |"), "| a | b |\n| --- | --- |\n|  |  |",
+    "a header row is finished into a table");
+  assert.equal(finish("| a | b | c |"), "| a | b | c |\n| --- | --- | --- |\n|  |  |  |",
+    "with a column for every cell");
+  assert.equal(finish("| --- | --- |"), null, "a delimiter row is not a header");
+  assert.equal(finish("| a |"), null, "and one cell is not a table");
+  assert.equal(finish("plain text"), null);
+  {
+    const edit = completeTable("| a | b |", line("| a | b |"))!;
+    const out = "| a | b |" + edit.insert;
+    assert.equal(out.slice(edit.select!.start - 2, edit.select!.start), "| ",
+      "the caret lands in the first cell of the new row");
+  }
+
+  const fresh = (text: string) => {
+    const edit = insertTable(text, line(text));
+    return text.slice(0, edit.from) + edit.insert + text.slice(edit.to);
+  };
+  assert.equal(fresh(""), "|  |  |\n| --- | --- |\n|  |  |", "an empty line becomes a table");
+  assert.equal(fresh("text"), "text\n\n|  |  |\n| --- | --- |\n|  |  |",
+    "and a written line keeps what is on it");
+  assert.equal(insertTable("", line("")).select!.start, 2, "the caret starts in the first header cell");
+}
 
 // --- moving lines ---------------------------------------------------------
 const move = (text: string, dir: 1 | -1, start: number, end = start) =>

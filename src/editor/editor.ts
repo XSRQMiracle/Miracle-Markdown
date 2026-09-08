@@ -40,7 +40,9 @@ import {
   clearFormat,
   indentLines,
   INDENT,
+  completeTable,
   insertParagraph,
+  insertTable,
   insertTableRow,
   linesIn,
   moveLines,
@@ -386,6 +388,34 @@ export class Editor {
     if (to < this.text.length) to++;
     else if (from > 0) from--;
     this.replace(from, to, "");
+  }
+
+  /**
+   * Finish a table the author began by typing its header row.
+   *
+   * The one input rule worth having: everything else Typora converts on
+   * Return — a heading, a list, a quote — is already what our source says.
+   *
+   * Returns whether it handled the key.
+   */
+  private completeTable(): boolean {
+    if (this.dirty) this.relayout();
+    const { start, end } = this.range();
+    if (start !== end) return false;
+    const type = this.blockTypeAt(start);
+    if (type === "table" || (type && VERBATIM.includes(type))) return false;
+    const line = linesIn(this.text, { start, end })[0];
+    // Only from the end of the row: mid-line, Return is a line break.
+    if (start !== line.end) return false;
+    const edit = completeTable(this.text, line);
+    this.applyEdit(edit);
+    return edit !== null;
+  }
+
+  /** Put a fresh table where the caret is. */
+  insertTable(): void {
+    if (this.blockedBlock()) return;
+    this.applyEdit(insertTable(this.text, linesIn(this.text, this.range())[0]));
   }
 
   /**
@@ -1527,7 +1557,7 @@ export class Editor {
       case "Enter":
         e.preventDefault();
         if (e.shiftKey) this.insert(this.hardBreak(), false);
-        else if (!this.continueList()) this.insert("\n", false);
+        else if (!this.completeTable() && !this.continueList()) this.insert("\n", false);
         return;
       case "Tab":
         e.preventDefault();

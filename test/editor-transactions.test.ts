@@ -351,6 +351,6 @@ function fixture(text='aOLDz', start=4, end=1) {
   assert.deepEqual(room('| a |\n| - |', 2, true), ['\n\n| a |\n| - |', 0], 'even when the block is a table');
   // In a table, one more of these means one more row.
   assert.deepEqual(room('| a | b |\n| - | - |\n| 1 | 2 |', 22),
-    ['| a | b |\n| - | - |\n| 1 | 2 |\n| | |', 31], 'a row is added with the caret in its first cell');
+    ['| a | b |\n| - | - |\n| 1 | 2 |\n|  |  |', 32], 'a row is added with the caret in its first cell');
 }
 console.log('all editor transaction tests passing');
