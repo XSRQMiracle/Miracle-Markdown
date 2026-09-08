@@ -39,7 +39,9 @@ export type CommandId =
   | "codeFence"
   | "mathBlock"
   | "indent"
-  | "outdent";
+  | "outdent"
+  | "moveLineUp"
+  | "moveLineDown";
 
 export interface Command {
   /** Menu label. */
@@ -82,4 +84,6 @@ export const COMMANDS: Record<CommandId, Command> = {
   mathBlock: { label: "公式块", run: (e) => e.toggleFenced("math") },
   indent: { label: "增加缩进", run: (e) => e.indent(1) },
   outdent: { label: "减少缩进", run: (e) => e.indent(-1) },
+  moveLineUp: { label: "上移该行", run: (e) => e.moveLines(-1) },
+  moveLineDown: { label: "下移该行", run: (e) => e.moveLines(1) },
 };

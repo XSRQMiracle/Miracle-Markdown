@@ -125,7 +125,11 @@ export interface Line {
 /** Every source line the selection touches, including a collapsed caret's. */
 export function linesIn(text: string, sel: Range): Line[] {
   const from = text.lastIndexOf("\n", Math.max(0, sel.start - 1)) + 1;
-  let to = text.indexOf("\n", Math.max(sel.start, sel.end));
+  let last = Math.max(sel.start, sel.end);
+  // A selection that stops exactly at the start of a line has not reached
+  // into it: selecting "a\n" is one line, not two.
+  if (sel.start !== sel.end && last > from && text[last - 1] === "\n") last--;
+  let to = text.indexOf("\n", last);
   if (to < 0) to = text.length;
   const lines: Line[] = [];
   let at = from;
@@ -307,6 +311,45 @@ export function toggleList(text: string, sel: Range, kind: ListKind): Edit | nul
     const marker = kind === "ordered" ? `${n}. ` : kind === "task" ? "- [ ] " : "- ";
     return lead + marker + rest;
   });
+}
+
+/**
+ * Move the lines the selection touches past the line above or below.
+ *
+ * Line-wise rather than block-wise: in a document that *is* its source, the
+ * line is the thing the author can see moving, and inside a table it is the
+ * row — which is what Typora binds these keys to.
+ */
+export function moveLines(text: string, sel: Range, direction: 1 | -1): Edit | null {
+  const lines = linesIn(text, sel);
+  const first = lines[0];
+  const last = lines[lines.length - 1];
+  const body = text.slice(first.start, last.end);
+
+  if (direction < 0) {
+    if (first.start === 0) return null;
+    const above = text.lastIndexOf("\n", first.start - 2) + 1;
+    const moved = text.slice(above, first.start - 1);
+    const delta = -(moved.length + 1);
+    return {
+      from: above,
+      to: last.end,
+      insert: `${body}\n${moved}`,
+      select: { start: sel.start + delta, end: sel.end + delta },
+    };
+  }
+
+  if (last.end >= text.length) return null;
+  let below = text.indexOf("\n", last.end + 1);
+  if (below < 0) below = text.length;
+  const moved = text.slice(last.end + 1, below);
+  const delta = moved.length + 1;
+  return {
+    from: first.start,
+    to: below,
+    insert: `${moved}\n${body}`,
+    select: { start: sel.start + delta, end: sel.end + delta },
+  };
 }
 
 /** One level of list nesting, matching what the parser counts. */

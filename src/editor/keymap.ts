@@ -144,4 +144,6 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Ctrl+Shift+m", command: "mathBlock" },
   { chord: "Mod+]", command: "indent" },
   { chord: "Mod+[", command: "outdent" },
+  { chord: "Alt+ArrowUp", command: "moveLineUp" },
+  { chord: "Alt+ArrowDown", command: "moveLineDown" },
 ];

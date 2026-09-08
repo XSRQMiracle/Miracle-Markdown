@@ -37,6 +37,7 @@ import {
   clearFormat,
   indentLines,
   INDENT,
+  moveLines,
   setHeading,
   stepHeading,
   toggleInline,
@@ -334,6 +335,11 @@ export class Editor {
     const edit = indentLines(this.text, this.range(), direction);
     this.applyEdit(edit);
     return edit !== null;
+  }
+
+  /** Move the lines the selection touches past their neighbour. */
+  moveLines(direction: 1 | -1): void {
+    this.applyEdit(moveLines(this.text, this.range(), direction));
   }
 
   /** The selection, low end first. */

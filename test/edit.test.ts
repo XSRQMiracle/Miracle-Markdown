@@ -5,7 +5,7 @@
 // selection with a space on the end, markup already there, a formula caught in
 // the middle — cheap to pin down.
 import assert from "node:assert/strict";
-import { clearFormat, indentLines, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote, unwrapFenced, wrapFenced } from "../src/markdown/edit.js";
+import { clearFormat, indentLines, moveLines, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote, unwrapFenced, wrapFenced } from "../src/markdown/edit.js";
 
 let failures = 0;
 function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
@@ -136,6 +136,23 @@ assert.equal(list("a\n\nb", "ordered"), "1. a\n\n2. b", "blank lines are left al
 assert.equal(list("7) x", "ordered"), "x", "an existing number is a list already, so it toggles off");
 assert.equal(list("- a\n2. b", "ordered"), "1. a\n2. b", "a half-numbered range is numbered from one");
 assert.equal(toggleList("", { start: 0, end: 0 }, "bullet"), null, "an empty line is nothing to list");
+
+// --- moving lines ---------------------------------------------------------
+const move = (text: string, dir: 1 | -1, start: number, end = start) =>
+  apply(text, moveLines(text, { start, end }, dir));
+assert.equal(move("a\nb\nc", -1, 2), "b\na\nc", "a line swaps with the one above");
+assert.equal(move("a\nb\nc", 1, 0), "b\na\nc", "and with the one below");
+assert.equal(moveLines("a\nb", { start: 0, end: 0 }, -1), null, "the first line has nowhere to go up");
+assert.equal(moveLines("a\nb", { start: 2, end: 2 }, 1), null, "nor the last one down");
+assert.equal(move("a\nb\nc\nd", 1, 0, 3), "c\na\nb\nd", "a selected run moves together");
+assert.equal(move("a\n\nb", -1, 2), "\na\nb", "a blank line is a line like any other");
+{
+  // The selection travels with the lines it is on.
+  const edit = moveLines("a\nbb\nc", { start: 3, end: 3 }, -1)!;
+  assert.deepEqual(edit.select, { start: 1, end: 1 }, "the caret keeps its place in the moved line");
+}
+// A selection ending exactly at a line start has not reached into that line.
+assert.equal(move("a\nb\nc", 1, 0, 2), "b\na\nc", "selecting a line and its newline moves one line");
 
 // --- indentation ----------------------------------------------------------
 const shift = (text: string, dir: 1 | -1, start = 0, end = text.length) =>
