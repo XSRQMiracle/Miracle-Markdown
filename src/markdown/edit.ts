@@ -366,6 +366,23 @@ export function insertParagraph(text: string, block: Range, before: boolean): Ed
   return { from: block.end, to: block.end, insert: "\n\n", select: { start: at, end: at } };
 }
 
+/**
+ * Tick or untick the task items the selection touches.
+ *
+ * Lines that are not task items are left alone: this flips a box, it does not
+ * hand one out.
+ */
+export function toggleTask(text: string, sel: Range): Edit | null {
+  const lines = linesIn(text, sel);
+  const box = /^(\s*(?:[-*+]|\d+[.)])[ \t]+\[)([ xX])(\])/;
+  // If any of them is unticked, the press ticks them all; the reverse only
+  // when every one is already ticked.
+  const ticking = lines.some((l) => box.exec(l.text)?.[2] === " ");
+  return mapLines(text, sel, (line) =>
+    line.replace(box, (_, open: string, state: string, close: string) =>
+      open + (ticking ? "x" : " ") + close));
+}
+
 /** The cells of a line written as a table row, or null if it is not one. */
 export function tableRowCells(line: string): string[] | null {
   const trimmed = line.trim();

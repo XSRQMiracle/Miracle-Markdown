@@ -54,7 +54,10 @@ const platform = (value: string) =>
 
 function gestures(text: string, ranges: Array<[number, number]>) {
   const input = Object.assign(new EventTarget(), { value: "", focus() {}, blur() {} });
-  const canvas = new EventTarget();
+  const canvas = Object.assign(new EventTarget(), {
+    clientWidth: 800,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+  });
   const editor = Object.create(Editor.prototype) as any;
   Object.assign(editor, {
     text, selStart: 0, selEnd: 0, caretAffinity: "downstream", preferredX: null,
@@ -63,7 +66,7 @@ function gestures(text: string, ranges: Array<[number, number]>) {
     // Enough of the geometry for the scrollbar to work out that a document
     // this short does not need one.
     host: { clientHeight: 600 }, docHeight: 0, typesetter: { theme: { bodySize: 18 } },
-    blocks: ranges.map(([start, end]) => ({ block: { start, end } })),
+    blocks: ranges.map(([start, end]) => ({ block: { start, end, task: "none" }, lines: [] })),
     invalidate() {}, scrollCaretIntoView() {},
     positionAt: (x: number) => ({ offset: x, affinity: "downstream" }),
   });

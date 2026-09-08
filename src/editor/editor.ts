@@ -16,6 +16,7 @@
  */
 
 import {
+  checkboxRect,
   MATCH_COLOR,
   Renderer,
   type Scrollbar,
@@ -51,6 +52,7 @@ import {
   toggleInline,
   toggleList,
   toggleQuote,
+  toggleTask,
   unwrapFenced,
   wrapFenced,
   type ListKind,
@@ -313,6 +315,37 @@ export class Editor {
   stepHeading(direction: 1 | -1): void {
     if (this.blockedBlock()) return;
     this.applyEdit(stepHeading(this.text, this.range(), direction));
+  }
+
+  /** Tick or untick the task items the selection touches. */
+  toggleTask(range = this.range()): void {
+    this.applyEdit(toggleTask(this.text, range));
+  }
+
+  /**
+   * The task item whose checkbox is under a point.
+   *
+   * The box is drawn in the margin rather than set as text, so it has no
+   * source position to hit-test against: its rectangle has to be recomputed
+   * the way the renderer computes it, from the same function.
+   */
+  private checkboxAt(clientX: number, clientY: number): LaidBlock | null {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = clientX - rect.left - this.gutter;
+    const y = clientY - rect.top - this.originY + this.scrollTop;
+    for (const b of this.blocks) {
+      if (b.block.task === "none" || !b.lines.length) continue;
+      const style = b.lines[0].runs[0]?.style;
+      if (!style) continue;
+      const box = checkboxRect(b, style.size, b.y + b.lines[0].baseline, this.theme);
+      // A little room around it: the box is small, and a pointer is not.
+      const slack = 3;
+      if (x >= box.x - slack && x <= box.x + box.w + slack &&
+        y >= box.y - slack && y <= box.y + box.h + slack) {
+        return b;
+      }
+    }
+    return null;
   }
 
   /** Quote the lines the selection touches, or unquote them. */
@@ -1388,6 +1421,14 @@ export class Editor {
           this.onFollowLink?.(href);
           return;
         }
+      }
+      // A checkbox is a control, so a plain click on it ticks the box rather
+      // than putting the caret next to it.
+      const task = this.checkboxAt(e.clientX, e.clientY);
+      if (task) {
+        this.focus();
+        this.toggleTask({ start: task.block.start, end: task.block.start });
+        return;
       }
       this.finishComposition();
       this.interacted = true;

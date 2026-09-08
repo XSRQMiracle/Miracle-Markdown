@@ -5,7 +5,7 @@
 // selection with a space on the end, markup already there, a formula caught in
 // the middle — cheap to pin down.
 import assert from "node:assert/strict";
-import { clearFormat, completeTable, indentLines, insertTable, moveLines, tableRowCells, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote, unwrapFenced, wrapFenced } from "../src/markdown/edit.js";
+import { clearFormat, completeTable, indentLines, insertTable, moveLines, tableRowCells, setHeading, stepHeading, toggleInline, toggleLink, toggleList, toggleQuote, toggleTask, unwrapFenced, wrapFenced } from "../src/markdown/edit.js";
 
 let failures = 0;
 function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
@@ -136,6 +136,18 @@ assert.equal(list("a\n\nb", "ordered"), "1. a\n\n2. b", "blank lines are left al
 assert.equal(list("7) x", "ordered"), "x", "an existing number is a list already, so it toggles off");
 assert.equal(list("- a\n2. b", "ordered"), "1. a\n2. b", "a half-numbered range is numbered from one");
 assert.equal(toggleList("", { start: 0, end: 0 }, "bullet"), null, "an empty line is nothing to list");
+
+// --- task status ----------------------------------------------------------
+const tick = (text: string, start = 0, end = text.length) => apply(text, toggleTask(text, { start, end }));
+assert.equal(tick("- [ ] a"), "- [x] a", "an unticked box is ticked");
+assert.equal(tick("- [x] a"), "- [ ] a", "and a ticked one unticked");
+assert.equal(tick("- [X] a"), "- [ ] a", "however it was written");
+assert.equal(tick("1. [ ] a"), "1. [x] a", "a numbered task counts too");
+assert.equal(tick("- [ ] a\n- [x] b"), "- [x] a\n- [x] b",
+  "a mixed run is ticked, so one press means one thing");
+assert.equal(tick("- [x] a\n- [x] b"), "- [ ] a\n- [ ] b", "and only unticks when all of them are");
+assert.equal(toggleTask("- plain", { start: 0, end: 7 }), null, "a bullet with no box is left alone");
+assert.equal(toggleTask("text", { start: 0, end: 4 }), null);
 
 // --- tables ---------------------------------------------------------------
 {

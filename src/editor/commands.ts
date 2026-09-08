@@ -50,7 +50,8 @@ export type CommandId =
   | "deleteLine"
   | "insertParagraphBefore"
   | "insertParagraphAfter"
-  | "insertTable";
+  | "insertTable"
+  | "toggleTask";
 
 export interface Command {
   /** Menu label. */
@@ -89,6 +90,7 @@ export const COMMANDS: Record<CommandId, Command> = {
   unorderedList: { label: "无序列表", run: (e) => e.toggleList("bullet") },
   orderedList: { label: "有序列表", run: (e) => e.toggleList("ordered") },
   taskList: { label: "任务列表", run: (e) => e.toggleList("task") },
+  toggleTask: { label: "切换任务状态", run: (e) => e.toggleTask() },
   codeFence: { label: "代码块", run: (e) => e.toggleFenced("code") },
   mathBlock: { label: "公式块", run: (e) => e.toggleFenced("math") },
   indent: { label: "增加缩进", run: (e) => e.indent(1) },

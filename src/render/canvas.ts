@@ -35,6 +35,28 @@ export interface SelectionRect {
   color?: string;
 }
 
+/**
+ * Where a task list's checkbox is drawn.
+ *
+ * Shared with the editor so that clicking the box and painting it cannot
+ * disagree about where it is.
+ */
+export function checkboxRect(
+  b: LaidBlock,
+  size: number,
+  baseline: number,
+  theme: Theme,
+): SelectionRect {
+  const box = size * 0.72;
+  return {
+    // Sit the box on the text's optical centre rather than its baseline.
+    x: b.indent - box - theme.bodySize * 0.45,
+    y: baseline - box * 0.92,
+    w: box,
+    h: box,
+  };
+}
+
 /** The selection's own colour, and the one search matches are marked in. */
 export const SELECTION_COLOR = "#cddcf0";
 export const MATCH_COLOR = "#f6e3a1";
@@ -443,10 +465,7 @@ export class Renderer {
     theme: Theme,
   ): void {
     const ctx = this.ctx;
-    const box = size * 0.72;
-    // Sit the box on the text's optical centre rather than its baseline.
-    const top = baseline - box * 0.92;
-    const left = b.indent - box - theme.bodySize * 0.45;
+    const { x: left, y: top, w: box } = checkboxRect(b, size, baseline, theme);
     const stroke = Math.max(1, size / 14);
 
     ctx.save();
