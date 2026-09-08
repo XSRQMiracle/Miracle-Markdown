@@ -218,6 +218,25 @@ assert.equal(shift("> a", -1), "a", "with nothing else to give back, a quote lev
 assert.equal(shift("a\n\nb", 1), "  a\n\n  b", "blank lines are left alone");
 assert.equal(indentLines("a", { start: 0, end: 0 }, -1), null, "and an unindented line cannot outdent");
 
+// --- what the commands write ----------------------------------------------
+// Typora calls these Syntax Preference and applies them only to what the menu
+// creates; an existing list keeps the marker its author typed.
+{
+  const style = { bullet: "*" as const, ordered: "repeat" as const, indent: "    ", codeIndent: "  " };
+  const listed = (text: string, kind: "bullet" | "ordered") =>
+    apply(text, toggleList(text, { start: 0, end: text.length }, kind, style));
+  assert.equal(listed("a\nb", "bullet"), "* a\n* b", "a new list takes the chosen bullet");
+  assert.equal(listed("a\nb", "ordered"), "1. a\n1. b", "and repeats the number when asked");
+  assert.equal(apply("- a\n- b", toggleList("- a\n- b", { start: 0, end: 7 }, "bullet", style)),
+    "a\nb", "an existing list is still recognised whatever the setting");
+
+  const shifted = (text: string, dir: 1 | -1, at: number) =>
+    apply(text, indentLines(text, { start: at, end: at }, dir, style));
+  assert.equal(shifted("- a\n- b", 1, 6), "- a\n    - b", "one level is as wide as the setting says");
+  assert.equal(shifted("- a\n    - b", -1, 10), "- a\n- b", "and comes off in one step");
+  assert.equal(shifted("- a\n  - b", -1, 8), "- a\n- b", "a narrower indent still outdents whole");
+}
+
 // --- blockquote -----------------------------------------------------------
 const quote = (text: string, start = 0, end = text.length) => apply(text, toggleQuote(text, { start, end }));
 assert.equal(quote("a"), "> a", "a line is quoted");

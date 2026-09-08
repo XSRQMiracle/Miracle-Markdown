@@ -39,8 +39,8 @@ import { BINDINGS, commandFor } from "./keymap.js";
 import { COMMANDS, type CommandId } from "./commands.js";
 import {
   clearFormat,
+  DEFAULT_WRITING_STYLE,
   indentLines,
-  INDENT,
   completeTable,
   insertParagraph,
   insertTable,
@@ -56,6 +56,7 @@ import {
   unwrapFenced,
   wrapFenced,
   type ListKind,
+  type WritingStyle,
   toggleLink,
   type Edit,
 } from "../markdown/edit.js";
@@ -405,7 +406,7 @@ export class Editor {
   /** Make the lines the selection touches list items, or plain lines. */
   toggleList(kind: ListKind): void {
     if (this.blockedBlock()) return;
-    this.applyEdit(toggleList(this.text, this.range(), kind));
+    this.applyEdit(toggleList(this.text, this.range(), kind, this.editingOptions.writing));
   }
 
   /**
@@ -432,7 +433,7 @@ export class Editor {
   /** Indent or outdent the lines the selection touches. */
   indent(direction: 1 | -1): boolean {
     if (this.blockedBlock()) return false;
-    const edit = indentLines(this.text, this.range(), direction);
+    const edit = indentLines(this.text, this.range(), direction, this.editingOptions.writing);
     this.applyEdit(edit);
     return edit !== null;
   }
@@ -648,6 +649,13 @@ export class Editor {
       start: Math.min(this.selStart, this.selEnd),
       end: Math.max(this.selStart, this.selEnd),
     };
+  }
+
+  /** What a plain Tab writes. Code has its own convention for how wide an
+   *  indent is, and it is wider than prose's. */
+  private tabText(): string {
+    const { indent, codeIndent } = this.editingOptions.writing;
+    return this.blockTypeAt(this.range().start) === "code" ? codeIndent : indent;
   }
 
   /** Whether Tab should indent rather than write spaces: a run of lines is
@@ -1721,7 +1729,7 @@ export class Editor {
         // Otherwise it is indentation where there is something to indent — a
         // list item, or a run of lines — and a plain indent everywhere else.
         if (e.shiftKey) this.indent(-1);
-        else if (!this.indentable() || !this.indent(1)) this.insert(INDENT, false);
+        else if (!this.indentable() || !this.indent(1)) this.insert(this.tabText(), false);
         return;
     }
   }
@@ -1906,6 +1914,8 @@ export interface SearchStatus {
 export interface EditingOptions {
   /** Turn typed quotes, dashes and dots into their typographic forms. */
   smartPunctuation: boolean;
+  /** How the editor writes the markdown its commands generate. */
+  writing: WritingStyle;
   /** Show the whole document as markdown source rather than typeset. */
   sourceMode: boolean;
   /** Veil everything but the line being written. */
@@ -1916,6 +1926,7 @@ export interface EditingOptions {
 
 export const DEFAULT_EDITING_OPTIONS: EditingOptions = {
   smartPunctuation: true,
+  writing: { ...DEFAULT_WRITING_STYLE },
   sourceMode: false,
   focusMode: false,
   typewriter: false,

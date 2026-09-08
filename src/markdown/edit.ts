@@ -295,7 +295,12 @@ function listKind(body: string): ListKind | null {
  * different kind restyles them in place, so a bulleted list becomes a
  * numbered one without going through a paragraph on the way.
  */
-export function toggleList(text: string, sel: Range, kind: ListKind): Edit | null {
+export function toggleList(
+  text: string,
+  sel: Range,
+  kind: ListKind,
+  style: WritingStyle = DEFAULT_WRITING_STYLE,
+): Edit | null {
   const lines = linesIn(text, sel);
   const body = (line: string) => line.slice(LEAD.exec(line)![1].length);
   const content = lines.filter((l) => l.text.trim());
@@ -308,7 +313,10 @@ export function toggleList(text: string, sel: Range, kind: ListKind): Edit | nul
     const rest = line.slice(lead.length).replace(MARKER, "");
     if (already) return lead + rest;
     n++;
-    const marker = kind === "ordered" ? `${n}. ` : kind === "task" ? "- [ ] " : "- ";
+    const number = style.ordered === "repeat" ? 1 : n;
+    const marker = kind === "ordered"
+      ? `${number}. `
+      : kind === "task" ? `${style.bullet} [ ] ` : `${style.bullet} `;
     return lead + marker + rest;
   });
 }
@@ -458,8 +466,32 @@ export function insertTableRow(text: string, lineEnd: number, columns: number): 
   return { from: lineEnd, to: lineEnd, insert: `\n${row}`, select: { start: at, end: at } };
 }
 
-/** One level of list nesting, matching what the parser counts. */
-export const INDENT = "  ";
+/**
+ * How this editor writes the markdown it generates.
+ *
+ * Typora calls these Syntax Preference and says they apply "only to styles
+ * created from the menu bar" — an existing list keeps the bullet the author
+ * typed, and only new ones take the setting. The same is true here: every
+ * command that rewrites a marker reads the marker that is there first.
+ */
+export interface WritingStyle {
+  /** The bullet a new unordered list is written with. */
+  bullet: "-" | "+" | "*";
+  /** Whether a new numbered list counts up or repeats its first number. */
+  ordered: "increment" | "repeat";
+  /** One level of nesting, and what Tab writes outside a list. */
+  indent: string;
+  /** What Tab writes inside a code fence, which is its own convention. */
+  codeIndent: string;
+}
+
+export const DEFAULT_WRITING_STYLE: WritingStyle = {
+  bullet: "-",
+  ordered: "increment",
+  indent: "  ",
+  codeIndent: "    ",
+};
+
 /** Blockquote markers only — unlike LEAD this leaves the indentation, which
  *  is the very thing an indent command has to move. */
 const QUOTED = /^((?:[ \t]*>[ \t]?)*)/;
@@ -475,7 +507,12 @@ const QUOTED = /^((?:[ \t]*>[ \t]?)*)/;
  * Outdenting takes a level of list indent if there is one, and otherwise a
  * level of blockquote — the two ways a line can be nested.
  */
-export function indentLines(text: string, sel: Range, direction: 1 | -1): Edit | null {
+export function indentLines(
+  text: string,
+  sel: Range,
+  direction: 1 | -1,
+  style: WritingStyle = DEFAULT_WRITING_STYLE,
+): Edit | null {
   const lines = linesIn(text, sel);
   if (direction > 0) {
     const first = lines[0];
@@ -484,12 +521,15 @@ export function indentLines(text: string, sel: Range, direction: 1 | -1): Edit |
     return mapLines(text, sel, (line) => {
       if (!line.trim()) return line;
       const at = QUOTED.exec(line)![1].length;
-      return line.slice(0, at) + INDENT + line.slice(at);
+      return line.slice(0, at) + style.indent + line.slice(at);
     });
   }
   return mapLines(text, sel, (line) => {
     const at = QUOTED.exec(line)![1].length;
-    const outdented = line.slice(0, at) + line.slice(at).replace(/^(?: {1,2}|\t)/, "");
+    // One level off, however wide a level is — or a tab, which is one level
+    // whatever its width.
+    const level = new RegExp(`^(?: {1,${style.indent.length}}|\\t)`);
+    const outdented = line.slice(0, at) + line.slice(at).replace(level, "");
     if (outdented !== line) return outdented;
     return line.replace(/^(\s*)>[ \t]?/, "$1");
   });
