@@ -22,6 +22,8 @@ export interface TextStyle {
   color: string;
   /** Line box height as a multiple of the font size. */
   lineHeight: number;
+  /** Painted behind the text, for highlighted spans. */
+  background?: string;
 }
 
 export const FALLBACK_SERIF =

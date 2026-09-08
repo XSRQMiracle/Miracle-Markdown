@@ -21,6 +21,7 @@ export type CommandId =
   | "emphasis"
   | "inlineCode"
   | "strike"
+  | "highlight"
   | "clearFormat"
   | "hyperlink"
   | "heading1"
@@ -80,6 +81,7 @@ export const COMMANDS: Record<CommandId, Command> = {
   emphasis: { label: "斜体", group: "格式", run: (e) => e.toggleInline("*") },
   inlineCode: { label: "代码", group: "格式", run: (e) => e.toggleInline("`") },
   strike: { label: "删除线", group: "格式", run: (e) => e.toggleInline("~~") },
+  highlight: { label: "高亮", group: "格式", run: (e) => e.toggleInline("==") },
   clearFormat: { label: "清除样式", group: "格式", run: (e) => e.clearFormat() },
   hyperlink: { label: "超链接", group: "格式", run: (e) => e.toggleLink() },
 

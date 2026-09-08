@@ -31,6 +31,20 @@ export function buildMathPanel(
   let errorMessage = "";
   const groups: Array<{ title: string; checks: Check[] }> = [
     {
+      title: "Markdown 扩展语法",
+      checks: [
+        {
+          label: "高亮 ==key==",
+          hint:
+            "CommonMark 里没有这条语法，Typora 也默认关闭：一篇用 == 表示别的东西的文档" +
+            "（分隔线、等式）应当仍旧照原样显示。开启后 ==文字== 会被标黄。",
+          get: () => editor.options.inline.highlight,
+          set: (on) =>
+            editor.setOptions({ inline: { ...editor.options.inline, highlight: on } }),
+        },
+      ],
+    },
+    {
       title: "识别为公式",
       checks: [
         {

@@ -71,6 +71,7 @@ export type SpanKind =
   | "code"
   | "link"
   | "strike"
+  | "highlight"
   | "math"
   | "image";
 
@@ -111,6 +112,7 @@ export interface Span {
   em: boolean;
   code: boolean;
   strike: boolean;
+  highlight: boolean;
   href: string;
 }
 
@@ -891,12 +893,21 @@ function plainSpan(start: number, end: number): Span {
     em: false,
     code: false,
     strike: false,
+    highlight: false,
     href: "",
   };
 }
 
 /** How the inline scanner should treat math delimiters. */
 export interface InlineOptions {
+  /**
+   * Recognise `==highlighted==` text.
+   *
+   * Off by default, as it is in Typora: `==` is not CommonMark, and a
+   * document that writes it for something else — a rule, an equation — should
+   * keep saying what it says.
+   */
+  highlight: boolean;
   /** Recognise dollar-delimited formulas at all. */
   inlineMath: boolean;
   /** Recognise TeX's own \( \) and \[ \] delimiters. */
@@ -932,6 +943,7 @@ export interface InlineOptions {
 }
 
 export const DEFAULT_INLINE_OPTIONS: InlineOptions = {
+  highlight: false,
   inlineMath: true,
   texDelimiters: true,
   strictDollar: true,
@@ -1189,13 +1201,17 @@ export function parseInline(
       continue;
     }
 
-    if (c === "*" || c === "_" || c === "~") {
+    if (c === "*" || c === "_" || c === "~" || (c === "=" && options.highlight)) {
       if (i >= markerEnd) {
         markerEnd = i + 1;
         while (markerEnd < limit && body[markerEnd] === c) markerEnd++;
       }
       const n = markerEnd - i;
-      const marker = c === "~" ? (n >= 2 ? "~~" : "") : n >= 2 ? c + c : c;
+      // A single tilde or equals is not a delimiter: `~~` is strikethrough and
+      // `==` is a highlight, and a lone one of either is ordinary punctuation.
+      const marker = c === "~" || c === "="
+        ? (n >= 2 ? c + c : "")
+        : n >= 2 ? c + c : c;
       if (!marker) {
         i += n;
         continue;
@@ -1225,7 +1241,9 @@ export function parseInline(
           truncateOpen(top);
           drops.push([o.at, o.at + len], [i, i + len]);
           formats.push({
-            kind: marker === "~~" ? "strike" : len === 2 ? "strong" : "em",
+            kind: marker === "~~" ? "strike"
+              : marker === "==" ? "highlight"
+              : len === 2 ? "strong" : "em",
             from: o.contentAt,
             to: i,
             href: "",
@@ -1363,7 +1381,7 @@ class FormatSweep {
   private active = new Set<number>();
   private changes = new Set<number>();
   private links: number[] = [];
-  private counts = { strong: 0, em: 0, code: 0, strike: 0 };
+  private counts = { strong: 0, em: 0, code: 0, strike: 0, highlight: 0 };
   private format: Span | undefined;
 
   constructor(private formats: Format[]) {
@@ -1385,7 +1403,8 @@ class FormatSweep {
         this.active.add(id);
         if (kind === "link") this.addLink(id);
       } else this.active.delete(id);
-      if (kind === "strong" || kind === "em" || kind === "code" || kind === "strike") {
+      if (kind === "strong" || kind === "em" || kind === "code" || kind === "strike" ||
+        kind === "highlight") {
         this.counts[kind] += entering ? 1 : -1;
       }
       // A format wholly hidden between emitted characters does not split a
@@ -1401,10 +1420,17 @@ class FormatSweep {
     const em = this.counts.em > 0;
     const code = this.counts.code > 0;
     const strike = this.counts.strike > 0;
+    const highlight = this.counts.highlight > 0;
     return this.format = {
       ...unformatted,
-      kind: link ? "link" : code ? "code" : strong ? "strong" : em ? "em" : strike ? "strike" : "text",
-      strong, em, code, strike, href: link?.href ?? "",
+      kind: link ? "link"
+        : code ? "code"
+        : strong ? "strong"
+        : em ? "em"
+        : strike ? "strike"
+        : highlight ? "highlight"
+        : "text",
+      strong, em, code, strike, highlight, href: link?.href ?? "",
     };
   }
 
@@ -1451,6 +1477,7 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       em: false,
       code: false,
       strike: false,
+      highlight: false,
       href: "",
     };
   }
@@ -1465,6 +1492,7 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       em: false,
       code: false,
       strike: false,
+      highlight: false,
     };
   }
   if (math) {
@@ -1478,6 +1506,7 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
       em: false,
       code: false,
       strike: false,
+      highlight: false,
       href: "",
     };
   }
@@ -1492,13 +1521,16 @@ function spanFrom(fs: Format[], start: number, end: number): Span {
             ? "em"
             : has("strike")
               ? "strike"
-              : "text",
+              : has("highlight")
+                ? "highlight"
+                : "text",
     start,
     end,
     strong: has("strong"),
     em: has("em"),
     code: has("code"),
     strike: has("strike"),
+    highlight: has("highlight"),
     href: link?.href ?? "",
   };
 }

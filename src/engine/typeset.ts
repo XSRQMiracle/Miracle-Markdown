@@ -53,6 +53,8 @@ export interface Theme {
   accentColor: string;
   codeBackground: string;
   ruleColor: string;
+  /** Behind ==highlighted== text. */
+  highlightColor: string;
 }
 
 export const DEFAULT_THEME: Theme = {
@@ -67,6 +69,7 @@ export const DEFAULT_THEME: Theme = {
   accentColor: "#2f6f4f",
   codeBackground: "#f5f4f1",
   ruleColor: "#dcdad4",
+  highlightColor: "#fbeaa8",
 };
 
 export interface TypesetOptions {
@@ -498,7 +501,11 @@ function styleForSpan(
     color,
     lineHeight: heading ? 1.35 : code ? 1.55 : theme.lineHeight,
   };
-  return { style, key: cssFont(style) };
+  if (span?.highlight) style.background = theme.highlightColor;
+  // The key is what the measurement caches and run coalescing key on, so
+  // anything that changes how a run is *painted* has to be in it, even when
+  // it leaves the metrics alone.
+  return { style, key: cssFont(style) + (style.background ?? "") };
 }
 
 /** How far into its column a line sits, given the column's alignment. */
@@ -903,7 +910,7 @@ export class Typesetter {
     // from the lighter face makes the heading it was sized for wrap.
     const header = styleForSpan(theme, block, {
       kind: "text", start: 0, end: 0,
-      strong: true, em: false, code: false, strike: false, href: "",
+      strong: true, em: false, code: false, strike: false, highlight: false, href: "",
     });
     const natural = Array.from({ length: columns }, (_, c) =>
       Math.max(

@@ -1,4 +1,10 @@
-import { parseBlocks, renderBlock, parseInline, LINE_SEPARATOR } from "../src/markdown/parse.js";
+import {
+  DEFAULT_INLINE_OPTIONS,
+  parseBlocks,
+  renderBlock,
+  parseInline,
+  LINE_SEPARATOR,
+} from "../src/markdown/parse.js";
 
 let failures = 0;
 function eq(actual: unknown, expected: unknown, label: string) {
@@ -10,6 +16,32 @@ function eq(actual: unknown, expected: unknown, label: string) {
   } else {
     console.log(`ok   ${label}`);
   }
+}
+
+// --- highlight, an opt-in extension ---------------------------------------
+// `==` is not CommonMark, so it is off unless asked for — as it is in Typora.
+{
+  const on = { ...DEFAULT_INLINE_OPTIONS, highlight: true };
+  const lit = parseInline("==key==", 0, undefined, DEFAULT_INLINE_OPTIONS);
+  eq(lit.text, "==key==", "with the option off the equals signs are text");
+  eq(lit.spans.map((s) => s.highlight), [false], "and nothing is highlighted");
+
+  const marked = parseInline("==key==", 0, undefined, on);
+  eq(marked.text, "key", "with it on the markers are removed");
+  eq(marked.spans.map((s) => [s.kind, s.highlight]), [["highlight", true]]);
+  eq(parseInline("a ==b== c", 0, undefined, on).text, "a b c", "inside a sentence");
+  eq(parseInline("=one=", 0, undefined, on).text, "=one=",
+     "a single equals is ordinary punctuation, not a delimiter");
+  eq(parseInline("a = b", 0, undefined, on).text, "a = b", "and so is one on its own");
+  eq(parseInline("== spaced ==", 0, undefined, on).text, "== spaced ==",
+     "a marker with space after it cannot open");
+  // It nests with the other emphasis, in both directions.
+  eq(parseInline("==**a**==", 0, undefined, on).spans.map((s) => [s.highlight, s.strong]),
+     [[true, true]], "strong inside a highlight");
+  eq(parseInline("**==a==**", 0, undefined, on).spans.map((s) => [s.highlight, s.strong]),
+     [[true, true]], "and a highlight inside strong");
+  eq(parseInline("`==a==`", 0, undefined, on).spans.map((s) => [s.code, s.highlight]),
+     [[true, false]], "code is opaque to it");
 }
 
 // --- inline delimiters -----------------------------------------------------

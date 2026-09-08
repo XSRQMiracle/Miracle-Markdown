@@ -188,6 +188,14 @@ export class Renderer {
           }
 
           this.setFont(cssFont(run.style));
+          // A highlight is a band behind the words rather than a colour on
+          // them, so it has to be painted before they are.
+          if (run.style.background) {
+            const w = ctx.measureText(run.text).width * run.scaleX;
+            const size = run.style.size;
+            this.setFill(run.style.background);
+            ctx.fillRect(x, y - size * 0.84, w, size * 1.08);
+          }
           this.setFill(run.style.color);
           if (run.scaleX !== 1) {
             ctx.save();
