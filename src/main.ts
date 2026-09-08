@@ -133,6 +133,13 @@ async function main() {
   const findBar = buildFindBar(document.getElementById("find-bar") as HTMLElement, editor);
   window.addEventListener("keydown", (e) => {
     if (document.querySelector("dialog[open]")) return;
+    // F3 and Shift+F3 step through the matches on Windows and Linux, where
+    // they are the convention; Ctrl+H opens the bar with the replacement
+    // field ready, as ⌥⌘F does on a Mac.
+    if (e.key === "F3") {
+      if (findBar.step(e.shiftKey)) e.preventDefault();
+      return;
+    }
     // Escape closes the search from anywhere, including the document itself,
     // which is where the caret is once a match has been stepped to.
     if (e.key === "Escape" && findBar.isOpen) {
@@ -151,6 +158,9 @@ async function main() {
       // where the platform puts "find and replace".
       e.preventDefault();
       findBar.open(editor.selectedText() || undefined, e.altKey);
+    } else if (key === "h" && !e.metaKey) {
+      e.preventDefault();
+      findBar.open(editor.selectedText() || undefined, true);
     } else if (key === "g") {
       // ⌘G continues a search that is already running; with the bar closed
       // there is nothing to continue.
