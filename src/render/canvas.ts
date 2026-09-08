@@ -14,6 +14,7 @@
 
 import type { LaidBlock, LaidRun, Theme } from "../engine/typeset.js";
 import { cssFont } from "../engine/measure.js";
+import type { MathDrawCommand } from "../engine/math.js";
 
 export interface Viewport {
   scrollTop: number;
@@ -117,7 +118,7 @@ export class Renderer {
           // A formula draws as outlines rather than text: MathJax laid it out,
           // we own where it goes. One fill call, whatever its complexity.
           if (run.math) {
-            this.drawMath(run, x, y, theme);
+            this.drawMath(run, x, y);
             continue;
           }
 
@@ -158,37 +159,109 @@ export class Renderer {
    * scale. When the formula did not parse we fall back to its source, which
    * is the honest thing to show while it is still being typed.
    */
-  private drawMath(run: LaidRun, x: number, baseline: number, theme: Theme): void {
+  private drawMath(run: LaidRun, x: number, baseline: number): void {
     const math = run.math!;
     const ctx = this.ctx;
 
     // A split formula draws its own piece; each carries outlines already
     // shifted so its left edge is the origin.
     const path = math.segment ? math.segment.path : math.geometry.path;
+    const commands = math.segment ? math.segment.commands : math.geometry.commands;
 
-    if (!path || math.geometry.error) {
-      // Show the LaTeX itself, tinted, rather than a gap or a broken glyph.
-      // A piece of a split formula has no sensible source of its own, so only
-      // the first one speaks for the whole.
-      if (math.segment && math.segment.path === null) return;
-      const text = math.source || "…";
-      this.setFont(cssFont({ ...run.style, italic: false, family: theme.monoFamily }));
-      this.setFill(math.geometry.error === "loading" ? theme.mutedColor : "#b3402f");
-      ctx.fillText(text, x, baseline);
+    if (math.fallback) {
+      // The typesetter already selected and measured this presentation.
+      // Choosing a different string or font here would invalidate its box.
+      this.setFont(cssFont(math.fallback.style));
+      this.setFill(math.fallback.style.color);
+      ctx.save();
+      ctx.translate(x, baseline);
+      ctx.scale(run.scaleX, 1);
+      ctx.fillText(math.fallback.text, 0, 0);
+      ctx.restore();
       return;
     }
 
     ctx.save();
     ctx.translate(x, baseline);
-    ctx.scale(math.scale, math.scale);
-    ctx.fillStyle = run.style.color;
-    ctx.fill(path);
+    ctx.scale(math.scale * run.scaleX, math.scale);
+    if (commands?.length) {
+      this.drawMathCommands(commands, run.style.color);
+    } else if (path) {
+      // Compatibility for geometries cached by the original, single-path
+      // representation.
+      ctx.fillStyle = run.style.color;
+      ctx.fill(path);
+    }
     ctx.restore();
     this.currentFill = "";
   }
 
+  /** Replay one MathJax SVG display list in document paint order. */
+  private drawMathCommands(commands: readonly MathDrawCommand[], currentColor: string): void {
+    const ctx = this.ctx;
+    const color = (value: string): string =>
+      value.toLowerCase() === "currentcolor" ? currentColor : value;
+
+    for (const command of commands) {
+      ctx.save();
+      const [a, b, c, d, e, f] = command.transform;
+      ctx.transform(a, b, c, d, e, f);
+
+      if (command.kind === "text") {
+        ctx.font = `${command.fontStyle} ${command.fontWeight} ${command.fontSize}px ${command.fontFamily}`;
+        ctx.textAlign =
+          command.textAnchor === "middle"
+            ? "center"
+            : command.textAnchor === "end"
+              ? "right"
+              : "left";
+        ctx.textBaseline = "alphabetic";
+        if (command.fill && command.opacity * command.fillOpacity > 0) {
+          ctx.fillStyle = color(command.fill);
+          ctx.globalAlpha = command.opacity * command.fillOpacity;
+          ctx.fillText(command.text, command.x, command.y);
+        }
+        if (
+          command.stroke &&
+          command.strokeWidth > 0 &&
+          command.opacity * command.strokeOpacity > 0
+        ) {
+          ctx.strokeStyle = color(command.stroke);
+          ctx.lineWidth = command.strokeWidth;
+          ctx.globalAlpha = command.opacity * command.strokeOpacity;
+          ctx.strokeText(command.text, command.x, command.y);
+        }
+        ctx.restore();
+        continue;
+      }
+
+      ctx.lineWidth = command.strokeWidth;
+      ctx.lineCap = command.lineCap;
+      ctx.lineJoin = command.lineJoin;
+      ctx.miterLimit = command.miterLimit;
+      ctx.setLineDash(command.lineDash);
+      ctx.lineDashOffset = command.lineDashOffset;
+      if (command.fill && command.opacity * command.fillOpacity > 0) {
+        ctx.fillStyle = color(command.fill);
+        ctx.globalAlpha = command.opacity * command.fillOpacity;
+        ctx.fill(command.path, command.fillRule);
+      }
+      if (
+        command.stroke &&
+        command.strokeWidth > 0 &&
+        command.opacity * command.strokeOpacity > 0
+      ) {
+        ctx.strokeStyle = color(command.stroke);
+        ctx.globalAlpha = command.opacity * command.strokeOpacity;
+        ctx.stroke(command.path);
+      }
+      ctx.restore();
+    }
+  }
+
   /** Quote bars, code panels, rules and list bullets. */
   private drawDecoration(b: LaidBlock, theme: Theme, view: Viewport): void {
+    if (b.raw) return;
     const ctx = this.ctx;
     const type = b.block.type;
 

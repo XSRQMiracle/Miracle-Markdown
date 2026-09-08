@@ -16,7 +16,8 @@
  */
 
 import { Renderer, type SelectionRect, type Viewport } from "../render/canvas.js";
-import { parseBlocks, type Block } from "../markdown/parse.js";
+import { sourceRangeOwnsPosition } from "../markdown/parse.js";
+import { normalizeLineEndings } from "../markdown/document.js";
 import {
   DEFAULT_OPTIONS,
   DEFAULT_THEME,
@@ -42,6 +43,13 @@ interface Snapshot {
   end: number;
 }
 
+type CaretAffinity = "upstream" | "downstream";
+interface CaretPosition {
+  offset: number;
+  /** Which visual line owns a source offset shared by a soft wrap. */
+  affinity: CaretAffinity;
+}
+
 export class Editor {
   private renderer: Renderer;
   private typesetter: Typesetter;
@@ -50,6 +58,7 @@ export class Editor {
   private text = "";
   private selStart = 0;
   private selEnd = 0;
+  private caretAffinity: CaretAffinity = "downstream";
   private preferredX: number | null = null;
 
   private blocks: LaidBlock[] = [];
@@ -128,8 +137,9 @@ export class Editor {
   }
 
   setText(text: string): void {
-    this.text = text;
+    this.text = normalizeLineEndings(text);
     this.selStart = this.selEnd = 0;
+    this.caretAffinity = "downstream";
     this.undoStack = [];
     this.redoStack = [];
     this.invalidate();
@@ -186,36 +196,13 @@ export class Editor {
     const result = this.typesetter.layoutDocument(
       this.text,
       this.measure,
-      this.focusedBlock(),
+      this.hasFocus && this.interacted ? this.selEnd : -1,
     );
     this.blocks = result.blocks;
     this.docHeight = result.height;
     this.lastLayoutMs = performance.now() - t0;
     this.dirty = false;
   }
-
-  /**
-   * Index of the block holding the caret, in the same numbering the
-   * typesetter uses (which counts blank blocks, so it cannot be derived from
-   * the laid-out list). The parse is cached against the document text, so
-   * this costs nothing on a resize and one pass per edit.
-   */
-  private focusedBlock(): number {
-    // Revealing a block's markdown is a response to the caret being in it, so
-    // an unfocused editor shows the document fully typeset.
-    if (!this.hasFocus || !this.interacted) return -1;
-    if (!this.parseCache || this.parseCache.text !== this.text) {
-      this.parseCache = { text: this.text, blocks: parseBlocks(this.text) };
-    }
-    const caret = this.selEnd;
-    const blocks = this.parseCache.blocks;
-    for (let i = 0; i < blocks.length; i++) {
-      if (caret >= blocks[i].start && caret <= blocks[i].end) return i;
-    }
-    return -1;
-  }
-
-  private parseCache: { text: string; blocks: Block[] } | null = null;
 
   private render(): void {
     if (this.dirty) this.relayout();
@@ -278,8 +265,8 @@ export class Editor {
 
   // -- geometry ----------------------------------------------------------
 
-  /** Document offset for a point in canvas coordinates. */
-  private offsetAt(clientX: number, clientY: number): number {
+  /** Source position and visual affinity for a point in canvas coordinates. */
+  private positionAt(clientX: number, clientY: number): CaretPosition {
     const rect = this.canvas.getBoundingClientRect();
     const x = clientX - rect.left - this.gutter;
     const y = clientY - rect.top - this.originY + this.scrollTop;
@@ -292,17 +279,24 @@ export class Editor {
       }
       if (!best || Math.abs(y - b.y) < Math.abs(y - best.y)) best = b;
     }
-    if (!best || !best.lines.length) return best ? best.block.start : this.text.length;
+    if (!best || !best.lines.length) {
+      return { offset: best ? best.block.start : this.text.length, affinity: "downstream" };
+    }
 
     let line: LaidLine = best.lines[0];
     for (const l of best.lines) {
       if (y >= best.y + l.baseline - this.theme.bodySize) line = l;
     }
-    return this.offsetInLine(best, line, x - best.indent);
+    return this.positionInLine(best, line, x - best.indent);
+  }
+
+  private positionInLine(b: LaidBlock, line: LaidLine, x: number): CaretPosition {
+    const offset = this.offsetInLine(b, line, x);
+    return { offset, affinity: offset === line.docEnd ? "upstream" : "downstream" };
   }
 
   private offsetInLine(b: LaidBlock, line: LaidLine, x: number): number {
-    if (!line.runs.length) return b.block.start;
+    if (!line.runs.length) return line.docStart;
     for (const run of line.runs) {
       if (run.synthetic) continue;
       const w = this.runWidth(run);
@@ -311,14 +305,14 @@ export class Editor {
         return this.offsetInRun(run, x - run.x);
       }
     }
-    const last = line.runs[line.runs.length - 1];
-    return last.docEnd;
+    const last = line.runs.findLast((run) => !run.synthetic);
+    return last?.docEnd ?? line.docEnd;
   }
 
   /** Binary search inside a word for the closest character boundary. */
   private offsetInRun(run: LaidRun, dx: number): number {
     const n = run.text.length;
-    if (n <= 1) {
+    if (run.math || n <= 1) {
       const w = this.runWidth(run);
       return dx > w / 2 ? run.docEnd : run.docStart;
     }
@@ -341,7 +335,16 @@ export class Editor {
   }
 
   private runWidth(run: LaidRun): number {
-    return this.typesetter.measureText(run.text, run.style, run.styleKey) * run.scaleX;
+    return (run.math?.width ?? this.typesetter.measureText(run.text, run.style, run.styleKey)) * run.scaleX;
+  }
+
+  /** Formulas are atomic source ranges, not the U+FFFC text we send to WASM. */
+  private xInRun(run: LaidRun, offset: number): number {
+    if (run.math) return run.x + (offset >= run.docEnd ? this.runWidth(run) : 0);
+    const chars = run.docEnd - run.docStart === run.text.length
+      ? Math.max(0, Math.min(run.text.length, offset - run.docStart))
+      : offset >= run.docEnd ? run.text.length : 0;
+    return run.x + this.typesetter.prefixWidth(run.text, chars, run.style) * run.scaleX;
   }
 
   /** Screen rectangle for the caret, in document coordinates. */
@@ -359,18 +362,26 @@ export class Editor {
   }
 
   /** Find the block, line and x offset for a document position. */
-  private locate(offset: number): { block: LaidBlock; line: LaidLine; x: number } | null {
-    for (const b of this.blocks) {
-      if (offset < b.block.start || offset > b.block.end) continue;
-      for (const line of b.lines) {
+  private locate(
+    offset: number,
+    affinity: CaretAffinity = this.caretAffinity,
+  ): { block: LaidBlock; line: LaidLine; x: number } | null {
+    for (let i = 0; i < this.blocks.length; i++) {
+      const b = this.blocks[i];
+      if (!sourceRangeOwnsPosition(b.block, this.blocks[i + 1]?.block, offset)) continue;
+      for (let li = 0; li < b.lines.length; li++) {
+        const line = b.lines[li];
+        // A soft wrap has two caret locations for one source offset. Keep
+        // the side chosen by a mouse hit, vertical move, or Home/End.
+        if (b.raw && affinity !== "upstream" && offset === line.docEnd &&
+          b.lines[li + 1]?.docStart === offset) continue;
+        if (!line.runs.length && offset >= line.docStart && offset <= line.docEnd) {
+          return { block: b, line, x: 0 };
+        }
         for (const run of line.runs) {
           if (run.synthetic) continue;
           if (offset >= run.docStart && offset <= run.docEnd) {
-            const span = run.docEnd - run.docStart;
-            const chars =
-              span === run.text.length ? offset - run.docStart : offset >= run.docEnd ? run.text.length : 0;
-            const x = run.x + this.typesetter.prefixWidth(run.text, chars, run.style) * run.scaleX;
-            return { block: b, line, x };
+            return { block: b, line, x: this.xInRun(run, offset) };
           }
         }
       }
@@ -400,14 +411,17 @@ export class Editor {
         for (const run of line.runs) {
           if (run.synthetic) continue;
           if (run.docEnd <= lo || run.docStart >= hi) continue;
-          const span = run.docEnd - run.docStart;
-          const exact = span === run.text.length;
-          const s = exact ? Math.max(0, lo - run.docStart) : 0;
-          const e = exact ? Math.min(run.text.length, hi - run.docStart) : run.text.length;
-          const sx = run.x + this.typesetter.prefixWidth(run.text, s, run.style) * run.scaleX;
-          const ex = run.x + this.typesetter.prefixWidth(run.text, e, run.style) * run.scaleX;
+          const exact = !run.math && run.docEnd - run.docStart === run.text.length;
+          const sx = exact ? this.xInRun(run, Math.max(lo, run.docStart)) : run.x;
+          const ex = exact ? this.xInRun(run, Math.min(hi, run.docEnd)) : run.x + this.runWidth(run);
           x0 = Math.min(x0, sx);
           x1 = Math.max(x1, ex);
+        }
+        // A selected physical newline has source extent even when its line
+        // paints no glyphs. Give it a visible selection cell on that line.
+        if (lo <= line.docEnd && hi > line.docEnd && this.text[line.docEnd] === "\n") {
+          x0 = Math.min(x0, line.width);
+          x1 = Math.max(x1, line.width + size * 0.5);
         }
         if (x1 > x0) {
           rects.push({
@@ -437,12 +451,15 @@ export class Editor {
   }
 
   private replace(from: number, to: number, insert: string, coalesce = false): void {
+    insert = normalizeLineEndings(insert);
     this.pushUndo(coalesce);
     this.onChange?.();
     this.text = this.text.slice(0, from) + insert + this.text.slice(to);
     this.selStart = this.selEnd = from + insert.length;
+    this.caretAffinity = "downstream";
     this.preferredX = null;
     this.invalidate();
+    this.scrollCaretIntoView();
   }
 
   private insert(s: string, coalesce = true): void {
@@ -458,6 +475,7 @@ export class Editor {
     this.text = snap.text;
     this.selStart = snap.start;
     this.selEnd = snap.end;
+    this.caretAffinity = "downstream";
     this.invalidate();
   }
 
@@ -468,17 +486,20 @@ export class Editor {
     this.text = snap.text;
     this.selStart = snap.start;
     this.selEnd = snap.end;
+    this.caretAffinity = "downstream";
     this.invalidate();
   }
 
   // -- caret movement ----------------------------------------------------
 
-  private moveTo(offset: number, extend: boolean): void {
+  private moveTo(offset: number, extend: boolean, affinity: CaretAffinity = "downstream"): void {
     this.selEnd = Math.max(0, Math.min(this.text.length, offset));
+    this.caretAffinity = affinity;
     if (!extend) this.selStart = this.selEnd;
     this.caretVisible = true;
-    this.scrollCaretIntoView();
     this.invalidate();
+    // Reveal the target block before measuring where its caret must scroll.
+    this.scrollCaretIntoView();
   }
 
   private moveVertical(dir: -1 | 1, extend: boolean): void {
@@ -495,17 +516,15 @@ export class Editor {
       this.moveTo(dir < 0 ? 0 : this.text.length, extend);
       return;
     }
-    const offset = this.offsetInLine(next.b, next.l, targetX - next.b.indent);
-    this.moveTo(offset, extend);
+    const position = this.positionInLine(next.b, next.l, targetX - next.b.indent);
+    this.moveTo(position.offset, extend, position.affinity);
     this.preferredX = targetX;
   }
 
   private lineBounds(offset: number): { start: number; end: number } {
     const found = this.locate(offset);
     if (!found) return { start: offset, end: offset };
-    const runs = found.line.runs.filter((r) => !r.synthetic);
-    if (!runs.length) return { start: offset, end: offset };
-    return { start: runs[0].docStart, end: runs[runs.length - 1].docEnd };
+    return { start: found.line.docStart, end: found.line.docEnd };
   }
 
   private scrollCaretIntoView(): void {
@@ -529,16 +548,12 @@ export class Editor {
       e.preventDefault();
       this.interacted = true;
       this.focus();
-      const offset = this.offsetAt(e.clientX, e.clientY);
-      if (e.shiftKey) this.moveTo(offset, true);
-      else {
-        this.selStart = this.selEnd = offset;
-        this.preferredX = null;
-        this.invalidate();
-      }
+      const position = this.positionAt(e.clientX, e.clientY);
+      this.preferredX = null;
+      this.moveTo(position.offset, e.shiftKey, position.affinity);
       const move = (ev: MouseEvent) => {
-        this.selEnd = this.offsetAt(ev.clientX, ev.clientY);
-        this.invalidate();
+        const position = this.positionAt(ev.clientX, ev.clientY);
+        this.moveTo(position.offset, true, position.affinity);
       };
       const up = () => {
         window.removeEventListener("mousemove", move);
@@ -569,12 +584,14 @@ export class Editor {
 
     this.input.addEventListener("compositionupdate", (e) => {
       if (!this.composing) return;
-      const data = (e as CompositionEvent).data ?? "";
+      const data = normalizeLineEndings((e as CompositionEvent).data ?? "");
       const { start, length } = this.composing;
       this.text = this.text.slice(0, start) + data + this.text.slice(start + length);
       this.composing = { start, length: data.length };
       this.selStart = this.selEnd = start + data.length;
+      this.caretAffinity = "downstream";
       this.invalidate();
+      this.scrollCaretIntoView();
     });
 
     this.input.addEventListener("compositionend", (e) => {
@@ -684,11 +701,13 @@ export class Editor {
         return;
       case "Home":
         e.preventDefault();
+        this.preferredX = null;
         this.moveTo(this.lineBounds(this.selEnd).start, e.shiftKey);
         return;
       case "End":
         e.preventDefault();
-        this.moveTo(this.lineBounds(this.selEnd).end, e.shiftKey);
+        this.preferredX = null;
+        this.moveTo(this.lineBounds(this.selEnd).end, e.shiftKey, "upstream");
         return;
       case "Backspace":
         e.preventDefault();

@@ -9,7 +9,8 @@
 //! costs two calls regardless of how many words it holds.
 
 use typeset_core::{
-    break_lines, layout_lines, prepare, tokenize, CharClass, Config, Paragraph, PunctStyle, Token,
+    break_lines, layout_lines, prepare, tokenize_with_boundaries, CharClass, Config, Paragraph,
+    PunctStyle, Token,
 };
 use wasm_bindgen::prelude::*;
 
@@ -78,10 +79,17 @@ impl Engine {
 
     /// Step one: split the paragraph into units the host must measure.
     ///
-    /// Returns `[start, end, class]` triples as byte offsets into `text`.
-    pub fn tokenize(&mut self, text: &str) -> Vec<u32> {
+    /// `boundaries` are UTF-8 byte offsets at which the host must change
+    /// paint or measurement style. Returns `[start, end, class]` triples as
+    /// byte offsets into `text`.
+    pub fn tokenize(&mut self, text: &str, boundaries: &[u32]) -> Vec<u32> {
         self.text = text.to_string();
-        self.tokens = tokenize(&self.text, self.config.punct_style, self.config.hyphenate);
+        self.tokens = tokenize_with_boundaries(
+            &self.text,
+            self.config.punct_style,
+            self.config.hyphenate,
+            boundaries,
+        );
         self.para = None;
         let mut out = Vec::with_capacity(self.tokens.len() * 3);
         for t in &self.tokens {
@@ -94,9 +102,10 @@ impl Engine {
 
     /// Step two: hand back the measurements and build the horizontal list.
     ///
-    /// `metrics` is three floats per token — advance, height above the
-    /// baseline, depth below it. The vertical pair is what lets a line grow to
-    /// fit something taller than the surrounding text.
+    /// `metrics` is four floats per token — advance, height above the
+    /// baseline, depth below it, and an optional break penalty. The vertical
+    /// pair is what lets a line grow to fit something taller than the
+    /// surrounding text.
     pub fn prepare(&mut self, metrics: &[f32], space_width: f32) {
         self.para =
             Some(prepare(&self.text, &self.tokens, metrics, space_width, self.config));

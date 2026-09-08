@@ -27,13 +27,15 @@ export function buildMathPanel(
   math: MathOptions,
   reloadMath: () => Promise<void>,
 ): void {
+  let busy = false;
+  let errorMessage = "";
   const groups: Array<{ title: string; checks: Check[] }> = [
     {
       title: "识别为公式",
       checks: [
         {
-          label: "行内公式 $…$",
-          hint: "两个美元符号之间的内容按数学排版。",
+          label: "美元分隔符 $…$ / $$…$$",
+          hint: "识别美元符号包围的行内和行间公式。",
           get: () => editor.options.inline.inlineMath,
           set: (on) =>
             editor.setOptions({ inline: { ...editor.options.inline, inlineMath: on } }),
@@ -122,6 +124,12 @@ export function buildMathPanel(
 
   const render = (): void => {
     panel.textContent = "";
+    if (errorMessage) {
+      const error = document.createElement("div");
+      error.setAttribute("role", "alert");
+      error.textContent = errorMessage;
+      panel.appendChild(error);
+    }
     for (const group of groups) {
       const title = document.createElement("h4");
       title.textContent = group.title;
@@ -131,11 +139,22 @@ export function buildMathPanel(
         const box = document.createElement("input");
         box.type = "checkbox";
         box.checked = check.get();
+        box.disabled = busy;
         box.addEventListener("change", async () => {
+          const previous = check.get();
           check.set(box.checked);
-          if (check.reload) await reloadMath();
-          editor.invalidateMath();
+          errorMessage = "";
+          busy = true;
           render();
+          try {
+            if (check.reload) await reloadMath();
+          } catch (error) {
+            check.set(previous);
+            errorMessage = `公式设置未生效：${error instanceof Error ? error.message : String(error)}`;
+          } finally {
+            busy = false;
+            render();
+          }
         });
         const text = document.createElement("span");
         const name = document.createElement("span");

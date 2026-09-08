@@ -4,13 +4,16 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "predev": "npm run wasm",
     "dev": "vite",
+    "prebuild": "npm run wasm",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "wasm": "cd crates/typeset-wasm && wasm-pack build --target web --out-dir pkg --release",
     "tauri": "tauri",
     "test": "cargo test -p typeset-core && npm run test:ts",
-    "test:ts": "for f in parse coalesce math-parse math-transform math-refs; do npx esbuild test/$f.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.test-$f.mjs --log-level=error && node node_modules/.test-$f.mjs || exit 1; done"
+    "pretest:ts": "npm run wasm",
+    "test:ts": "for f in document parse coalesce layout math-lifecycle math-parse math-transform math-svg math-refs; do npx esbuild test/$f.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.test-$f.mjs --log-level=error && node node_modules/.test-$f.mjs || exit 1; done"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

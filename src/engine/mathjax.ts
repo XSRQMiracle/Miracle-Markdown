@@ -18,36 +18,18 @@ import {
   type MathGeometry,
   type MathSegment,
 } from "./math.js";
-
-export interface MathOptions {
-  /** The LaTeX `physics` package. Off by default, and deliberately so: it
-   *  redefines commands that already mean something else — `\div` stops being
-   *  the division sign and becomes the divergence operator — so enabling it
-   *  silently changes existing documents. */
-  physics: boolean;
-  /** mhchem, for chemical equations written as \\ce{...}. */
-  mhchem: boolean;
-  /** braket notation: \\bra, \\ket, \\braket. Independent of physics, which
-   *  also defines them. */
-  braket: boolean;
-  /** mathtools, extending amsmath. */
-  mathtools: boolean;
-  /** Document-level macro definitions, as \\newcommand would give them. */
-  macros: Record<string, string | [string, number]>;
-}
-
-export const DEFAULT_MATH_OPTIONS: MathOptions = {
-  physics: false,
-  mhchem: false,
-  braket: false,
-  mathtools: true,
-  macros: {},
-};
+import { ConfigurationLifecycle, snapshotMathOptions, type MathOptions } from "./math-lifecycle.js";
+export { DEFAULT_MATH_OPTIONS, type MathOptions } from "./math-lifecycle.js";
 
 /** The subset of MathJax's browser API we rely on. */
 interface MathJaxGlobal {
   tex2svg(latex: string, options: { display: boolean }): Element;
-  startup: { promise: Promise<void> };
+  config: { tex: { packages: string[]; macros: MathOptions["macros"] } };
+  startup: {
+    promise: Promise<void>;
+    getComponents(): void;
+    makeMethods(): void;
+  };
   texReset(): void;
 }
 
@@ -58,8 +40,8 @@ declare global {
 }
 
 let mj: MathJaxGlobal | null = null;
-let loading: Promise<void> | null = null;
-let configured = "";
+let runtime: MathJaxGlobal | null = null;
+let scriptLoad: Promise<void> | null = null;
 let version = 0;
 const cache = new Map<string, MathGeometry>();
 
@@ -68,32 +50,16 @@ export function mathReady(): boolean {
   return mj !== null;
 }
 
-/**
- * Load MathJax and configure it. Safe to call repeatedly; the engine is only
- * rebuilt when the options actually change.
- *
- * MathJax's own package set is fixed at load time, so changing which packages
- * are active means reloading the page — the same restriction Typora notes
- * against its parser-level settings. We rebuild the configuration instead and
- * accept that a package toggle takes effect on the next load.
- */
-export async function initMath(options: MathOptions): Promise<void> {
-  const wanted = JSON.stringify(options);
-  if (mj && wanted === configured) return;
-  if (loading) await loading;
-  if (mj && wanted === configured) return;
+const lifecycle = new ConfigurationLifecycle({
+  snapshot: snapshotMathOptions,
+  apply: applyConfiguration,
+  committed: () => invalidateMath(),
+  broken: () => { mj = null; },
+});
 
-  loading = build(options).then(() => {
-    configured = wanted;
-    cache.clear();
-    segmentCache.clear();
-    version++;
-  });
-  try {
-    await loading;
-  } finally {
-    loading = null;
-  }
+/** Load once, then rebuild the bundled components when configuration changes. */
+export function initMath(options: MathOptions): Promise<boolean> {
+  return lifecycle.configure(options);
 }
 
 /**
@@ -130,7 +96,23 @@ function activePackages(options: MathOptions): string[] {
   return packages;
 }
 
-async function build(options: MathOptions): Promise<void> {
+function mutableMacros(options: MathOptions): MathOptions["macros"] {
+  return Object.fromEntries(Object.entries(options.macros).map(([name, value]) =>
+    [name, Array.isArray(value) ? [...value] : value]));
+}
+
+async function applyConfiguration(options: MathOptions): Promise<void> {
+  if (runtime) {
+    // The browser bundle replaces the initial config with its runtime object.
+    // Keep that object alive; only the input/output jax need re-creating.
+    runtime.config.tex.packages = activePackages(options);
+    runtime.config.tex.macros = mutableMacros(options);
+    runtime.startup.getComponents();
+    // Reset/convert methods close over jax instances and must be rebound too.
+    runtime.startup.makeMethods();
+    mj = runtime;
+    return;
+  }
   // The bundled browser build carries every extension, so no package is ever
   // fetched on demand and `tex2svg` stays synchronous — which is what lets a
   // formula be measured inside the same layout pass as the text around it.
@@ -141,7 +123,7 @@ async function build(options: MathOptions): Promise<void> {
       // An explicit list rather than MathJax's "[+]" additive form: the whole
       // point of the physics switch is that the set is exactly what we say.
       packages: activePackages(options),
-      macros: options.macros,
+      macros: mutableMacros(options),
       // Numbering is decided by the typesetter, which knows document order;
       // MathJax only ever sees an explicit \tag.
       tags: "none",
@@ -157,16 +139,25 @@ async function build(options: MathOptions): Promise<void> {
     options: { enableMenu: false },
   };
 
-  await loadScript(url);
-  const global = window.MathJax as unknown as MathJaxGlobal;
-  await global.startup.promise;
-  mj = global;
+  try {
+    await loadScript(url);
+    const global = window.MathJax as MathJaxGlobal;
+    await global.startup.promise;
+    if (typeof global.tex2svg !== "function" || typeof global.startup.getComponents !== "function" ||
+        typeof global.startup.makeMethods !== "function") {
+      throw new Error("MathJax runtime did not initialize");
+    }
+    runtime = mj = global;
+  } catch (error) {
+    document.querySelector("script[data-mathjax]")?.remove();
+    scriptLoad = null;
+    throw error;
+  }
 }
 
 function loadScript(src: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const existing = document.querySelector<HTMLScriptElement>(`script[data-mathjax]`);
-    if (existing) return resolve();
+  if (scriptLoad) return scriptLoad;
+  scriptLoad = new Promise((resolve, reject) => {
     const el = document.createElement("script");
     el.src = src;
     el.async = true;
@@ -175,6 +166,7 @@ function loadScript(src: string): Promise<void> {
     el.addEventListener("error", () => reject(new Error("MathJax failed to load")));
     document.head.appendChild(el);
   });
+  return scriptLoad;
 }
 
 /**

@@ -77,6 +77,11 @@ export interface RenderedBlock {
 }
 
 const FENCE = /^(\s*)(`{3,}|~{3,})\s*(\S*)/;
+/** Shared by parsing and preview so an invalid closer remains visible code. */
+export function fenceCloser(openingLine: string): RegExp | null {
+  const fence = FENCE.exec(openingLine);
+  return fence ? new RegExp(`^\\s*${fence[2][0]}{${fence[2].length},}\\s*$`) : null;
+}
 /** A display formula opened by $$ or by \[ on its own line. */
 const MATH_OPEN = /^\s*(\$\$|\\\[)/;
 const HEADING = /^(#{1,6})\s+(.*)$/;
@@ -85,6 +90,65 @@ const QUOTE = /^\s*>\s?(.*)$/;
 const UL = /^(\s*)([-*+])\s+(.*)$/;
 const OL = /^(\s*)(\d+)([.)])\s+(.*)$/;
 
+interface BlockMathOpen {
+  opener: "$$" | "\\[";
+  closer: "$$" | "\\]";
+  openAt: number;
+  /** A closer on the opening line. A non-terminal closer disqualifies the line as a block. */
+  sameLineClose: number;
+}
+
+/** Find a delimiter that is not itself escaped by an odd run of backslashes. */
+function findUnescapedDelimiter(source: string, delimiter: string, from: number): number {
+  let at = source.indexOf(delimiter, from);
+  while (at >= 0) {
+    let slashes = 0;
+    for (let i = at - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
+    if (slashes % 2 === 0) return at;
+    // Advance one code unit so overlapping dollar runs (for example \$$$)
+    // still expose a later unescaped candidate.
+    at = source.indexOf(delimiter, at + 1);
+  }
+  return -1;
+}
+
+/**
+ * Recognise a display-math block opener without stealing a partial line.
+ *
+ * A complete one-line block may only have whitespace after its closer. When
+ * text follows, the whole line remains a paragraph and the inline scanner can
+ * preserve both the display formula and its suffix.
+ */
+function matchBlockMathOpen(line: string, options: InlineOptions): BlockMathOpen | null {
+  const match = MATH_OPEN.exec(line);
+  if (!match) return null;
+  const opener = match[1] as BlockMathOpen["opener"];
+  if (opener === "$$" ? !options.inlineMath : !options.texDelimiters) return null;
+  const closer = opener === "$$" ? "$$" : "\\]";
+  const openAt = line.indexOf(opener);
+  const sameLineClose = findUnescapedDelimiter(line, closer, openAt + opener.length);
+  if (
+    sameLineClose >= 0 &&
+    line.slice(sameLineClose + closer.length).trim() !== ""
+  ) {
+    return null;
+  }
+  return { opener, closer, openAt, sameLineClose };
+}
+
+function interruptsParagraph(line: string, options: InlineOptions): boolean {
+  return (
+    line.trim() === "" ||
+    HEADING.test(line) ||
+    FENCE.test(line) ||
+    matchBlockMathOpen(line, options) !== null ||
+    RULE.test(line) ||
+    QUOTE.test(line) ||
+    UL.test(line) ||
+    OL.test(line)
+  );
+}
+
 /**
  * Split a document into blocks.
  *
@@ -92,7 +156,10 @@ const OL = /^(\s*)(\d+)([.)])\s+(.*)$/;
  * document on every keystroke is affordable at this granularity, and it
  * sidesteps a class of incremental-parser bugs that a v1 does not need.
  */
-export function parseBlocks(doc: string): Block[] {
+export function parseBlocks(
+  doc: string,
+  options: InlineOptions = DEFAULT_INLINE_OPTIONS,
+): Block[] {
   const blocks: Block[] = [];
   const lines = doc.split("\n");
   const offsets = new Int32Array(lines.length + 1);
@@ -112,25 +179,45 @@ export function parseBlocks(doc: string): Block[] {
     const start = offsets[i];
 
     // Display math, opened by $$ or \[. Both may close on the same line.
-    const mathOpen = MATH_OPEN.exec(line);
+    const mathOpen = matchBlockMathOpen(line, options);
     if (mathOpen) {
-      const opener = mathOpen[1];
-      const closer = opener === "$$" ? "$$" : "\\]";
-      const afterOpen = start + line.indexOf(opener) + opener.length;
-      const sameLine = line.indexOf(closer, line.indexOf(opener) + opener.length);
+      const { opener, closer, openAt, sameLineClose } = mathOpen;
+      const afterOpen = start + openAt + opener.length;
       let end: number;
       let bodyEnd: number;
-      if (sameLine >= 0) {
-        bodyEnd = start + sameLine;
-        end = bodyEnd + closer.length;
+      let suffix: Block | null = null;
+      if (sameLineClose >= 0) {
+        bodyEnd = start + sameLineClose;
+        // matchBlockMathOpen guarantees that only whitespace follows. Keep it
+        // in the raw block so source ranges still cover the complete line.
+        end = start + line.length;
         i++;
       } else {
         let j = i + 1;
-        while (j < count && !lines[j].includes(closer)) j++;
+        let closeAt = -1;
+        while (j < count) {
+          closeAt = findUnescapedDelimiter(lines[j], closer, 0);
+          if (closeAt >= 0) break;
+          j++;
+        }
         if (j < count) {
-          bodyEnd = offsets[j] + lines[j].indexOf(closer);
-          end = bodyEnd + closer.length;
-          i = j + 1;
+          bodyEnd = offsets[j] + closeAt;
+          const closeEnd = bodyEnd + closer.length;
+          const tail = lines[j].slice(closeAt + closer.length);
+          if (tail.trim() === "") {
+            end = offsets[j] + lines[j].length;
+            i = j + 1;
+          } else {
+            // A block closer ends the formula, but any source following it is
+            // a paragraph rather than disposable trivia. Include ordinary
+            // continuation lines so the split does not invent a hard break.
+            end = closeEnd;
+            let k = j + 1;
+            while (k < count && !interruptsParagraph(lines[k], options)) k++;
+            const suffixEnd = blockEnd(doc, offsets, lines.length, k, closeEnd, tail);
+            suffix = block("paragraph", doc.slice(closeEnd, suffixEnd), closeEnd, suffixEnd);
+            i = k;
+          }
         } else {
           // Unterminated: treat the rest of the document as the formula so the
           // reader can see what they are typing rather than losing it.
@@ -144,14 +231,18 @@ export function parseBlocks(doc: string): Block[] {
           math: doc.slice(afterOpen, bodyEnd),
         }),
       );
+      if (suffix) blocks.push(suffix);
       continue;
     }
 
     const fence = FENCE.exec(line);
     if (fence) {
-      const closer = fence[2][0];
+      // CommonMark requires the closing run to use the same character and to
+      // be at least as long as the opener. Compile this once for the whole
+      // block; a shorter run is content, not a premature close.
+      const closeFence = fenceCloser(line)!;
       let j = i + 1;
-      while (j < count && !new RegExp(`^\\s*${closer}{3,}\\s*$`).test(lines[j])) j++;
+      while (j < count && !closeFence.test(lines[j])) j++;
       const end = j < count ? offsets[j] + lines[j].length : doc.length;
       const info = fence[3].toLowerCase();
       if (info === "math" || info === "latex" || info === "katex") {
@@ -193,18 +284,10 @@ export function parseBlocks(doc: string): Block[] {
     const ul = UL.exec(line);
     const ol = OL.exec(line);
     if (ul || ol) {
-      // A list item continues over lazy continuation lines.
+      // A list item continues over ordinary lazy continuation lines, but a
+      // block opener starts a new block just as it would after a paragraph.
       let j = i + 1;
-      while (
-        j < count &&
-        lines[j].trim() !== "" &&
-        !UL.test(lines[j]) &&
-        !OL.test(lines[j]) &&
-        !HEADING.test(lines[j]) &&
-        !FENCE.test(lines[j])
-      ) {
-        j++;
-      }
+      while (j < count && !interruptsParagraph(lines[j], options)) j++;
       const end = blockEnd(doc, offsets, lines.length, j, start, line);
       const indent = (ul ? ul[1] : ol![1]).length;
       blocks.push(
@@ -229,19 +312,7 @@ export function parseBlocks(doc: string): Block[] {
 
     // Paragraph: run on until a blank line or a block that interrupts.
     let j = i + 1;
-    while (
-      j < count &&
-      lines[j].trim() !== "" &&
-      !HEADING.test(lines[j]) &&
-      !FENCE.test(lines[j]) &&
-      !MATH_OPEN.test(lines[j]) &&
-      !RULE.test(lines[j]) &&
-      !QUOTE.test(lines[j]) &&
-      !UL.test(lines[j]) &&
-      !OL.test(lines[j])
-    ) {
-      j++;
-    }
+    while (j < count && !interruptsParagraph(lines[j], options)) j++;
     const end = blockEnd(doc, offsets, lines.length, j, start, line);
     blocks.push(block("paragraph", doc.slice(start, end), start, end));
     i = j;
@@ -251,6 +322,37 @@ export function parseBlocks(doc: string): Block[] {
     blocks.push(block("paragraph", "", 0, 0));
   }
   return blocks;
+}
+
+/**
+ * Locate a caret position in an ordered block list.
+ *
+ * Block source ranges are half-open, while a caret may also sit just after a
+ * block's last character. Usually that end position still belongs to the
+ * block. If the next block starts at the exact same position, however, the
+ * shared boundary belongs to the next block so adjacent source fragments stay
+ * editable.
+ */
+export function blockIndexAtPosition(blocks: readonly Block[], position: number): number {
+  for (let i = 0; i < blocks.length; i++) {
+    if (sourceRangeOwnsPosition(blocks[i], blocks[i + 1], position)) return i;
+  }
+  return -1;
+}
+
+export interface SourceRange {
+  start: number;
+  end: number;
+}
+
+/** The shared ownership rule used by parsing, focus and canvas hit testing. */
+export function sourceRangeOwnsPosition(
+  current: SourceRange,
+  next: SourceRange | undefined,
+  position: number,
+): boolean {
+  if (position < current.start || position > current.end) return false;
+  return position !== current.end || next?.start !== position;
 }
 
 /**
@@ -324,7 +426,12 @@ export function renderBlock(
   } else if (b.type === "quote") {
     return stripPerLine(b, /^\s*>\s?/, options);
   } else if (b.type === "list") {
-    const m = UL.exec(b.source) ?? OL.exec(b.source);
+    // UL and OL deliberately match a complete source line. Match only the
+    // first one here so a lazy continuation does not prevent the list marker
+    // from being stripped from a multi-line item.
+    const newline = b.source.indexOf("\n");
+    const firstLine = newline >= 0 ? b.source.slice(0, newline) : b.source;
+    const m = UL.exec(firstLine) ?? OL.exec(firstLine);
     if (m) {
       const consumed = m[0].length - m[m.length - 1].length;
       base += consumed;
@@ -442,6 +549,24 @@ interface Format {
   display?: boolean;
 }
 
+/**
+ * The ASCII punctuation characters CommonMark permits after a backslash.
+ *
+ * Keep this narrower than `PUNCT` below: that expression also contains
+ * Unicode punctuation for emphasis flanking, while a backslash before `。` or
+ * any other non-ASCII character is literal source and must survive.
+ */
+function isEscapableAsciiPunctuation(c: string | undefined): boolean {
+  if (c === undefined) return false;
+  const n = c.charCodeAt(0);
+  return (
+    (n >= 0x21 && n <= 0x2f) ||
+    (n >= 0x3a && n <= 0x40) ||
+    (n >= 0x5b && n <= 0x60) ||
+    (n >= 0x7b && n <= 0x7e)
+  );
+}
+
 const PUNCT = /[!-/:-@[-`{-~ -⁯　-〿＀-￯]/;
 
 /**
@@ -489,17 +614,31 @@ export function parseInline(
   const swaps: Array<{ from: number; to: number }> = [];
   /** Source positions that are literal because a backslash escaped them. */
   const escaped = new Set<number>();
+  /** Label-local scan boundaries, including the emphasis stack they own. */
+  const linkLabels: Array<{ start: number; close: number; end: number; openStart: number }> = [];
 
   // ---- pass one: find the real delimiters ------------------------------
   const open: Array<{ marker: string; at: number; contentAt: number }> = [];
   let i = 0;
   while (i < body.length) {
+    const label = linkLabels.at(-1);
+    if (label && i === label.close) {
+      // The label has already been scanned for inline formatting. Skip its
+      // closing bracket and the complete destination so math or emphasis in
+      // the URL cannot leak back into the rendered label.
+      open.length = label.openStart;
+      linkLabels.pop();
+      i = label.end;
+      continue;
+    }
+
+    const limit = label?.close ?? body.length;
     const c = body[i];
 
     if (options.texDelimiters && c === "\\" && (body[i + 1] === "(" || body[i + 1] === "[")) {
       const display = body[i + 1] === "[";
-      const close = body.indexOf(display ? "\\]" : "\\)", i + 2);
-      if (close > 0) {
+      const close = findUnescapedDelimiter(body, display ? "\\]" : "\\)", i + 2);
+      if (close > 0 && close + 2 <= limit) {
         swaps.push({ from: i, to: close + 2 });
         formats.push({
           kind: "math",
@@ -514,7 +653,18 @@ export function parseInline(
       }
     }
 
-    if (c === "\\" && i + 1 < body.length) {
+    if (c === "\\" && body[i + 1] === "\n") {
+      // CommonMark gives backslash-newline forced-break semantics. The layout
+      // model cannot carry that distinction yet, so retain the existing soft
+      // break fallback explicitly instead of either showing or losing the
+      // slash accidentally. A future hard-break span/penalty can replace this
+      // branch without broadening ordinary backslash escapes again.
+      drops.push([i, i + 1]);
+      i += 2;
+      continue;
+    }
+
+    if (c === "\\" && isEscapableAsciiPunctuation(body[i + 1])) {
       drops.push([i, i + 1]);
       escaped.add(i + 1);
       i += 2;
@@ -524,7 +674,7 @@ export function parseInline(
     // Math is scanned before emphasis and code so that a formula's contents
     // are never reinterpreted as markdown.
     if (options.inlineMath && c === "$") {
-      const found = scanDollarMath(body, i, options.strictDollar);
+      const found = scanDollarMath(body, i, options.strictDollar, limit);
       if (found) {
         swaps.push({ from: i, to: found.end });
         formats.push({
@@ -541,30 +691,27 @@ export function parseInline(
     }
 
     if (c === "`") {
-      let n = 1;
-      while (body[i + n] === "`") n++;
-      const close = body.indexOf("`".repeat(n), i + n);
-      if (close > 0) {
-        drops.push([i, i + n], [close, close + n]);
-        formats.push({ kind: "code", from: i + n, to: close, href: "" });
-        i = close + n;
-        continue;
+      const code = scanBackticks(body, i, limit);
+      if (code.close >= 0) {
+        drops.push([i, code.contentAt], [code.close, code.end]);
+        formats.push({ kind: "code", from: code.contentAt, to: code.close, href: "" });
       }
-      i += n;
+      i = code.end;
       continue;
     }
 
     if (c === "[") {
-      const close = matchBracket(body, i);
-      if (close > 0 && body[close + 1] === "(") {
-        const paren = body.indexOf(")", close);
-        if (paren > 0) {
-          drops.push([i, i + 1], [close, paren + 1]);
+      const close = matchBracket(body, i, limit);
+      if (close > 0 && close < limit && body[close + 1] === "(") {
+        const target = matchLinkDestination(body, close + 1, limit);
+        if (target) {
+          drops.push([i, i + 1], [close, target.end]);
+          linkLabels.push({ start: i + 1, close, end: target.end, openStart: open.length });
           formats.push({
             kind: "link",
             from: i + 1,
             to: close,
-            href: body.slice(close + 2, paren),
+            href: target.href,
           });
           i = i + 1;
           continue;
@@ -576,15 +723,15 @@ export function parseInline(
 
     if (c === "*" || c === "_" || c === "~") {
       let n = 1;
-      while (body[i + n] === c) n++;
+      while (i + n < limit && body[i + n] === c) n++;
       const marker = c === "~" ? (n >= 2 ? "~~" : "") : n >= 2 ? c + c : c;
       if (!marker) {
         i += n;
         continue;
       }
       const len = marker.length;
-      const before = body[i - 1];
-      const after = body[i + len];
+      const before = i === label?.start ? undefined : body[i - 1];
+      const after = i + len < limit ? body[i + len] : undefined;
       // CommonMark's flanking rules, in their essential form: a run that has
       // whitespace after it cannot open, and one with whitespace before it
       // cannot close.
@@ -602,7 +749,7 @@ export function parseInline(
 
       if (!intraword) {
         const top = open.findLastIndex((o) => o.marker === marker);
-        if (canClose && top >= 0) {
+        if (canClose && top >= (label?.openStart ?? 0)) {
           const o = open[top];
           open.length = top;
           drops.push([o.at, o.at + len], [i, i + len]);
@@ -627,7 +774,7 @@ export function parseInline(
     i++;
   }
 
-  // Code and link content is opaque to emphasis, so drop any emphasis that
+  // Code content is opaque to emphasis, so drop any emphasis that
   // strayed inside one.
   const opaque = formats.filter((f) => f.kind === "code");
   const live = formats.filter(
@@ -779,16 +926,17 @@ function scanDollarMath(
   body: string,
   at: number,
   strict: boolean,
+  limit: number = body.length,
 ): { end: number; bodyStart: number; bodyEnd: number; display: boolean } | null {
   const display = body[at + 1] === "$";
   const delimiter = display ? "$$" : "$";
   const bodyStart = at + delimiter.length;
-  if (bodyStart >= body.length) return null;
+  if (bodyStart >= limit) return null;
 
   if (!display && strict && isSpace(body[bodyStart])) return null;
 
   let k = bodyStart;
-  while (k < body.length) {
+  while (k < limit) {
     if (body[k] === "\\") {
       k += 2;
       continue;
@@ -800,7 +948,7 @@ function scanDollarMath(
       continue;
     }
     if (display) {
-      if (body[k + 1] === "$") {
+      if (k + 1 < limit && body[k + 1] === "$") {
         return { end: k + 2, bodyStart, bodyEnd: k, display: true };
       }
       k++;
@@ -814,7 +962,7 @@ function scanDollarMath(
       }
       // The clause that saves prices: a closing delimiter immediately before
       // a digit is far more likely to be currency than mathematics.
-      if (body[k + 1] !== undefined && /\d/.test(body[k + 1])) {
+      if (k + 1 < limit && /\d/.test(body[k + 1])) {
         k++;
         continue;
       }
@@ -824,18 +972,151 @@ function scanDollarMath(
   return null;
 }
 
-/** Index of the `]` matching the `[` at `from`, honouring nesting. */
-function matchBracket(body: string, from: number): number {
+/**
+ * Match whole backtick runs, never a prefix of a longer run. The same scanner
+ * determines code opacity while finding a label and while parsing its text.
+ * An unmatched opener advances over that complete run as literal content.
+ */
+function scanBackticks(
+  body: string,
+  from: number,
+  limit: number,
+): { contentAt: number; close: number; end: number } {
+  let contentAt = from + 1;
+  while (contentAt < limit && body[contentAt] === "`") contentAt++;
+  let at = contentAt;
+  while (at < limit) {
+    const close = body.indexOf("`", at);
+    if (close < 0 || close >= limit) break;
+    let end = close + 1;
+    while (end < limit && body[end] === "`") end++;
+    if (end - close === contentAt - from) return { contentAt, close, end };
+    at = end;
+  }
+  return { contentAt, close: -1, end: contentAt };
+}
+
+/** Index of the matching `]`, honouring nesting, escapes, and opaque code. */
+function matchBracket(body: string, from: number, limit: number): number {
   let depth = 0;
-  for (let i = from; i < body.length; i++) {
-    if (body[i] === "\\") {
+  for (let i = from; i < limit; i++) {
+    if (body[i] === "\\" && isEscapableAsciiPunctuation(body[i + 1])) {
       i++;
+      continue;
+    }
+    if (body[i] === "`") {
+      i = scanBackticks(body, i, limit).end - 1;
       continue;
     }
     if (body[i] === "[") depth++;
     else if (body[i] === "]") {
       depth--;
       if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Parse the complete link tail before hiding any source. Angle destinations,
+ * bare destinations, and titles have different delimiter rules; balancing all
+ * parentheses together can consume prose after the actual link.
+ */
+function matchLinkDestination(
+  body: string,
+  from: number,
+  limit: number,
+): { end: number; href: string } | null {
+  const start = skipLinkWhitespace(body, from + 1, limit);
+  if (start < 0 || start >= limit) return null;
+  if (body[start] === ")") return { end: start + 1, href: "" };
+
+  let i = start;
+  let destinationStart = start;
+  let destinationEnd = -1;
+  if (body[i] === "<") {
+    destinationStart = ++i;
+    while (i < limit) {
+      if (body[i] === "\\" && isEscapableAsciiPunctuation(body[i + 1])) i += 2;
+      else if (body[i] === "<" || body[i] === "\n" || body[i] === "\r") break;
+      else if (body[i] === ">") {
+        destinationEnd = i++;
+        break;
+      } else i++;
+    }
+  } else {
+    let depth = 0;
+    while (i < limit) {
+      const c = body[i];
+      if (c.charCodeAt(0) <= 0x20 || c.charCodeAt(0) === 0x7f) break;
+      if (c === "\\" && isEscapableAsciiPunctuation(body[i + 1])) {
+        i += 2;
+        continue;
+      }
+      if (c === "(") depth++;
+      else if (c === ")") {
+        if (depth === 0) break;
+        depth--;
+      }
+      i++;
+    }
+    if (depth === 0 && i > start) destinationEnd = i;
+  }
+
+  if (destinationEnd >= 0) {
+    const after = skipLinkWhitespace(body, i, limit);
+    let close = after;
+    if (after > i && body[after] !== ")") {
+      const titleEnd = matchLinkTitle(body, after, limit);
+      close = titleEnd < 0 ? -1 : skipLinkWhitespace(body, titleEnd, limit);
+    }
+    if (close >= 0 && close < limit && body[close] === ")") {
+      const href = body.slice(destinationStart, destinationEnd).replace(
+        /\\(.)/g,
+        (escape, c: string) => isEscapableAsciiPunctuation(c) ? c : escape,
+      );
+      return { end: close + 1, href };
+    }
+  }
+
+  // A title can appear without a destination, but a valid destination takes
+  // precedence: ("title") links to the literal URL "title", quotes included.
+  const titleEnd = matchLinkTitle(body, start, limit);
+  const close = titleEnd < 0 ? -1 : skipLinkWhitespace(body, titleEnd, limit);
+  return close >= 0 && close < limit && body[close] === ")"
+    ? { end: close + 1, href: "" }
+    : null;
+}
+
+/** Components permit spaces, tabs, and at most one line ending between them. */
+function skipLinkWhitespace(body: string, from: number, limit: number): number {
+  let lineEndings = 0;
+  let i = from;
+  while (i < limit) {
+    if (body[i] === " " || body[i] === "\t") i++;
+    else if (body[i] === "\n" || body[i] === "\r") {
+      if (++lineEndings > 1) return -1;
+      if (body[i] === "\r" && body[i + 1] === "\n") i++;
+      i++;
+    } else break;
+  }
+  return i;
+}
+
+/** End just after a quoted or parenthesized title, before trailing whitespace. */
+function matchLinkTitle(body: string, from: number, limit: number): number {
+  const opener = body[from];
+  if (opener !== '"' && opener !== "'" && opener !== "(") return -1;
+  const closer = opener === "(" ? ")" : opener;
+  for (let i = from + 1; i < limit; i++) {
+    const c = body[i];
+    if (c === "\\" && isEscapableAsciiPunctuation(body[i + 1])) i++;
+    else if (c === closer) return i + 1;
+    else if (opener === "(" && c === "(") return -1;
+    else if (c === "\n" || c === "\r") {
+      const after = skipLinkWhitespace(body, i, limit);
+      if (after < 0) return -1;
+      i = after - 1;
     }
   }
   return -1;

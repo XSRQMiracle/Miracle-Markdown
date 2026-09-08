@@ -108,8 +108,7 @@ Canvas2D `fillText`。排版质量全部在位置里，清晰度全部在光栅�
 
 ```bash
 npm install
-npm run wasm      # 构建排版核心到 WebAssembly
-npm run tauri dev # 桌面应用
+npm run tauri dev # 桌面应用；启动前会自动构建 WebAssembly
 ```
 
 只跑前端（浏览器里预览，文件操作退化为下载/上传）：
@@ -118,13 +117,16 @@ npm run tauri dev # 桌面应用
 npm run dev
 ```
 
+`dev`、`build` 和 TypeScript 测试都会先从 Rust 源码重新生成 WebAssembly；只有在单独
+调试排版核心的 JS/WASM 接口时才需要直接运行 `npm run wasm`。
+
 测试：
 
 ```bash
-npm test          # 全部：32 项 Rust + 五组 TypeScript
+npm test          # 全部：Rust + TypeScript
 ```
 
-分别是：`typeset-core`（算法与排版规则）、`parse`（Markdown 解析）、`coalesce`
+分别是：`typeset-core`（算法与排版规则）、`document`（文档换行与 I/O）、`parse`（Markdown 解析）、`coalesce`
 （绘制单元合并）、`math-parse`（公式分隔符规则）、`math-transform`（SVG 变换代数）、
 `math-refs`（编号与交叉引用）。
 

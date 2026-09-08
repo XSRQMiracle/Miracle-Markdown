@@ -9,6 +9,7 @@ import { SAMPLE } from "./sample.js";
 import { isDesktop, openDocument, saveDocument } from "./platform.js";
 import { DEFAULT_MATH_OPTIONS, initMath, type MathOptions } from "./engine/mathjax.js";
 import { buildMathPanel } from "./ui/math-panel.js";
+import type { LineEnding } from "./markdown/document.js";
 
 const stage = document.getElementById("stage") as HTMLElement;
 const canvas = document.getElementById("surface") as HTMLCanvasElement;
@@ -86,6 +87,7 @@ async function main() {
   }
 
   let path: string | null = null;
+  let lineEnding: LineEnding = "\n";
   let dirty = false;
   const setTitle = () => {
     const name = path ? path.split(/[\\/]/).pop() : "未命名";
@@ -97,13 +99,14 @@ async function main() {
     if (!opened) return;
     editor.setText(opened.contents);
     path = opened.path;
+    lineEnding = opened.lineEnding;
     dirty = false;
     setTitle();
     editor.focus();
   });
 
   const save = async () => {
-    const saved = await saveDocument(path, editor.getText());
+    const saved = await saveDocument(path, editor.getText(), lineEnding);
     if (saved !== null) {
       path = saved;
       dirty = false;
@@ -157,10 +160,17 @@ async function main() {
   // being typed; once it is ready the document re-typesets with real boxes.
   const mathOptions: MathOptions = { ...DEFAULT_MATH_OPTIONS };
   const reloadMath = async () => {
-    await initMath(mathOptions);
-    editor.invalidateMath();
+    try {
+      if (await initMath(mathOptions)) editor.invalidateMath();
+    } catch (error) {
+      editor.invalidateMath();
+      throw error;
+    }
   };
-  void reloadMath();
+  void reloadMath().catch((error) => {
+    console.error("MathJax initialization failed", error);
+    document.getElementById("math-button")!.title = "公式引擎加载失败，可在公式设置中重试";
+  });
 
   buildMathPanel(
     document.getElementById("math-panel") as HTMLElement,

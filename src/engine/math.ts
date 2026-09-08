@@ -1,16 +1,16 @@
 /**
  * Math rendering.
  *
- * MathJax lays the formula out and emits SVG; we convert that SVG into a
- * single `Path2D` of glyph outlines and draw it ourselves. Nothing is added to
- * the DOM and no web font is loaded — the outlines are in the SVG.
+ * MathJax lays the formula out and emits SVG; we convert that SVG into a small
+ * canvas display list. Glyph outlines remain `Path2D`s, while strokes, colour
+ * and the rare fallback text node retain their own paint semantics. Nothing is
+ * added to the DOM and no web font is loaded for MathJax's outline glyphs.
  *
  * That choice follows from the rest of the engine. We already own every glyph
  * position on the page; a formula delivered as a DOM subtree would have to be
  * overlaid on the canvas and kept in sync with our own scrolling and layout,
  * and would not survive into a PDF. Outlines drawn on the canvas sit in the
- * same coordinate space as the text, scale without resampling, and reduce to
- * one fill call per formula.
+ * same coordinate space as the text and scale without resampling.
  *
  * The three numbers the typesetter needs — width, height above the baseline,
  * depth below it — come straight out of the SVG's own attributes, so a formula
@@ -104,6 +104,50 @@ export function viewportTransform(
   return multiply([sx, 0, 0, sy, x, y], [1, 0, 0, 1, -vx, -vy]);
 }
 
+/** The SVG primitive from which a canvas path command was made. */
+export type MathShapeKind = "path" | "rect" | "line" | "circle" | "ellipse" | "polyline" | "polygon";
+
+interface MathPaintCommand {
+  /** Full SVG transform in effect at this node, before the caller's formula scale. */
+  transform: Matrix;
+  /** CSS colour, `currentColor`, or null for `none`. */
+  fill: string | null;
+  stroke: string | null;
+  strokeWidth: number;
+  opacity: number;
+  fillOpacity: number;
+  strokeOpacity: number;
+}
+
+/** One vector primitive, retaining its own SVG fill and stroke semantics. */
+export interface MathPathCommand extends MathPaintCommand {
+  kind: "path";
+  source: MathShapeKind;
+  path: Path2D;
+  fillRule: CanvasFillRule;
+  lineCap: CanvasLineCap;
+  lineJoin: CanvasLineJoin;
+  miterLimit: number;
+  lineDash: number[];
+  lineDashOffset: number;
+}
+
+/** A glyph MathJax could not supply as an outline, such as an emoji. */
+export interface MathTextCommand extends MathPaintCommand {
+  kind: "text";
+  text: string;
+  x: number;
+  y: number;
+  fontFamily: string;
+  fontSize: number;
+  fontStyle: string;
+  fontWeight: string;
+  textAnchor: "start" | "middle" | "end";
+}
+
+/** A paint-ordered display list for one formula or formula segment. */
+export type MathDrawCommand = MathPathCommand | MathTextCommand;
+
 /**
  * A laid-out formula, in the SVG's own coordinate units.
  *
@@ -114,6 +158,11 @@ export function viewportTransform(
  */
 export interface MathGeometry {
   path: Path2D | null;
+  /**
+   * Paint-ordered SVG commands. Optional so cached/loading geometries and
+   * callers that only know the original aggregate path remain compatible.
+   */
+  commands?: MathDrawCommand[];
   /** Advance width, in ex. */
   widthEx: number;
   /** Height above the baseline, in ex. */
@@ -147,8 +196,361 @@ function unit(value: string | null): number {
   return found ? Number(found[0]) : 0;
 }
 
+function numeric(value: string | null): number | null {
+  if (!value) return null;
+  const found = value.match(NUMBER);
+  return found ? Number(found[0]) : null;
+}
+
+function opacity(value: string | null): number | null {
+  const n = numeric(value);
+  if (n === null || !Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(1, value?.includes("%") ? n / 100 : n));
+}
+
+interface Presentation {
+  color: string;
+  fill: string | null;
+  stroke: string | null;
+  strokeWidth: number;
+  opacity: number;
+  fillOpacity: number;
+  strokeOpacity: number;
+  fillRule: CanvasFillRule;
+  lineCap: CanvasLineCap;
+  lineJoin: CanvasLineJoin;
+  miterLimit: number;
+  lineDash: number[];
+  lineDashOffset: number;
+  fontFamily: string;
+  fontSize: number;
+  fontStyle: string;
+  fontWeight: string;
+  textAnchor: "start" | "middle" | "end";
+}
+
+const DEFAULT_PRESENTATION: Presentation = {
+  // The formula is cached independently of the document theme. Leaving the
+  // sentinel unresolved lets canvas substitute the run colour at draw time.
+  color: "currentColor",
+  fill: "currentColor",
+  stroke: null,
+  strokeWidth: 1,
+  opacity: 1,
+  fillOpacity: 1,
+  strokeOpacity: 1,
+  fillRule: "nonzero",
+  lineCap: "butt",
+  lineJoin: "miter",
+  miterLimit: 4,
+  lineDash: [],
+  lineDashOffset: 0,
+  fontFamily: "serif",
+  fontSize: 1000,
+  fontStyle: "normal",
+  fontWeight: "normal",
+  textAnchor: "start",
+};
+
+function inlineStyle(node: Element): Map<string, string> {
+  const result = new Map<string, string>();
+  for (const declaration of (node.getAttribute("style") ?? "").split(";")) {
+    const colon = declaration.indexOf(":");
+    if (colon < 0) continue;
+    const name = declaration.slice(0, colon).trim().toLowerCase();
+    const value = declaration.slice(colon + 1).trim();
+    if (name && value) result.set(name, value);
+  }
+  return result;
+}
+
+function classNames(node: Element): Set<string> {
+  return new Set((node.getAttribute("class") ?? "").trim().split(/\s+/).filter(Boolean));
+}
+
 /**
- * Walk a MathJax SVG and accumulate every outline into one path.
+ * MathJax keeps a few SVG presentation rules in its document stylesheet
+ * instead of repeating them on every generated node. The conversion node is
+ * detached, so getComputedStyle is not a dependable way to recover them.
+ */
+function applyMathJaxRules(node: Element, style: Presentation): void {
+  const tag = node.tagName.toLowerCase();
+  const classes = classNames(node);
+  if (tag === "path" && node.getAttribute("data-c") !== null) {
+    style.strokeWidth = 3;
+  }
+  if (node.getAttribute("data-line") !== null || node.getAttribute("data-frame") !== null) {
+    style.fill = null;
+    style.strokeWidth = 70;
+  }
+  if (classes.has("mjx-dashed")) style.lineDash = [140];
+  if (classes.has("mjx-dotted")) {
+    style.lineCap = "round";
+    style.lineDash = [0, 140];
+  }
+  // Normally error geometry is replaced by its source before painting, but
+  // retaining MathJax's colours keeps this walker faithful on its own.
+  if (node.getAttribute("data-background") !== null) {
+    style.fill = "yellow";
+    style.stroke = null;
+  }
+}
+
+function paint(value: string, previous: string | null): string | null {
+  const normalized = value.trim();
+  if (!normalized || normalized.toLowerCase() === "inherit") return previous;
+  return normalized.toLowerCase() === "none" ? null : normalized;
+}
+
+function presentation(node: Element, inherited: Presentation): Presentation {
+  const result: Presentation = { ...inherited, lineDash: [...inherited.lineDash] };
+  const styles = inlineStyle(node);
+  const value = (name: string): string | null => styles.get(name) ?? node.getAttribute(name);
+
+  const color = value("color");
+  // On the `color` property itself, currentColor means the inherited colour;
+  // it must not erase a concrete ancestor colour back to our theme sentinel.
+  if (color && !["inherit", "currentcolor"].includes(color.trim().toLowerCase())) {
+    result.color = color.trim();
+  }
+  const fill = value("fill");
+  if (fill !== null) result.fill = paint(fill, result.fill);
+  const stroke = value("stroke");
+  if (stroke !== null) result.stroke = paint(stroke, result.stroke);
+
+  const strokeWidth = numeric(value("stroke-width"));
+  if (strokeWidth !== null && strokeWidth >= 0) result.strokeWidth = strokeWidth;
+  const fillOpacity = opacity(value("fill-opacity"));
+  if (fillOpacity !== null) result.fillOpacity = fillOpacity;
+  const strokeOpacity = opacity(value("stroke-opacity"));
+  if (strokeOpacity !== null) result.strokeOpacity = strokeOpacity;
+
+  const rule = value("fill-rule");
+  if (rule === "evenodd" || rule === "nonzero") result.fillRule = rule;
+  const cap = value("stroke-linecap");
+  if (cap === "butt" || cap === "round" || cap === "square") result.lineCap = cap;
+  const join = value("stroke-linejoin");
+  if (join === "bevel" || join === "miter" || join === "round") result.lineJoin = join;
+  const miter = numeric(value("stroke-miterlimit"));
+  if (miter !== null && miter > 0) result.miterLimit = miter;
+  const dash = value("stroke-dasharray");
+  if (dash !== null && dash !== "inherit") {
+    result.lineDash = dash.trim().toLowerCase() === "none" ? [] : (numbers(dash) ?? []);
+  }
+  const dashOffset = numeric(value("stroke-dashoffset"));
+  if (dashOffset !== null) result.lineDashOffset = dashOffset;
+
+  const family = value("font-family");
+  if (family && family !== "inherit") result.fontFamily = family;
+  const size = numeric(value("font-size"));
+  if (size !== null && size > 0) result.fontSize = size;
+  const fontStyle = value("font-style");
+  if (fontStyle && fontStyle !== "inherit") result.fontStyle = fontStyle;
+  const weight = value("font-weight");
+  if (weight && weight !== "inherit") result.fontWeight = weight;
+  const anchor = value("text-anchor");
+  if (anchor === "start" || anchor === "middle" || anchor === "end") result.textAnchor = anchor;
+
+  // Presentation attributes have zero specificity; these shipped MathJax
+  // stylesheet rules override them. Inline style still wins below.
+  applyMathJaxRules(node, result);
+  for (const [name, raw] of styles) {
+    if (name === "fill") result.fill = paint(raw, result.fill);
+    else if (name === "stroke") result.stroke = paint(raw, result.stroke);
+    else if (name === "stroke-width") {
+      const n = numeric(raw);
+      if (n !== null && n >= 0) result.strokeWidth = n;
+    } else if (name === "stroke-linecap" && (raw === "butt" || raw === "round" || raw === "square")) {
+      result.lineCap = raw;
+    } else if (name === "stroke-linejoin" && (raw === "bevel" || raw === "miter" || raw === "round")) {
+      result.lineJoin = raw;
+    } else if (name === "stroke-dasharray") {
+      result.lineDash = raw.toLowerCase() === "none" ? [] : (numbers(raw) ?? []);
+    }
+  }
+
+  const ownOpacity = opacity(value("opacity"));
+  if (ownOpacity !== null) result.opacity = inherited.opacity * ownOpacity;
+  return result;
+}
+
+function effectivePaint(value: string | null, style: Presentation): string | null {
+  if (value?.toLowerCase() !== "currentcolor") return value;
+  return style.color.toLowerCase() === "currentcolor" ? "currentColor" : style.color;
+}
+
+function commandPaint(style: Presentation): MathPaintCommand {
+  return {
+    transform: IDENTITY,
+    fill: effectivePaint(style.fill, style),
+    stroke: effectivePaint(style.stroke, style),
+    strokeWidth: style.strokeWidth,
+    opacity: style.opacity,
+    fillOpacity: style.fillOpacity,
+    strokeOpacity: style.strokeOpacity,
+  };
+}
+
+interface Shape {
+  path: Path2D;
+  source: MathShapeKind;
+  /** SVG fill does not apply to open line elements. */
+  noFill?: boolean;
+}
+
+function roundedRect(path: Path2D, x: number, y: number, w: number, h: number, rx: number, ry: number): void {
+  rx = Math.min(Math.max(rx, 0), w / 2);
+  ry = Math.min(Math.max(ry, 0), h / 2);
+  path.moveTo(x + rx, y);
+  path.lineTo(x + w - rx, y);
+  path.quadraticCurveTo(x + w, y, x + w, y + ry);
+  path.lineTo(x + w, y + h - ry);
+  path.quadraticCurveTo(x + w, y + h, x + w - rx, y + h);
+  path.lineTo(x + rx, y + h);
+  path.quadraticCurveTo(x, y + h, x, y + h - ry);
+  path.lineTo(x, y + ry);
+  path.quadraticCurveTo(x, y, x + rx, y);
+  path.closePath();
+}
+
+function shapeFrom(node: Element): Shape | null {
+  const tag = node.tagName.toLowerCase() as MathShapeKind;
+  const path = new Path2D();
+  if (tag === "path") {
+    const d = node.getAttribute("d");
+    if (!d) return null;
+    try {
+      return { path: new Path2D(d), source: tag };
+    } catch {
+      return null;
+    }
+  }
+  if (tag === "rect") {
+    const w = unit(node.getAttribute("width"));
+    const h = unit(node.getAttribute("height"));
+    if (w <= 0 || h <= 0) return null;
+    const x = unit(node.getAttribute("x"));
+    const y = unit(node.getAttribute("y"));
+    const rxValue = numeric(node.getAttribute("rx"));
+    const ryValue = numeric(node.getAttribute("ry"));
+    const rx = rxValue ?? ryValue ?? 0;
+    const ry = ryValue ?? rxValue ?? 0;
+    if (rx > 0 || ry > 0) roundedRect(path, x, y, w, h, rx, ry);
+    else path.rect(x, y, w, h);
+    return { path, source: tag };
+  }
+  if (tag === "line") {
+    path.moveTo(unit(node.getAttribute("x1")), unit(node.getAttribute("y1")));
+    path.lineTo(unit(node.getAttribute("x2")), unit(node.getAttribute("y2")));
+    return { path, source: tag, noFill: true };
+  }
+  if (tag === "circle" || tag === "ellipse") {
+    const rx = tag === "circle" ? unit(node.getAttribute("r")) : unit(node.getAttribute("rx"));
+    const ry = tag === "circle" ? rx : unit(node.getAttribute("ry"));
+    if (rx <= 0 || ry <= 0) return null;
+    path.ellipse(
+      unit(node.getAttribute("cx")),
+      unit(node.getAttribute("cy")),
+      rx,
+      ry,
+      0,
+      0,
+      Math.PI * 2,
+    );
+    return { path, source: tag };
+  }
+  if (tag === "polyline" || tag === "polygon") {
+    const points = numbers(node.getAttribute("points"));
+    if (!points || points.length < 4) return null;
+    path.moveTo(points[0], points[1]);
+    for (let i = 2; i + 1 < points.length; i += 2) path.lineTo(points[i], points[i + 1]);
+    if (tag === "polygon") path.closePath();
+    return { path, source: tag };
+  }
+  return null;
+}
+
+interface Collected {
+  path: Path2D | null;
+  commands: MathDrawCommand[];
+}
+
+/** Shared walker for whole formulas and line-break segments. */
+function collectElements(nodes: Element[], base: Matrix, inherited: Presentation): Collected {
+  const aggregate = new Path2D();
+  const commands: MathDrawCommand[] = [];
+  let hasPath = false;
+
+  const walk = (node: Element, parentMatrix: Matrix, parentStyle: Presentation): void => {
+    const tag = node.tagName.toLowerCase();
+    if (["defs", "clippath", "mask", "metadata", "title", "desc"].includes(tag)) return;
+
+    let matrix = multiply(parentMatrix, parseTransform(node.getAttribute("transform")));
+    const style = presentation(node, parentStyle);
+    if (tag === "svg") {
+      matrix = multiply(
+        matrix,
+        viewportTransform(
+          unit(node.getAttribute("x")),
+          unit(node.getAttribute("y")),
+          unit(node.getAttribute("width")),
+          unit(node.getAttribute("height")),
+          numbers(node.getAttribute("viewBox")),
+        ),
+      );
+    }
+
+    const shape = shapeFrom(node);
+    if (shape) {
+      aggregate.addPath(shape.path, toDomMatrix(matrix));
+      hasPath = true;
+      commands.push({
+        kind: "path",
+        source: shape.source,
+        path: shape.path,
+        ...commandPaint(style),
+        transform: matrix,
+        fill: shape.noFill ? null : effectivePaint(style.fill, style),
+        fillRule: style.fillRule,
+        lineCap: style.lineCap,
+        lineJoin: style.lineJoin,
+        miterLimit: style.miterLimit,
+        lineDash: [...style.lineDash],
+        lineDashOffset: style.lineDashOffset,
+      });
+      return;
+    }
+
+    if (tag === "text" || tag === "tspan") {
+      const text = node.textContent ?? "";
+      if (text) {
+        commands.push({
+          kind: "text",
+          text,
+          x: unit(node.getAttribute("x")) + unit(node.getAttribute("dx")),
+          y: unit(node.getAttribute("y")) + unit(node.getAttribute("dy")),
+          ...commandPaint(style),
+          transform: matrix,
+          fontFamily: style.fontFamily,
+          fontSize: style.fontSize,
+          fontStyle: style.fontStyle,
+          fontWeight: style.fontWeight,
+          textAnchor: style.textAnchor,
+        });
+      }
+      return;
+    }
+
+    for (const child of Array.from(node.children)) walk(child, matrix, style);
+  };
+
+  for (const node of nodes) walk(node, base, inherited);
+  return { path: hasPath ? aggregate : null, commands };
+}
+
+/**
+ * Walk a MathJax SVG into an ordered canvas display list, while also keeping
+ * an aggregate outline path for compatibility with older cached geometry.
  *
  * MathJax is configured with `fontCache: 'none'`, so glyphs arrive as literal
  * `<path>` elements rather than `<use>` references into a shared `<defs>`.
@@ -162,64 +564,15 @@ export function geometryFromSvg(svg: SVGSVGElement): MathGeometry {
   // MathJax reports depth as a negative vertical-align, in ex.
   const depthEx = Math.abs(unit(svg.getAttribute("style")?.match(/vertical-align:\s*([^;]+)/)?.[1] ?? null));
 
-  const path = new Path2D();
-  let drew = false;
-
   // The path is built with the viewBox's left edge at x = 0 and the baseline
   // at y = 0, which is where the viewBox's own y origin already sits.
   const root: Matrix = viewBox ? [1, 0, 0, 1, -viewBox[0], 0] : IDENTITY;
-
-  const walk = (node: Element, inherited: Matrix): void => {
-    for (const child of Array.from(node.children)) {
-      const tag = child.tagName.toLowerCase();
-      let matrix = multiply(inherited, parseTransform(child.getAttribute("transform")));
-
-      if (tag === "svg") {
-        // A nested viewport: map its viewBox onto its x/y/width/height box.
-        matrix = multiply(
-          matrix,
-          viewportTransform(
-            unit(child.getAttribute("x")),
-            unit(child.getAttribute("y")),
-            unit(child.getAttribute("width")),
-            unit(child.getAttribute("height")),
-            numbers(child.getAttribute("viewBox")),
-          ),
-        );
-        walk(child, matrix);
-        continue;
-      }
-
-      if (tag === "path") {
-        const d = child.getAttribute("d");
-        if (d) {
-          path.addPath(new Path2D(d), toDomMatrix(matrix));
-          drew = true;
-        }
-        continue;
-      }
-
-      if (tag === "rect") {
-        // Fraction bars, radical rules and the like.
-        const w = unit(child.getAttribute("width"));
-        const h = unit(child.getAttribute("height"));
-        if (w > 0 && h > 0) {
-          const box = new Path2D();
-          box.rect(unit(child.getAttribute("x")), unit(child.getAttribute("y")), w, h);
-          path.addPath(box, toDomMatrix(matrix));
-          drew = true;
-        }
-        continue;
-      }
-
-      walk(child, matrix);
-    }
-  };
-
-  walk(svg, root);
+  const rootStyle = presentation(svg, DEFAULT_PRESENTATION);
+  const collected = collectElements(Array.from(svg.children), root, rootStyle);
 
   return {
-    path: drew ? path : null,
+    path: collected.path,
+    commands: collected.commands,
     widthEx,
     heightEx,
     depthEx,
@@ -282,6 +635,8 @@ const REL_OPERATORS = new Set([
 /** One piece of a formula that may sit on a line by itself. */
 export interface MathSegment {
   path: Path2D | null;
+  /** Paint list for this piece, preserving colours, strokes and text. */
+  commands?: MathDrawCommand[];
   /** Advance width, in the SVG's own units. */
   width: number;
   /** Penalty for breaking after this piece; null on the last one. */
@@ -304,6 +659,7 @@ export function segmentInlineMath(svg: SVGSVGElement, totalWidth: number): MathS
   // Where the accumulated transform stands at the math node: everything above
   // it — notably MathJax's scale(1,-1) — applies to every segment alike.
   const base = accumulatedMatrix(mathNode, svg);
+  const baseStyle = accumulatedPresentation(mathNode, svg);
 
   // Pass one: find the boundaries.
   const classes = children.map(operatorClass);
@@ -316,7 +672,13 @@ export function segmentInlineMath(svg: SVGSVGElement, totalWidth: number): MathS
     cuts.push(i);
   }
   if (cuts.length === 0) {
-    return [{ path: collect(children, base), width: totalWidth, penaltyAfter: null }];
+    const collected = collectElements(children, base, baseStyle);
+    return [{
+      path: collected.path,
+      commands: collected.commands,
+      width: totalWidth,
+      penaltyAfter: null,
+    }];
   }
 
   // Pass two: build each segment, shifted so its own left edge is the origin.
@@ -330,8 +692,10 @@ export function segmentInlineMath(svg: SVGSVGElement, totalWidth: number): MathS
     // the piece that carries it.
     const endX = to < children.length ? childOffset(children[to]) : totalWidth;
     const shifted = multiply(base, [1, 0, 0, 1, -startX, 0]);
+    const collected = collectElements(children.slice(from, to), shifted, baseStyle);
     segments.push({
-      path: collect(children.slice(from, to), shifted),
+      path: collected.path,
+      commands: collected.commands,
       width: endX - startX,
       penaltyAfter:
         c < cuts.length ? (classes[cuts[c]] as number) : null,
@@ -381,62 +745,14 @@ function accumulatedMatrix(node: Element, root: Element): Matrix {
   return m;
 }
 
-/** Gather the outlines of a run of siblings into one path. */
-function collect(nodes: Element[], base: Matrix): Path2D | null {
-  const path = new Path2D();
-  let drew = false;
-  const walk = (node: Element, inherited: Matrix): void => {
-    for (const child of Array.from(node.children)) {
-      const tag = child.tagName.toLowerCase();
-      let matrix = multiply(inherited, parseTransform(child.getAttribute("transform")));
-      if (tag === "svg") {
-        matrix = multiply(
-          matrix,
-          viewportTransform(
-            unit(child.getAttribute("x")),
-            unit(child.getAttribute("y")),
-            unit(child.getAttribute("width")),
-            unit(child.getAttribute("height")),
-            numbers(child.getAttribute("viewBox")),
-          ),
-        );
-        walk(child, matrix);
-        continue;
-      }
-      if (tag === "path") {
-        const d = child.getAttribute("d");
-        if (d) {
-          path.addPath(new Path2D(d), toDomMatrix(matrix));
-          drew = true;
-        }
-        continue;
-      }
-      if (tag === "rect") {
-        const w = unit(child.getAttribute("width"));
-        const h = unit(child.getAttribute("height"));
-        if (w > 0 && h > 0) {
-          const box = new Path2D();
-          box.rect(unit(child.getAttribute("x")), unit(child.getAttribute("y")), w, h);
-          path.addPath(box, toDomMatrix(matrix));
-          drew = true;
-        }
-        continue;
-      }
-      walk(child, matrix);
-    }
-  };
-  for (const node of nodes) {
-    const own = multiply(base, parseTransform(node.getAttribute("transform")));
-    // The node's own outlines, then its children's.
-    const tag = node.tagName.toLowerCase();
-    if (tag === "path") {
-      const d = node.getAttribute("d");
-      if (d) {
-        path.addPath(new Path2D(d), toDomMatrix(own));
-        drew = true;
-      }
-    }
-    walk(node, own);
+/** Presentation inherited by `node`, including the node itself. */
+function accumulatedPresentation(node: Element, root: Element): Presentation {
+  const chain: Element[] = [];
+  for (let n: Element | null = node; n; n = n.parentElement) {
+    chain.unshift(n);
+    if (n === root) break;
   }
-  return drew ? path : null;
+  let style = DEFAULT_PRESENTATION;
+  for (const link of chain) style = presentation(link, style);
+  return style;
 }

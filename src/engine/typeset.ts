@@ -19,9 +19,12 @@ import {
   type TextStyle,
 } from "./measure.js";
 import { renderMath, renderMathSegments } from "./mathjax.js";
+import { sourceLineEnds } from "./source-layout.js";
 import type { MathGeometry, MathSegment } from "./math.js";
 import {
   parseBlocks,
+  blockIndexAtPosition,
+  fenceCloser,
   renderBlock,
   DEFAULT_INLINE_OPTIONS,
   OBJECT_REPLACEMENT,
@@ -116,20 +119,23 @@ export const DEFAULT_OPTIONS: TypesetOptions = {
  *  pixels at the surrounding type size. */
 export interface MathRun {
   geometry: MathGeometry;
+  /** Actual box in CSS pixels, shared by line breaking and hit testing. */
+  width: number;
+  height: number;
+  depth: number;
   /** Multiplier from the SVG's own units to pixels. */
   scale: number;
   /** LaTeX source, shown instead of the formula when it does not parse. */
   source: string;
   display: boolean;
+  /** Measured text presentation while loading or after a conversion error. */
+  fallback?: { text: string; style: TextStyle };
   /** The piece of a split formula this run draws, if it was split. */
   segment?: MathSegment;
 }
 
 /** One placeholder's worth of formula: its box and how it may break. */
 interface MathPiece extends MathRun {
-  width: number;
-  height: number;
-  depth: number;
   /** TeX's penalty for breaking after this piece; NaN when it may not. */
   penaltyAfter: number;
 }
@@ -142,6 +148,8 @@ export interface LaidRun {
   docEnd: number;
   style: TextStyle;
   styleKey: string;
+  /** Identity of the rendered span this run is painted from. */
+  spanId: number;
   scaleX: number;
   /** Set on the hyphen the breaker inserted; it has no source of its own. */
   synthetic: boolean;
@@ -150,6 +158,9 @@ export interface LaidRun {
 }
 
 export interface LaidLine {
+  /** Editable source extent, independent of whether the line paints glyphs. */
+  docStart: number;
+  docEnd: number;
   /** Baseline, relative to the top of the block. Computed by the core using
    *  TeX's interline glue, not by multiplying out a fixed line height. */
   baseline: number;
@@ -329,6 +340,26 @@ export function isLatinWordPiece(text: string): boolean {
   return text.length > 0 && !INDIVIDUALLY_PLACED.test(text);
 }
 
+/**
+ * UTF-8 byte boundaries at which token measurement or paint style changes.
+ *
+ * Markdown spans use JavaScript's UTF-16 indices while the Rust core slices
+ * UTF-8. Keeping the conversion in one place prevents bold/link boundaries
+ * beside emoji or non-ASCII text from landing inside a code point.
+ */
+export function spanByteBoundaries(text: string, spans: readonly Span[]): Uint32Array {
+  const toByte = charToByteIndex(text);
+  const total = toByte(text.length);
+  const boundaries = new Set<number>();
+  for (const span of spans) {
+    for (const position of [span.start, span.end]) {
+      const byte = toByte(position);
+      if (byte > 0 && byte < total) boundaries.add(byte);
+    }
+  }
+  return Uint32Array.from([...boundaries].sort((a, b) => a - b));
+}
+
 let engine: Engine | null = null;
 
 export async function initEngine(): Promise<void> {
@@ -379,7 +410,7 @@ function styleForSpan(
 
 /** Extra space above a block, in pixels. TeX's vertical glue. */
 function spaceAbove(block: Block, theme: Theme, previous: Block | null): number {
-  if (!previous) return 0;
+  if (!previous || previous.type === "blank") return 0;
   switch (block.type) {
     case "heading":
       // Headings bind more tightly to what follows than to what precedes.
@@ -393,9 +424,7 @@ function spaceAbove(block: Block, theme: Theme, previous: Block | null): number 
     case "list":
       return previous.type === "list" ? theme.bodySize * 0.25 : theme.bodySize * 0.7;
     default:
-      return previous.type === "blank" || previous.type === "heading"
-        ? theme.bodySize * 0.7
-        : theme.bodySize * 0.7;
+      return theme.bodySize * 0.7;
   }
 }
 
@@ -447,15 +476,24 @@ export class Typesetter {
   layoutDocument(
     doc: string,
     width: number,
-    focusedBlock: number,
+    focusedPosition: number,
   ): { blocks: LaidBlock[]; height: number } {
-    const parsed = parseBlocks(doc);
+    const parsed = parseBlocks(doc, this.options.inline);
+    // Most blocks exclude the trailing LF, but an unterminated code/math
+    // block owns it and already lays out its final source line when focused.
+    // Only synthesize a line when no parsed block owns that insertion point.
+    if (doc.endsWith("\n") && parsed.at(-1)?.end !== doc.length) {
+      parsed.push({
+        type: "blank", start: doc.length, end: doc.length, source: "",
+        level: 0, ordered: false, marker: "", lang: "", math: "",
+      });
+    }
+    const focusedBlock = blockIndexAtPosition(parsed, focusedPosition);
     const numbering = numberEquations(parsed, this.options.numbering);
     const out: LaidBlock[] = [];
     let y = 0;
     for (let i = 0; i < parsed.length; i++) {
       const b = parsed[i];
-      if (b.type === "blank") continue;
       const laid = this.layoutBlock(
         b,
         width,
@@ -483,7 +521,7 @@ export class Typesetter {
     // equation's number moves, and only then; one that cites nothing is
     // untouched by an edit elsewhere in the document.
     const cites = citesAnything(block) ? numbering.version : "";
-    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${cites}|${block.source}`;
+    const key = `${this.version}|${width.toFixed(1)}|${raw ? 1 : 0}|${previous?.type ?? ""}|${block.type}|${block.level}|${block.start}|${tag ?? ""}|${cites}|${block.source}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
 
@@ -507,6 +545,13 @@ export class Typesetter {
     const rendered = renderBlock(block, raw, this.options.inline);
     const spaceBefore = spaceAbove(block, theme, previous);
 
+    // Source editing is a presentation mode shared by every block kind.
+    // Resolve it before preview-only math/rule builders so their atomic
+    // geometry can never hide editable delimiters or physical source lines.
+    if (raw || block.type === "blank") {
+      return this.buildPreformatted(block, rendered, spaceBefore, 0, raw, width);
+    }
+
     const indent =
       block.type === "quote"
         ? theme.bodySize * 1.4
@@ -522,7 +567,6 @@ export class Typesetter {
         spaceBefore,
         measure,
         indent,
-        raw,
         tag,
         numbering,
       );
@@ -544,21 +588,23 @@ export class Typesetter {
 
     // Code keeps its own line structure: breaking it optimally would be
     // actively wrong.
-    if (block.type === "code" && !raw) {
+    if (block.type === "code") {
       return this.buildPreformatted(block, rendered, spaceBefore, indent, raw);
     }
 
-    const lines =
-      block.type === "code"
-        ? this.buildPreformatted(block, rendered, spaceBefore, indent, raw).lines
-        : this.breakParagraph(block, rendered, measure, indent, numbering);
+    const lines = this.breakParagraph(block, rendered, measure, indent, numbering);
 
     const first = lines[0];
     const lh = first
       ? first.runs[0]?.style.lineHeight ?? theme.lineHeight
       : theme.lineHeight;
-    const height =
-      spaceBefore + (lines.length ? lines.at(-1)!.baseline + theme.bodySize * lh * 0.35 : 0);
+    // Interline glue already respects each line's ink in the Rust core. The
+    // block boundary must do the same: a deep last-line formula cannot fit
+    // inside the ordinary text's nominal descent allowance.
+    const last = lines.at(-1);
+    const height = spaceBefore + (last
+      ? last.baseline + Math.max(last.depth, theme.bodySize * lh * 0.35)
+      : 0);
 
     return {
       block,
@@ -588,19 +634,13 @@ export class Typesetter {
     spaceBefore: number,
     measure: number,
     indent: number,
-    raw: boolean,
     tag: string | null,
     numbering: Numbering,
   ): LaidBlock {
     const { style, key } = styleForSpan(this.theme, block, null);
-    const ex = this.measurer.exHeight(style);
-    const geometry = renderMath(resolveLatex(block.math, numbering.labels), true);
-
-    const width = geometry.widthEx * ex;
-    const scale =
-      geometry.viewBoxWidth > 0 && width > 0 ? width / geometry.viewBoxWidth : ex / MATHJAX_EX_UNITS;
-    const height = (geometry.heightEx - geometry.depthEx) * ex;
-    const depth = geometry.depthEx * ex;
+    const latex = resolveLatex(block.math, numbering.labels);
+    const math = this.mathRun(renderMath(latex, true), latex, true, style);
+    const { width, height, depth } = math;
 
     // Centre it, but never push it off the left edge: an equation wider than
     // the measure overflows to the right, as LaTeX's does.
@@ -614,9 +654,10 @@ export class Typesetter {
         docEnd: block.end,
         style,
         styleKey: key,
+        spanId: 0,
         scaleX: 1,
         synthetic: false,
-        math: { geometry, scale, source: block.math, display: true },
+        math,
       },
     ];
 
@@ -632,6 +673,7 @@ export class Typesetter {
         docEnd: block.start,
         style,
         styleKey: key,
+        spanId: -1,
         scaleX: 1,
         synthetic: true,
       });
@@ -643,6 +685,8 @@ export class Typesetter {
       block,
       lines: [
         {
+          docStart: block.start,
+          docEnd: block.end,
           baseline: above + height,
           height,
           depth,
@@ -658,17 +702,18 @@ export class Typesetter {
       rendered,
       indent,
       marker: "",
-      raw,
+      raw: false,
     };
   }
 
-  /** Fenced code and the focused block: one source line per display line. */
+  /** Preserve physical source lines; focused source also wraps to the measure. */
   private buildPreformatted(
     block: Block,
     rendered: RenderedBlock,
     spaceBefore: number,
     indent: number,
     raw: boolean,
+    width = Infinity,
   ): LaidBlock {
     const { style, key } = styleForSpan(this.theme, block, null);
     const lineHeight = style.size * style.lineHeight;
@@ -680,37 +725,52 @@ export class Typesetter {
     // A fenced block's own ``` lines are structure, not content.
     const hideFence = block.type === "code" && !raw;
     const src = text.split("\n");
+    const closingFence = hideFence ? fenceCloser(src[0]) : null;
     for (let li = 0; li < src.length; li++) {
       const lineText = src[li];
-      const isFence = hideFence && (li === 0 || li === src.length - 1) && /^\s*(`{3,}|~{3,})/.test(lineText);
+      const isFence = closingFence !== null &&
+        (li === 0 || (li === src.length - 1 && closingFence.test(lineText)));
       if (!isFence) {
-        lines.push({
-          baseline: n * lineHeight + v.ascent,
-          height: v.ascent,
-          depth: v.descent,
-          ratio: 0,
-          width: this.measurer.width(lineText, style, key),
-          indent,
-          runs: lineText.length
-            ? [
-                {
-                  x: 0,
-                  text: lineText,
-                  docStart: rendered.map[at],
-                  docEnd: rendered.map[Math.min(at + lineText.length, rendered.map.length - 1)],
-                  style,
-                  styleKey: key,
-                  scaleX: 1,
-                  synthetic: false,
-                },
-              ]
-            : [],
-        });
-        n++;
+        const ends = raw
+          ? sourceLineEnds(lineText, width, (part) => this.measurer.width(part, style, key))
+          : [lineText.length];
+        let start = 0;
+        for (const end of ends) {
+          const part = lineText.slice(start, end);
+          const docStart = rendered.map[at + start];
+          const docEnd = rendered.map[at + end];
+          lines.push({
+            docStart,
+            docEnd,
+            baseline: n * lineHeight + v.ascent,
+            height: v.ascent,
+            depth: v.descent,
+            ratio: 0,
+            width: this.measurer.width(part, style, key),
+            indent,
+            runs: part.length
+              ? [
+                  {
+                    x: 0,
+                    text: part,
+                    docStart,
+                    docEnd,
+                    style,
+                    styleKey: key,
+                    spanId: 0,
+                    scaleX: 1,
+                    synthetic: false,
+                  },
+                ]
+              : [],
+          });
+          n++;
+          start = end;
+        }
       }
       at += lineText.length + 1;
     }
-    const height = spaceBefore + n * lineHeight + style.size * 0.5;
+    const height = spaceBefore + n * lineHeight + (block.type === "blank" ? 0 : style.size * 0.5);
     return {
       block,
       lines,
@@ -752,6 +812,7 @@ export class Typesetter {
         isLatinWordPiece(prev.text) &&
         isLatinWordPiece(run.text) &&
         prev.styleKey === run.styleKey &&
+        prev.spanId === run.spanId &&
         prev.scaleX === run.scaleX &&
         prev.docEnd === run.docStart &&
         Math.abs(
@@ -845,19 +906,10 @@ export class Typesetter {
     const { geometry, segments } = this.options.breakInsideMath
       ? renderMathSegments(latex, display)
       : { geometry: renderMath(latex, display), segments: [] };
-    const scale =
-      geometry.viewBoxWidth > 0 && geometry.widthEx > 0
-        ? (geometry.widthEx * ex) / geometry.viewBoxWidth
-        : ex / MATHJAX_EX_UNITS;
-    const height = (geometry.heightEx - geometry.depthEx) * ex;
-    const depth = geometry.depthEx * ex;
-
-    const common = { geometry, scale, source: latex, display };
+    const common = this.mathRun(geometry, latex, display, style);
     let built: MathPiece[];
-    if (segments.length < 2) {
-      built = [
-        { ...common, width: geometry.widthEx * ex, height, depth, penaltyAfter: NaN },
-      ];
+    if (common.fallback || segments.length < 2) {
+      built = [{ ...common, penaltyAfter: NaN }];
     } else {
       // Every piece is given the whole formula's height and depth. That is
       // conservative — a piece with no tall part gets more leading than it
@@ -867,9 +919,7 @@ export class Typesetter {
       built = segments.map((segment) => ({
         ...common,
         segment,
-        width: segment.width * scale,
-        height,
-        depth,
+        width: segment.width * common.scale,
         penaltyAfter: segment.penaltyAfter ?? NaN,
       }));
     }
@@ -880,6 +930,40 @@ export class Typesetter {
   }
 
   private pieceCache = new Map<string, MathPiece[]>();
+
+  /** Resolve the painted representation before anyone consumes its metrics. */
+  private mathRun(
+    geometry: MathGeometry,
+    source: string,
+    display: boolean,
+    style: TextStyle,
+  ): MathRun {
+    if (geometry.error) {
+      const fallbackStyle: TextStyle = {
+        ...style, family: this.theme.monoFamily, italic: false,
+        color: geometry.error === "loading" ? this.theme.mutedColor : "#b3402f",
+      };
+      // Canvas paints ASCII whitespace as spaces, even for multi-line TeX.
+      // Store exactly that presentation so measuring and drawing cannot drift.
+      const text = source.replace(/[\t\n\r\f]/g, " ").trim() || "…";
+      const key = cssFont(fallbackStyle);
+      const { ascent, descent } = this.vmetrics(fallbackStyle, key);
+      return {
+        geometry, source, display, scale: 1,
+        width: this.measurer.width(text, fallbackStyle, key),
+        height: ascent, depth: descent, fallback: { text, style: fallbackStyle },
+      };
+    }
+    const ex = this.measurer.exHeight(style);
+    const width = geometry.widthEx * ex;
+    return {
+      geometry, source, display, width,
+      scale: geometry.viewBoxWidth > 0 && width > 0
+        ? width / geometry.viewBoxWidth : ex / MATHJAX_EX_UNITS,
+      height: (geometry.heightEx - geometry.depthEx) * ex,
+      depth: geometry.depthEx * ex,
+    };
+  }
 
   /** The real work: hand the paragraph to the Knuth-Plass core. */
   private breakParagraph(
@@ -911,7 +995,7 @@ export class Typesetter {
     );
 
     const text = rendered.text;
-    const tokens = engine.tokenize(text);
+    const tokens = engine.tokenize(text, spanByteBoundaries(text, rendered.spans));
     const count = tokens.length / 3;
     // Four floats per token: advance, height, depth, and the penalty for
     // breaking after it — the last is how a split formula's pieces are joined.
@@ -920,17 +1004,18 @@ export class Typesetter {
     // Resolve which span a byte offset falls in, so bold and code runs are
     // measured with the face they will be drawn in.
     const toChar = byteToCharIndex(text);
-    const toByte = charToByteIndex(text);
-    const spanStyles = rendered.spans.map((s) => ({
+    const spanStyles = rendered.spans.map((s, id) => ({
       span: s,
+      id,
       ...styleForSpan(this.theme, block, s),
     }));
+    const fallbackStyle = { span: null, id: -1, ...base };
     const styleAt = (byteOffset: number) => {
       const ch = toChar(byteOffset);
       for (const s of spanStyles) {
         if (ch >= s.span.start && ch < s.span.end) return s;
       }
-      return spanStyles[0] ?? base;
+      return spanStyles[0] ?? fallbackStyle;
     };
 
     // Measure. Pieces of one hyphenated word arrive as separate tokens that
@@ -939,18 +1024,18 @@ export class Typesetter {
     // and the pieces sum to the width the word has when it is not broken.
     for (let i = 0, t = 0; i < count; ) {
       let n = 1;
+      const st = styleAt(tokens[t]);
       if (tokens[t + 2] === CLASS_LETTER) {
         while (
           i + n < count &&
           tokens[t + n * 3 + 2] === CLASS_LETTER &&
           tokens[t + n * 3] === tokens[t + (n - 1) * 3 + 1] &&
-          styleAt(tokens[t + n * 3]).key === styleAt(tokens[t]).key
+          styleAt(tokens[t + n * 3]).key === st.key &&
+          styleAt(tokens[t + n * 3]).id === st.id
         ) {
           n++;
         }
       }
-
-      const st = styleAt(tokens[t]);
       const v = this.vmetrics(st.style, st.key);
 
       // A formula arrives as U+FFFC. Its box is whatever MathJax laid out,
@@ -1000,6 +1085,8 @@ export class Typesetter {
       const runCount = flat[p];
       const ratio = flat[p + 1];
       const width = flat[p + 2];
+      const docStart = rendered.map[toChar(flat[p + 4])];
+      const docEnd = rendered.map[toChar(flat[p + 5])];
       const baseline = flat[p + 6];
       const height = flat[p + 7];
       const depth = flat[p + 8];
@@ -1020,6 +1107,7 @@ export class Typesetter {
             docEnd: prev?.docEnd ?? 0,
             style: prev?.style ?? base.style,
             styleKey: prev?.styleKey ?? base.key,
+            spanId: prev?.spanId ?? -1,
             scaleX,
             synthetic: true,
           });
@@ -1036,12 +1124,15 @@ export class Typesetter {
           docEnd: rendered.map[ce] ?? rendered.map[rendered.map.length - 1],
           style: st.style,
           styleKey: st.key,
+          spanId: st.id,
           scaleX,
           synthetic: false,
           math: slice === OBJECT_REPLACEMENT ? pieces.get(cs) : undefined,
         });
       }
       lines.push({
+        docStart,
+        docEnd,
         baseline,
         height,
         depth,
@@ -1051,7 +1142,6 @@ export class Typesetter {
         indent,
       });
     }
-    void toByte;
     return lines;
   }
 }

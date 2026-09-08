@@ -3,6 +3,7 @@
 // rather than one "correct" one.
 import {
   parseBlocks,
+  blockIndexAtPosition,
   renderBlock,
   parseInline,
   OBJECT_REPLACEMENT as OBJ,
@@ -62,6 +63,7 @@ eq(rendered("a $x$ b"), "a " + OBJ + " b", "a formula becomes one placeholder");
 eq(formulas("see $$x^2$$ here"), ["[[x^2]]"], "double dollars are display math anywhere");
 eq(formulas("\\(a+b\\)"), ["a+b"], "TeX inline delimiters");
 eq(formulas("\\[a+b\\]"), ["[[a+b]]"], "TeX display delimiters");
+eq(formulas("\\(x \\\\) y\\)"), ["x \\\\) y"], "an escaped TeX closer is skipped");
 eq(
   formulas("$x$", { ...strict, inlineMath: false }),
   [],
@@ -80,7 +82,15 @@ eq(rendered("$a*b*c$"), OBJ, "no emphasis leaks out of a formula");
 
 // --- escaping -------------------------------------------------------------
 eq(formulas("\\$x\\$"), [], "escaped dollars do not open math");
+eq(rendered("\\$x\\$"), "$x$", "escaped dollar delimiters remain visible literally");
 eq(formulas("$x = \\$5$"), ["x = \\$5"], "an escaped dollar inside math does not close it");
+eq(formulas(String.raw`\\$x$`), ["x"], "an even slash run leaves a dollar opener active");
+eq(rendered(String.raw`\\$x$`), "\\" + OBJ, "the escaped slash before dollar math remains literal");
+eq(formulas(String.raw`\\(x\\)`), [], "escaped TeX opener does not start math");
+eq(rendered(String.raw`\\(x\\)`), String.raw`\(x\)`, "escaped TeX delimiters remain literal");
+eq(rendered(String.raw`\alpha outside math`), String.raw`\alpha outside math`,
+   "a TeX-like command outside math keeps its slash");
+eq(rendered("`\\$x\\$`"), "\\$x\\$", "code spans keep escaped-looking math delimiters opaque");
 
 // --- blocks ---------------------------------------------------------------
 {
@@ -107,6 +117,70 @@ eq(formulas("$x = \\$5$"), ["x = \\$5"], "an escaped dollar inside math does not
   const doc = "$$ x + y $$";
   const m = parseBlocks(doc).find((b) => b.type === "math");
   eq(m ? m.math.trim() : null, "x + y", "a one-line display block");
+}
+{
+  const doc = "$$\nx\n$$";
+  const options = { ...strict, inlineMath: false };
+  const blocks = parseBlocks(doc, options);
+  eq(blocks.map((b) => b.type), ["paragraph"], "disabling dollar math also disables dollar blocks");
+  eq(blocks[0].source, doc, "disabled dollar block syntax remains source text");
+}
+{
+  const doc = "\\[\nx\n\\]";
+  const options = { ...strict, texDelimiters: false };
+  const blocks = parseBlocks(doc, options);
+  eq(blocks.map((b) => b.type), ["paragraph"], "disabling TeX delimiters also disables TeX blocks");
+  eq(blocks[0].source, doc, "disabled TeX block syntax remains source text");
+}
+{
+  const doc = "```math\nx\n```";
+  const options = { ...strict, inlineMath: false, texDelimiters: false };
+  eq(parseBlocks(doc, options)[0].type, "math", "an explicit math fence is independent of delimiters");
+}
+{
+  const doc = "$$x$$ trailing";
+  const [b] = parseBlocks(doc);
+  const r = renderBlock(b, false);
+  eq(b.type, "paragraph", "a one-line formula with a suffix remains a paragraph");
+  eq(r.text, OBJ + " trailing", "text after a one-line display formula is preserved");
+  eq(Array.from(r.map), [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], "its source map reaches the suffix");
+}
+{
+  const doc = "before\n$$x$$ trailing\nafter";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["paragraph"], "a suffixed formula does not interrupt a paragraph");
+  eq(blocks[0].source, doc, "the surrounding paragraph remains contiguous");
+}
+{
+  const doc = "\\[x\\] trailing";
+  const [b] = parseBlocks(doc);
+  eq(renderBlock(b, false).text, OBJ + " trailing", "text after TeX display delimiters is preserved");
+}
+{
+  const doc = "$$\nx\n$$ trailing\ncontinued";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["math", "paragraph"], "a multiline closer can be followed by a paragraph");
+  eq(blocks[0].source, "$$\nx\n$$", "the formula ends exactly at its closer");
+  eq(blocks[1].source, " trailing\ncontinued", "the suffix keeps its continuation line");
+  eq(blockIndexAtPosition(blocks, blocks[1].start), 1, "the shared caret boundary belongs to the suffix");
+  eq(renderBlock(blocks[1], false).text, " trailing continued", "the suffix renders without data loss");
+}
+{
+  const doc = "  $$ x $$  ";
+  const [b] = parseBlocks(doc);
+  eq(b.source, doc, "trailing block whitespace stays in the raw source range");
+}
+{
+  const doc = "$$\nx \\$$ y\n$$";
+  const [b] = parseBlocks(doc);
+  eq(b.math.trim(), "x \\$$ y", "an escaped delimiter does not close a math block");
+}
+{
+  const doc = "$$\nx \\$$$ tail";
+  const blocks = parseBlocks(doc);
+  eq(blocks.map((b) => b.type), ["math", "paragraph"], "overlapping dollar runs find a later closer");
+  eq(blocks[0].math.trim(), "x \\$", "only the escaped dollars remain in the formula");
+  eq(blocks[1].source, " tail", "text after the overlapping closer is preserved");
 }
 
 // --- the focused block still shows its source -----------------------------
