@@ -16,7 +16,12 @@ import type { Editor } from "./editor.js";
 export type CommandId =
   | "undo"
   | "redo"
-  | "selectAll";
+  | "selectAll"
+  | "strong"
+  | "emphasis"
+  | "inlineCode"
+  | "strike"
+  | "clearFormat";
 
 export interface Command {
   /** Menu label. */
@@ -28,4 +33,12 @@ export const COMMANDS: Record<CommandId, Command> = {
   undo: { label: "撤销", run: (e) => e.undo() },
   redo: { label: "重做", run: (e) => e.redo() },
   selectAll: { label: "全选", run: (e) => e.selectAll() },
+
+  // Emphasis is written with asterisks rather than underscores: GFM ignores
+  // an underscore inside a word, so `snake_case` would break `_emphasis_`.
+  strong: { label: "加粗", run: (e) => e.toggleInline("**") },
+  emphasis: { label: "斜体", run: (e) => e.toggleInline("*") },
+  inlineCode: { label: "代码", run: (e) => e.toggleInline("`") },
+  strike: { label: "删除线", run: (e) => e.toggleInline("~~") },
+  clearFormat: { label: "清除样式", run: (e) => e.clearFormat() },
 };

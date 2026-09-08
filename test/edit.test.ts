@@ -1,0 +1,91 @@
+// Source transformations behind the editing commands.
+//
+// These run on strings alone: given a document and a selection, what does the
+// document become? Keeping them pure is what makes the awkward cases — a
+// selection with a space on the end, markup already there, a formula caught in
+// the middle — cheap to pin down.
+import assert from "node:assert/strict";
+import { clearFormat, toggleInline } from "../src/markdown/edit.js";
+
+let failures = 0;
+function shows(text: string, sel: [number, number], edit: ReturnType<typeof toggleInline> | null, label: string, expected: string) {
+  // Render the result with | for a collapsed caret and [ ] around a selection.
+  let out: string;
+  if (!edit) out = text;
+  else {
+    out = text.slice(0, edit.from) + edit.insert + text.slice(edit.to);
+    const s = edit.select ?? { start: edit.from + edit.insert.length, end: edit.from + edit.insert.length };
+    out = s.start === s.end
+      ? out.slice(0, s.start) + "|" + out.slice(s.start)
+      : out.slice(0, s.start) + "[" + out.slice(s.start, s.end) + "]" + out.slice(s.end);
+  }
+  if (out !== expected) {
+    failures++;
+    console.log(`FAIL ${label}\n  expected ${JSON.stringify(expected)}\n  actual   ${JSON.stringify(out)}`);
+  }
+}
+
+const wrap = (text: string, start: number, end: number, open: string, close = open) =>
+  toggleInline(text, { start, end }, open, close);
+
+// --- wrapping -------------------------------------------------------------
+shows("one two", [0, 3], wrap("one two", 0, 3, "**"), "a selection is wrapped and stays selected", "**[one]** two");
+shows("one two", [4, 7], wrap("one two", 4, 7, "*"), "emphasis too", "one *[two]*");
+shows("", [0, 0], wrap("", 0, 0, "`"), "an empty selection gives an empty pair", "`|`");
+shows("ab", [0, 2], wrap("ab", 0, 2, "<u>", "</u>"), "an asymmetric pair", "<u>[ab]</u>");
+
+// CommonMark will not close emphasis against a space, so the space is left out.
+shows("one two", [0, 4], wrap("one two", 0, 4, "**"), "trailing space stays outside the pair", "**[one]** two");
+shows("one two", [3, 7], wrap("one two", 3, 7, "**"), "and a leading one", "one **[two]**");
+shows("  ", [0, 2], wrap("  ", 0, 2, "**"), "a selection of nothing but space still wraps", "**[  ]**");
+
+// --- unwrapping -----------------------------------------------------------
+shows("**one** two", [2, 5], wrap("**one** two", 2, 5, "**"), "the pair around the selection comes off", "[one] two");
+shows("**one** two", [0, 7], wrap("**one** two", 0, 7, "**"), "and so does one inside it", "[one] two");
+shows("*a*", [0, 3], wrap("*a*", 0, 3, "*"), "a one-character pair", "[a]");
+shows("**a**", [2, 3], wrap("**a**", 2, 3, "*"),
+  "emphasis inside strong nests rather than unwrapping", "**\*[a]\***");
+shows("~~x~~", [2, 3], wrap("~~x~~", 2, 3, "~~"), "strikethrough", "[x]");
+
+// A run of three is the two emphasis markers written together, so toggling
+// either one takes back its own share and leaves the other standing.
+shows("***a***", [3, 4], wrap("***a***", 3, 4, "*"), "italic off, bold stays", "**[a]**");
+shows("***a***", [3, 4], wrap("***a***", 3, 4, "**"), "bold off, italic stays", "*[a]*");
+shows("```a```", [3, 4], wrap("```a```", 3, 4, "`"), "but a run of backticks is not emphasis", "````[a]````");
+
+// Toggling twice returns the document to where it started.
+{
+  const first = wrap("word", 0, 4, "**");
+  const text = "**word**";
+  const back = toggleInline(text, first.select!, "**");
+  assert.equal(text.slice(0, back.from) + back.insert + text.slice(back.to), "word",
+    "wrapping and unwrapping is a round trip");
+}
+
+// --- clearing -------------------------------------------------------------
+const clear = (text: string) => {
+  const edit = clearFormat(text, { start: 0, end: text.length });
+  return edit ? text.slice(0, edit.from) + edit.insert + text.slice(edit.to) : text;
+};
+assert.equal(clear("**bold** and *em*"), "bold and em", "emphasis markers go");
+assert.equal(clear("`code` and ~~gone~~"), "code and gone");
+assert.equal(clear("[text](https://example.com)"), "text", "a link keeps its text");
+assert.equal(clear("plain text"), "plain text", "text with no markup is untouched");
+assert.equal(clearFormat("plain", { start: 0, end: 5 }), null, "and reports that nothing changed");
+assert.equal(clearFormat("", { start: 0, end: 0 }), null, "an empty selection is nothing to do");
+
+// A formula is content rather than styling, so it survives with its
+// delimiters — it renders as an object, and the source is put back.
+assert.equal(clear("**a** $x^2$ *b*"), "a $x^2$ b", "a formula keeps its dollars");
+assert.equal(clear("![alt](pic.png)"), "![alt](pic.png)", "and an image keeps its source");
+assert.equal(clear("a **b `c` d** e"), "a b c d e", "nested markup all the way down");
+
+// Across blocks the line structure has to survive: a newline handed to the
+// inline parser is a soft break, and the CJK rule would discard it — welding
+// two paragraphs into one.
+assert.equal(clear("**一段**\n\n*第二段*"), "一段\n\n第二段", "blank lines between blocks are kept");
+assert.equal(clear("- **a**\n- *b*"), "- a\n- b", "and so are the lines of a list");
+assert.equal(clear("中文**加粗**中文"), "中文加粗中文", "with no stray space where the markers were");
+
+console.log(failures ? `\n${failures} failing` : "all passing");
+process.exit(failures ? 1 : 0);

@@ -103,4 +103,12 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Mod+Shift+z", command: "redo" },
   { chord: "Mod+y", command: "redo" },
   { chord: "Mod+a", command: "selectAll" },
+
+  // Format. ⌥⇧5 for strikethrough is Typora's binding, borrowed in turn from
+  // Google Docs.
+  { chord: "Mod+b", command: "strong" },
+  { chord: "Mod+i", command: "emphasis" },
+  { chord: "Mod+Shift+`", command: "inlineCode" },
+  { chord: "Alt+Shift+5", command: "strike" },
+  { chord: "Mod+\\", command: "clearFormat" },
 ];

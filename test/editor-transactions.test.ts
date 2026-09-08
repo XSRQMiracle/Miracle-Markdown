@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { Editor } from '../src/editor/editor.js';
 import { DocumentSession } from '../src/markdown/session.js';
-import { parseBlocks } from '../src/markdown/parse.js';
+import { DEFAULT_INLINE_OPTIONS, parseBlocks } from '../src/markdown/parse.js';
 
 (globalThis as any).window = Object.assign(new EventTarget(), { setInterval: () => 0 });
 (globalThis as any).ResizeObserver = class { observe() {} };
@@ -16,6 +16,7 @@ function fixture(text='aOLDz', start=4, end=1) {
   const reparse = () => { editor.blocks = parseBlocks(editor.text).map((block)=>({block})); };
   Object.assign(editor, {text,selStart:start,selEnd:end,caretAffinity:'upstream',composing:null,
     undoStack:[],redoStack:[],lastEditAt:-Infinity,input,canvas:new EventTarget(),host:{},dirty:false,
+    typesetter:{options:{inline:DEFAULT_INLINE_OPTIONS}},
     invalidate:()=>reparse(),scrollCaretIntoView:()=>{}, onChange:()=>session.updateText(editor.getText())});
   reparse();
   editor.attach();
@@ -186,5 +187,50 @@ function fixture(text='aOLDz', start=4, end=1) {
   assert.equal(e.getText(), '(');
   event('compositionstart'); event('compositionend',{data:'（'});
   assert.equal(e.getText(), '(（');
+}
+// --- formatting commands --------------------------------------------------
+{
+  const fmt = (text: string, start: number, end = start) => {
+    const {editor:e,event} = fixture(text, start, end);
+    return {
+      editor: e,
+      key: (props: Record<string, unknown>) => event('keydown', {preventDefault(){}, ...props}),
+      state: () => [e.getText(), e.selStart, e.selEnd] as const,
+    };
+  };
+
+  let f = fmt('one two', 0, 3);
+  f.key({key:'b', metaKey:true});
+  assert.deepEqual(f.state(), ['**one** two', 2, 5], 'Cmd+B wraps the selection and keeps it selected');
+  f.key({key:'b', metaKey:true});
+  assert.deepEqual(f.state(), ['one two', 0, 3], 'and again takes it off');
+
+  // With nothing selected the word under the caret is taken.
+  f = fmt('one two', 5);
+  f.key({key:'i', metaKey:true});
+  assert.deepEqual(f.state(), ['one *two*', 5, 8], 'Cmd+I takes the word under the caret');
+  f = fmt('one two', 3);
+  f.key({key:'i', metaKey:true});
+  assert.deepEqual(f.state(), ['*one* two', 1, 4], 'a caret just after a word takes that word');
+  f = fmt('a  b', 2);
+  f.key({key:'i', metaKey:true});
+  assert.deepEqual(f.state(), ['a ** b', 3, 3], 'but on a space it gives an empty pair to type into');
+
+  f = fmt('code', 0, 4);
+  f.key({key:'`', metaKey:true, shiftKey:true});
+  assert.deepEqual(f.state(), ['`code`', 1, 5], 'Cmd+Shift+` is inline code');
+  f = fmt('gone', 0, 4);
+  f.key({key:'5', code:'Digit5', altKey:true, shiftKey:true});
+  assert.deepEqual(f.state(), ['~~gone~~', 2, 6], 'Alt+Shift+5 is strikethrough');
+
+  // Clear format asks the parser what it would drop.
+  f = fmt('a **b** and [c](/d)', 0, 19);
+  f.key({key:'\\', metaKey:true});
+  assert.deepEqual(f.state(), ['a b and c', 0, 9], 'Cmd+\\ strips inline markup');
+
+  // Verbatim blocks take their delimiters literally, so formatting is refused.
+  f = fmt('```\ncode\n```', 4, 8);
+  f.key({key:'b', metaKey:true});
+  assert.deepEqual(f.state(), ['```\ncode\n```', 4, 8], 'a code fence is left alone');
 }
 console.log('all editor transaction tests passing');

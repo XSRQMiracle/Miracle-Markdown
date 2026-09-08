@@ -28,6 +28,7 @@ import { wordAt, wordBoundary } from "./words.js";
 import { compileSearch, expandReplacement, findMatches, type Match, type SearchQuery } from "./search.js";
 import { BINDINGS, commandFor } from "./keymap.js";
 import { COMMANDS, type CommandId } from "./commands.js";
+import { clearFormat, toggleInline, type Edit } from "../markdown/edit.js";
 import {
   DEFAULT_OPTIONS,
   DEFAULT_THEME,
@@ -222,6 +223,52 @@ export class Editor {
 
   getText(): string {
     return this.text;
+  }
+
+  /**
+   * Apply a source transformation, and put the selection where it asks.
+   *
+   * One edit, one undo entry: a command is a single act however much text it
+   * rewrites.
+   */
+  applyEdit(edit: Edit | null): void {
+    if (!edit) return;
+    this.replace(edit.from, edit.to, edit.insert, false);
+    if (edit.select) this.select(edit.select.start, edit.select.end);
+  }
+
+  /**
+   * Wrap the selection in a pair of delimiters, or take them off.
+   *
+   * With nothing selected the word under the caret is taken instead, which is
+   * what makes ⌘B usable without reaching for the mouse first. Where there is
+   * no word — the caret sits on a space, or in an empty document — an empty
+   * pair is written and the caret goes between the halves.
+   */
+  toggleInline(open: string, close: string = open): void {
+    if (this.dirty) this.relayout();
+    const type = this.blockTypeAt(Math.min(this.selStart, this.selEnd));
+    if (type && VERBATIM.includes(type)) return;
+
+    let lo = Math.min(this.selStart, this.selEnd);
+    let hi = Math.max(this.selStart, this.selEnd);
+    if (lo === hi) {
+      const word = wordAt(this.text, lo);
+      // Only a real word is taken: on a space or a bracket the author is
+      // asking for an empty pair to type into.
+      if (/[\p{L}\p{N}]/u.test(this.text.slice(word.start, word.end))) {
+        lo = word.start;
+        hi = word.end;
+      }
+    }
+    this.applyEdit(toggleInline(this.text, { start: lo, end: hi }, open, close));
+  }
+
+  /** Strip inline markup from the selection. */
+  clearFormat(): void {
+    const lo = Math.min(this.selStart, this.selEnd);
+    const hi = Math.max(this.selStart, this.selEnd);
+    this.applyEdit(clearFormat(this.text, { start: lo, end: hi }, this.options.inline));
   }
 
   selectAll(): void {
