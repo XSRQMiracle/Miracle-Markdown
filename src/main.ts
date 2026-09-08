@@ -82,6 +82,14 @@ async function main() {
       get: (e) => e.options.inline.cjkSoftBreaks,
       set: (e, on) => e.setOptions({ inline: { ...e.options.inline, cjkSoftBreaks: on } }),
     },
+    {
+      label: "智能标点",
+      hint:
+        "键盘上只有一个竖直引号和一个连字符，而排版需要区分它们。开启后输入时直接替换为" +
+        "成对的引号、短破折号（--）、长破折号（---）和省略号（…）。代码块与公式中不做替换。",
+      get: (e) => e.editing.smartPunctuation,
+      set: (e, on) => e.setEditing({ smartPunctuation: on }),
+    },
   ];
 
   for (const t of TOGGLES) {

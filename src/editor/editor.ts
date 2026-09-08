@@ -32,6 +32,7 @@ import {
 } from "../markdown/parse.js";
 import { normalizeLineEndings } from "../markdown/document.js";
 import { wordAt, wordBoundary } from "./words.js";
+import { smartPair, smartPunctuation } from "./punctuation.js";
 import { compileSearch, expandReplacement, findMatches, type Match, type SearchQuery } from "./search.js";
 import { BINDINGS, commandFor } from "./keymap.js";
 import { COMMANDS, type CommandId } from "./commands.js";
@@ -173,6 +174,9 @@ export class Editor {
   private frame = 0;
   private dirty = true;
 
+  /** Options that belong to typing rather than to typesetting. */
+  private editingOptions: EditingOptions = { ...DEFAULT_EDITING_OPTIONS };
+
   /** Last measured typesetting time, surfaced in the status bar. */
   lastLayoutMs = 0;
   onStatus: ((info: StatusInfo) => void) | null = null;
@@ -204,6 +208,14 @@ export class Editor {
   get theme(): Theme {
     return this.typesetter.theme;
   }
+  get editing(): EditingOptions {
+    return this.editingOptions;
+  }
+
+  setEditing(patch: Partial<EditingOptions>): void {
+    this.editingOptions = { ...this.editingOptions, ...patch };
+  }
+
   get options(): TypesetOptions {
     return this.typesetter.options;
   }
@@ -507,6 +519,25 @@ export class Editor {
     const type = this.blockTypeAt(lo);
     if (type && VERBATIM.includes(type)) return;
     this.applyEdit(toggleLink(this.text, { start: lo, end: Math.max(this.selStart, this.selEnd) }));
+  }
+
+  /**
+   * Write the typographic form of what was typed, where there is one.
+   *
+   * Refused in blocks that take their text literally: a code fence full of
+   * curly quotes would not compile, and a formula's dashes are minus signs.
+   *
+   * Returns whether it handled the character.
+   */
+  private smarten(ch: string): boolean {
+    if (!this.editingOptions.smartPunctuation) return false;
+    const { start, end } = this.range();
+    if (start !== end) return false;
+    if (this.blockedBlock()) return false;
+    const found = smartPunctuation(this.text, start, ch);
+    if (!found) return false;
+    this.replace(found.from, start, found.insert, true);
+    return true;
   }
 
   /** Strip inline markup from the selection. */
@@ -1363,7 +1394,8 @@ export class Editor {
       const value = this.input.value;
       this.input.value = "";
       if (!value) return;
-      if (value.length !== 1 || !this.autoPair(value)) this.insert(value);
+      if (value.length === 1 && (this.autoPair(value) || this.smarten(value))) return;
+      this.insert(value);
     });
 
     this.input.addEventListener("paste", (e) => {
@@ -1535,6 +1567,12 @@ export class Editor {
     if (type && VERBATIM.includes(type)) return false;
 
     if (lo !== hi) {
+      const smart = this.editingOptions.smartPunctuation ? smartPair(ch) : null;
+      if (smart) {
+        this.replace(lo, hi, smart[0] + this.text.slice(lo, hi) + smart[1], false);
+        this.select(lo + smart[0].length, hi + smart[0].length);
+        return true;
+      }
       const close = WRAPPERS[ch];
       if (!close) return false;
       this.replace(lo, hi, ch + this.text.slice(lo, hi) + close, false);
@@ -1676,6 +1714,16 @@ export interface SearchStatus {
   index: number;
   valid: boolean;
 }
+
+/** Options that belong to typing rather than to typesetting. */
+export interface EditingOptions {
+  /** Turn typed quotes, dashes and dots into their typographic forms. */
+  smartPunctuation: boolean;
+}
+
+export const DEFAULT_EDITING_OPTIONS: EditingOptions = {
+  smartPunctuation: true,
+};
 
 export interface StatusInfo {
   chars: number;

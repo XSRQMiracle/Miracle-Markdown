@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { Editor } from '../src/editor/editor.js';
+import { DEFAULT_EDITING_OPTIONS, Editor } from '../src/editor/editor.js';
 import { DocumentSession } from '../src/markdown/session.js';
 import { DEFAULT_INLINE_OPTIONS, parseBlocks } from '../src/markdown/parse.js';
 
@@ -17,6 +17,7 @@ function fixture(text='aOLDz', start=4, end=1) {
   Object.assign(editor, {text,selStart:start,selEnd:end,caretAffinity:'upstream',composing:null,
     undoStack:[],redoStack:[],lastEditAt:-Infinity,input,canvas:new EventTarget(),host:{},dirty:false,
     typesetter:{options:{inline:DEFAULT_INLINE_OPTIONS}},
+    editingOptions:{...DEFAULT_EDITING_OPTIONS},
     invalidate:()=>reparse(),scrollCaretIntoView:()=>{}, onChange:()=>session.updateText(editor.getText())});
   reparse();
   editor.attach();
@@ -285,6 +286,43 @@ function fixture(text='aOLDz', start=4, end=1) {
   // A table row is a line, so the same command deletes it.
   assert.equal(del('| a |\n| - |\n| x |', 14, line), '| a |\n| - |', 'and a table row too');
 }
+// --- smart punctuation ----------------------------------------------------
+{
+  const typing = (text: string, start: number, end = start) => {
+    const {editor:e,input,event} = fixture(text, start, end);
+    return {
+      editor: e,
+      type: (s: string) => { for (const ch of s) { input.value = ch; event('input',{inputType:'insertText'}); } },
+    };
+  };
+  let t = typing('', 0);
+  t.type('He said "no" -- really...');
+  assert.equal(t.editor.getText(), 'He said “no” – really…', 'quotes, dashes and dots as they are typed');
+
+  // Blocks that take their text literally keep every character.
+  t = typing('```\n', 4);
+  t.type('a "b" -- c...');
+  assert.equal(t.editor.getText(), '```\na "b" -- c...', 'a code fence is left alone');
+
+  // One press of undo puts the typed character back.
+  t = typing('', 0);
+  t.type('a--');
+  assert.equal(t.editor.getText(), 'a–');
+  t.editor.undo();
+  assert.equal(t.editor.getText(), '', 'the substitution undoes with the typing it belongs to');
+
+  // Wrapping a selection in quotes uses the pair too.
+  t = typing('word', 0, 4);
+  t.type('"');
+  assert.equal(t.editor.getText(), '“word”', 'a selection is wrapped in a real pair');
+
+  // And the option turns it all off.
+  t = typing('', 0);
+  t.editor.setEditing({smartPunctuation:false});
+  t.type('"a" -- b...');
+  assert.equal(t.editor.getText(), '"a" -- b...', 'with the option off, nothing is substituted');
+}
+
 // --- line-wise copy and cut -----------------------------------------------
 {
   const clip = (text: string, start: number, end: number, type: 'copy' | 'cut') => {
