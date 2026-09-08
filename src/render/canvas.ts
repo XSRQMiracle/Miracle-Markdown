@@ -31,6 +31,50 @@ export interface SelectionRect {
   y: number;
   w: number;
   h: number;
+  /** Paint colour, for the bands that mark something other than a selection. */
+  color?: string;
+}
+
+/**
+ * Where a task list's checkbox is drawn.
+ *
+ * Shared with the editor so that clicking the box and painting it cannot
+ * disagree about where it is.
+ */
+export function checkboxRect(
+  b: LaidBlock,
+  size: number,
+  baseline: number,
+  theme: Theme,
+): SelectionRect {
+  const box = size * 0.72;
+  return {
+    // Sit the box on the text's optical centre rather than its baseline.
+    x: b.indent - box - theme.bodySize * 0.45,
+    y: baseline - box * 0.92,
+    w: box,
+    h: box,
+  };
+}
+
+/** The selection's own colour, and the one search matches are marked in. */
+export const SELECTION_COLOR = "#cddcf0";
+export const MATCH_COLOR = "#f6e3a1";
+
+/**
+ * The scrollbar, in viewport coordinates.
+ *
+ * It is painted rather than built from an element for the same reason the
+ * text is: the geometry is ours, and a DOM scrollbar would have to be kept in
+ * step with a document height only the typesetter knows.
+ */
+export interface Scrollbar {
+  /** Right edge of the canvas to the left edge of the track. */
+  width: number;
+  y: number;
+  h: number;
+  /** Pointer on it, or dragging it. */
+  active: boolean;
 }
 
 export class Renderer {
@@ -83,6 +127,9 @@ export class Renderer {
     caret: SelectionRect | null,
     caretVisible: boolean,
     showBadness: boolean,
+    scrollbar: Scrollbar | null = null,
+    /** In focus mode, the document-space band that stays undimmed. */
+    focusBand: { top: number; bottom: number } | null = null,
   ): void {
     const ctx = this.ctx;
     ctx.save();
@@ -96,9 +143,9 @@ export class Renderer {
     ctx.translate(view.originX, view.originY - view.scrollTop);
 
     // Selection sits under the text so glyphs stay legible on top of it.
-    if (selection.length) {
-      this.setFill("#cddcf0");
-      for (const r of selection) ctx.fillRect(r.x, r.y, r.w, r.h);
+    for (const r of selection) {
+      this.setFill(r.color ?? SELECTION_COLOR);
+      ctx.fillRect(r.x, r.y, r.w, r.h);
     }
 
     const top = view.scrollTop - view.originY;
@@ -166,7 +213,33 @@ export class Renderer {
       ctx.fillRect(caret.x, caret.y, Math.max(1.5, 1.5), caret.h);
     }
 
+    if (focusBand) {
+      // Everything but the current block is veiled rather than redrawn in a
+      // paler colour: the type keeps its exact shapes and positions, and the
+      // page stays one paint rather than two.
+      ctx.fillStyle = "rgba(253, 253, 251, 0.72)";
+      this.currentFill = "";
+      const height = view.height + view.scrollTop;
+      ctx.fillRect(-view.originX, top - 200, view.width, focusBand.top - top + 200);
+      ctx.fillRect(-view.originX, focusBand.bottom, view.width, height);
+    }
+
     ctx.restore();
+
+    // Outside the page translation: the scrollbar belongs to the window.
+    if (scrollbar) {
+      ctx.save();
+      ctx.scale(this.dpr, this.dpr);
+      const w = scrollbar.active ? 7 : 5;
+      const x = view.width - scrollbar.width + (scrollbar.width - w) / 2;
+      ctx.fillStyle = scrollbar.active ? "rgba(40, 38, 34, 0.42)" : "rgba(40, 38, 34, 0.2)";
+      const r = w / 2;
+      ctx.beginPath();
+      ctx.roundRect(x, scrollbar.y, w, scrollbar.h, r);
+      ctx.fill();
+      ctx.restore();
+    }
+
     // The frame's restore also restores font/fill, whereas the memoized
     // values describe the last run we painted. Start the next frame fresh.
     this.currentFont = "";
@@ -405,10 +478,7 @@ export class Renderer {
     theme: Theme,
   ): void {
     const ctx = this.ctx;
-    const box = size * 0.72;
-    // Sit the box on the text's optical centre rather than its baseline.
-    const top = baseline - box * 0.92;
-    const left = b.indent - box - theme.bodySize * 0.45;
+    const { x: left, y: top, w: box } = checkboxRect(b, size, baseline, theme);
     const stroke = Math.max(1, size / 14);
 
     ctx.save();

@@ -207,6 +207,8 @@ export interface LaidRun {
   image?: ImageRun;
   /** Present on a run that draws a footnote's raised number. */
   note?: NoteRun;
+  /** Destination of the link this run is part of, if it is part of one. */
+  href?: string;
 }
 
 export interface LaidLine {
@@ -615,6 +617,8 @@ export class Typesetter {
     doc: string,
     width: number,
     focusedPosition: number,
+    /** Show every block as its source, not only the one holding the caret. */
+    sourceMode = false,
   ): { blocks: LaidBlock[]; height: number } {
     const parsed = parseBlocks(doc, this.options.inline);
     // Most blocks exclude the trailing LF, but an unterminated code/math
@@ -637,7 +641,7 @@ export class Typesetter {
       const laid = this.layoutBlock(
         b,
         width,
-        i === focusedBlock,
+        sourceMode || i === focusedBlock,
         out.at(-1)?.block ?? null,
         numbering.tags.get(i) ?? null,
         numbering,
@@ -1538,6 +1542,9 @@ export class Typesetter {
           math: object?.kind === "math" ? object : undefined,
           image: object?.kind === "image" ? object.image : undefined,
           note: object?.kind === "note" ? object.note : undefined,
+          // Carried on the run so that following a link is a hit test like
+          // any other, with no second pass over the markdown.
+          href: st.span?.kind === "link" ? st.span.href : undefined,
         });
       }
       lines.push({

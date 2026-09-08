@@ -6,17 +6,27 @@
 import { Editor, type StatusInfo } from "./editor/editor.js";
 import { initEngine, type TypesetOptions } from "./engine/typeset.js";
 import { SAMPLE } from "./sample.js";
-import { isDesktop, openDocument, saveDocument, installDesktopCloseHandler, finishDesktopClose } from "./platform.js";
+import {
+  finishDesktopClose,
+  installDesktopCloseHandler,
+  isDesktop,
+  openDocument,
+  openExternal,
+  saveDocument,
+} from "./platform.js";
 import { DEFAULT_MATH_OPTIONS, initMath, type MathOptions } from "./engine/mathjax.js";
 import { buildMathPanel } from "./ui/math-panel.js";
 import { onImageSettled } from "./engine/images.js";
 import { DocumentSession } from "./markdown/session.js";
 import { confirmUnsavedDocument, showDocumentError } from "./ui/document-dialog.js";
+import { buildFindBar } from "./ui/find-bar.js";
+import { buildShortcutSheet } from "./ui/shortcut-sheet.js";
 
 const stage = document.getElementById("stage") as HTMLElement;
 const canvas = document.getElementById("surface") as HTMLCanvasElement;
 const status = document.getElementById("status") as HTMLElement;
 const perf = document.getElementById("perf") as HTMLElement;
+const mode = document.getElementById("mode") as HTMLElement;
 const toggles = document.getElementById("toggles") as HTMLElement;
 const sizeInput = document.getElementById("size") as HTMLInputElement;
 const openButton = document.getElementById("open") as HTMLButtonElement;
@@ -74,6 +84,14 @@ async function main() {
       get: (e) => e.options.inline.cjkSoftBreaks,
       set: (e, on) => e.setOptions({ inline: { ...e.options.inline, cjkSoftBreaks: on } }),
     },
+    {
+      label: "智能标点",
+      hint:
+        "键盘上只有一个竖直引号和一个连字符，而排版需要区分它们。开启后输入时直接替换为" +
+        "成对的引号、短破折号（--）、长破折号（---）和省略号（…）。代码块与公式中不做替换。",
+      get: (e) => e.editing.smartPunctuation,
+      set: (e, on) => e.setEditing({ smartPunctuation: on }),
+    },
   ];
 
   for (const t of TOGGLES) {
@@ -90,6 +108,10 @@ async function main() {
     });
     toggles.appendChild(button);
   }
+
+  // ⌘/Ctrl-click on a link. The editor finds it; where it opens is the
+  // host's business, and an unopenable one is simply left alone.
+  editor.onFollowLink = (href) => void openExternal(href);
 
   // Decoding can change an image's reserved width and height. Register once
   // at startup so cached placeholder layouts are invalidated immediately.
@@ -118,13 +140,66 @@ async function main() {
   openButton.addEventListener("click", () => void fileAction(() => session.open()));
   saveButton.addEventListener("click", () => void fileAction(() => session.save()));
   saveAsButton.addEventListener("click", () => void fileAction(() => session.save(true)));
+  const findBar = buildFindBar(document.getElementById("find-bar") as HTMLElement, editor);
+  const apple = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const sheet = buildShortcutSheet(document.getElementById("shortcuts") as HTMLElement, apple);
+  document.getElementById("shortcut-button")!.addEventListener("click", () => {
+    sheet.toggle();
+    if (!sheet.isOpen) editor.focus();
+  });
   window.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s" && !document.querySelector("dialog[open]")) {
+    if (document.querySelector("dialog[open]")) return;
+    // F3 and Shift+F3 step through the matches on Windows and Linux, where
+    // they are the convention; Ctrl+H opens the bar with the replacement
+    // field ready, as ⌥⌘F does on a Mac.
+    if (e.key === "F3") {
+      if (findBar.step(e.shiftKey)) e.preventDefault();
+      return;
+    }
+    // Escape closes the search from anywhere, including the document itself,
+    // which is where the caret is once a match has been stepped to.
+    if (e.key === "F1") {
+      e.preventDefault();
+      sheet.toggle();
+      if (!sheet.isOpen) editor.focus();
+      return;
+    }
+    if (e.key === "Escape" && sheet.isOpen) {
+      e.preventDefault();
+      sheet.close();
+      editor.focus();
+      return;
+    }
+    if (e.key === "Escape" && findBar.isOpen) {
+      e.preventDefault();
+      findBar.close();
+      return;
+    }
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod) return;
+    const key = e.key.toLowerCase();
+    if (key === "s") {
       e.preventDefault();
       void fileAction(() => session.save(e.shiftKey));
+    } else if (key === "f") {
+      // ⌥⌘F opens the same bar with the replacement field ready, which is
+      // where the platform puts "find and replace".
+      e.preventDefault();
+      findBar.open(editor.selectedText() || undefined, e.altKey);
+    } else if (key === "h" && !e.metaKey) {
+      e.preventDefault();
+      findBar.open(editor.selectedText() || undefined, true);
+    } else if (key === "g") {
+      // ⌘G continues a search that is already running; with the bar closed
+      // there is nothing to continue.
+      if (findBar.step(e.shiftKey)) e.preventDefault();
     }
   });
-  editor.onChange = () => session.updateText(editor.getText());
+  editor.onChange = () => {
+    session.updateText(editor.getText());
+    // Typing under an open search changes what it finds.
+    findBar.refresh();
+  };
   syncSession();
   if (isDesktop()) {
     let closePending = false;
@@ -146,6 +221,10 @@ async function main() {
   sizeInput.addEventListener("input", () => {
     editor.setTheme({ bodySize: Number(sizeInput.value) });
   });
+  // The keyboard can set the size too, and then the slider has to catch up.
+  editor.onThemeChange = () => {
+    sizeInput.value = String(editor.theme.bodySize);
+  };
 
   // Line length is its own decision now that it no longer rides on the type
   // size. Measured in characters it is the more meaningful of the two, so it
@@ -153,6 +232,18 @@ async function main() {
   columnInput.addEventListener("input", () => {
     editor.setTheme({ columnWidth: Number(columnInput.value) });
   });
+
+  // Source mode is a state the reader is in, so it is worth saying so
+  // somewhere: the footer, where Typora says it too.
+  const syncMode = () => {
+    mode.textContent = [
+      editor.editing.sourceMode ? "源代码模式 ⌘/" : "",
+      editor.editing.focusMode ? "专注模式 F8" : "",
+      editor.editing.typewriter ? "打字机 F9" : "",
+    ].filter(Boolean).join(" · ");
+  };
+  editor.onEditingChange = syncMode;
+  syncMode();
 
   editor.onStatus = (info: StatusInfo) => {
     status.textContent =

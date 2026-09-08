@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { initSync } from "../crates/typeset-wasm/pkg/typeset_wasm.js";
 import { DEFAULT_OPTIONS, DEFAULT_THEME, initEngine, Typesetter } from "../src/engine/typeset.js";
-import { Editor } from "../src/editor/editor.js";
+import { DEFAULT_EDITING_OPTIONS, Editor } from "../src/editor/editor.js";
 import { EMPTY_GEOMETRY } from "../src/engine/math.js";
 import { Renderer } from "../src/render/canvas.js";
 import { cssFont } from "../src/engine/measure.js";
@@ -153,6 +153,7 @@ const editable = (source: string, position = 0) => {
   Object.assign(editor, {
     typesetter, text: source, selStart: position, selEnd: position,
     caretAffinity: "downstream", preferredX: null, hasFocus: true, interacted: true,
+    editingOptions: { ...DEFAULT_EDITING_OPTIONS },
     scrollTop: 0, host: { clientWidth: 336, clientHeight: 10000 },
     canvas: { getBoundingClientRect: () => ({ left: 0, top: 0 }) },
     schedule() {},
@@ -184,13 +185,26 @@ const nextLine = visualLines[1];
 const startHit = wrappedEditor.positionAt(48, 56 + nextLine.baseline - 5);
 wrappedEditor.moveTo(startHit.offset, false, startHit.affinity);
 assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "clicking the shared offset on the next line stays there");
-const key = (name: string) => wrappedEditor.onKeyDown({ key: name, preventDefault() {} });
+const key = (name: string, mods: Record<string, boolean> = {}) =>
+  wrappedEditor.onKeyDown({ key: name, preventDefault() {}, ...mods });
 key("End");
 assert.equal(wrappedEditor.selEnd, nextLine.docEnd);
 assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "End uses the upstream side of a wrap");
 key("Home");
 assert.equal(wrappedEditor.selEnd, nextLine.docStart);
 assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "Home uses the downstream side of a wrap");
+
+// ⌘←/→ work on the visual line, so a soft wrap is a line like any other.
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: { platform: "MacIntel" } });
+key("ArrowRight", { metaKey: true });
+assert.equal(wrappedEditor.selEnd, nextLine.docEnd, "⌘→ goes to the end of the wrapped line");
+assert.deepEqual(wrappedEditor.locate(wrappedEditor.selEnd).line, nextLine, "and stays on it");
+key("ArrowLeft", { metaKey: true, shiftKey: true });
+assert.deepEqual([wrappedEditor.selStart, wrappedEditor.selEnd], [nextLine.docEnd, nextLine.docStart],
+  "⇧⌘← selects back to the start of that line");
+key("ArrowLeft", { altKey: true });
+assert.ok(wrappedEditor.selEnd < nextLine.docStart && wrappedEditor.selStart === wrappedEditor.selEnd,
+  "⌥← moves out of the line by word");
 wrappedEditor.selStart = 0;
 wrappedEditor.selEnd = longSource.length;
 assert.equal(wrappedEditor.selectionRects().length, visualLines.length, "selection covers every wrapped source line");
@@ -210,6 +224,48 @@ unfinished.moveVertical(-1, false);
 assert.equal(unfinished.selEnd, 4);
 unfinished.moveVertical(1, false);
 assert.equal(unfinished.selEnd, 6, "vertical movement round-trips through the terminal line");
+
+// A link's destination rides on the run it is painted from, so finding one
+// under the pointer is the same walk as placing the caret.
+{
+  const doc = "para\n\nsee [the site](https://example.com/x) here";
+  const linked = editable(doc, 0);
+  const block = linked.blocks.find((b: any) => b.lines.some((l: any) => l.runs.some((r: any) => r.href)));
+  const line = block.lines[0];
+  const run = line.runs.find((r: any) => r.href);
+  assert.deepEqual(line.runs.map((r: any) => [r.text, r.href ?? null]),
+    [["see", null], ["the", "https://example.com/x"], ["site", "https://example.com/x"], ["here", null]],
+    "the destination reaches the runs the link is painted from, and only those");
+  const at = (x: number) => linked.linkAt(x, linked.originY + block.y + line.baseline - 4);
+  assert.equal(at(linked.gutter + block.indent + run.x + 2), "https://example.com/x",
+    "a point on the link follows it");
+  assert.equal(at(linked.gutter + block.indent + 2), null, "the text before it does not");
+  assert.equal(at(linked.gutter + block.indent + line.width + 40), null,
+    "nor the space past the end of the line");
+  assert.equal(linked.linkAt(linked.gutter + block.indent + run.x + 2, 0), null,
+    "nor a point on another line");
+  // The block holding the caret shows its source, where the destination is
+  // written out and there is nothing to hide behind.
+  const focused = editable(doc, doc.length);
+  const raw = focused.blocks.at(-1);
+  assert.equal(raw.raw, true);
+  assert.equal(focused.linkAt(linked.gutter + block.indent + run.x + 2,
+    focused.originY + raw.y + raw.lines[0].baseline - 4), null,
+    "a block being edited has no links, only text");
+}
+
+// A window that grows, or a document that shrinks, can leave the page
+// scrolled past its end; laying it out again puts it back.
+{
+  const clamped = editable(longSource);
+  clamped.host.clientHeight = 200;
+  clamped.relayout();
+  clamped.scrollTop = clamped.scrollMax;
+  assert.ok(clamped.scrollTop > 0, "a long document in a short window scrolls");
+  clamped.host.clientHeight = 10000;
+  clamped.relayout();
+  assert.equal(clamped.scrollTop, 0, "and stops scrolling once it all fits");
+}
 
 const revealEditor = editable(longSource);
 revealEditor.interacted = false;
