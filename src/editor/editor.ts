@@ -39,6 +39,7 @@ import {
   clearFormat,
   indentLines,
   INDENT,
+  linesIn,
   moveLines,
   setHeading,
   stepHeading,
@@ -342,6 +343,35 @@ export class Editor {
   /** Move the lines the selection touches past their neighbour. */
   moveLines(direction: 1 | -1): void {
     this.applyEdit(moveLines(this.text, this.range(), direction));
+  }
+
+  /**
+   * Delete the word under the caret, and the space after it.
+   *
+   * Taking the following space is what makes repeated presses eat a sentence
+   * cleanly rather than leaving a trail of gaps behind them.
+   */
+  deleteWord(): void {
+    const { start, end } = this.range();
+    if (start !== end) {
+      this.replace(start, end, "");
+      return;
+    }
+    const word = wordAt(this.text, start);
+    const to = this.text[word.end] === " " ? word.end + 1 : word.end;
+    this.replace(word.start, to, "");
+  }
+
+  /** Delete the lines the selection touches — in a table, its rows. */
+  deleteLine(): void {
+    const lines = linesIn(this.text, this.range());
+    let from = lines[0].start;
+    let to = lines[lines.length - 1].end;
+    // The line goes with its newline, so the ones around it close up. At the
+    // end of the document there is none, so the one before it goes instead.
+    if (to < this.text.length) to++;
+    else if (from > 0) from--;
+    this.replace(from, to, "");
   }
 
   // -- selection commands -------------------------------------------------

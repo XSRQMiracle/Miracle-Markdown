@@ -264,4 +264,25 @@ function fixture(text='aOLDz', start=4, end=1) {
   assert.equal(sel('para one\n\npara two', 3, {key:'l', metaKey:true, shiftKey:true}), 'para one',
     'Cmd+Shift+L takes the block');
 }
+// --- deleting -------------------------------------------------------------
+{
+  const del = (text: string, start: number, props: Record<string, unknown>, end = start) => {
+    const {editor:e,event} = fixture(text, start, end);
+    event('keydown', {preventDefault(){}, ...props});
+    return e.getText();
+  };
+  const word = {key:'d', ctrlKey:true, shiftKey:true};
+  assert.equal(del('one two three', 5, word), 'one three', 'the word goes with the space after it');
+  assert.equal(del('one two', 7, word), 'one ', 'at the end there is no space to take');
+  assert.equal(del('中文排版', 3, word), '中文', 'a Han word is a word');
+  assert.equal(del('one two', 0, word, 7), '', 'a selection is what gets deleted instead');
+
+  const line = {key:'Backspace', ctrlKey:true, shiftKey:true};
+  assert.equal(del('a\nb\nc', 2, line), 'a\nc', 'the line goes with its newline');
+  assert.equal(del('a\nb', 3, line), 'a', 'at the end of the document the one before it goes');
+  assert.equal(del('only', 2, line), '', 'a lone line leaves an empty document');
+  assert.equal(del('a\nb\nc', 0, line, 3), 'c', 'a selection takes every line it touches');
+  // A table row is a line, so the same command deletes it.
+  assert.equal(del('| a |\n| - |\n| x |', 14, line), '| a |\n| - |', 'and a table row too');
+}
 console.log('all editor transaction tests passing');

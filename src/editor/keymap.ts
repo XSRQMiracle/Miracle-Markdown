@@ -152,4 +152,9 @@ export const BINDINGS: readonly Binding[] = [
   { chord: "Mod+l", command: "selectLine" },
   { chord: "Mod+e", command: "selectStyledScope" },
   { chord: "Mod+Shift+l", command: "selectBlock" },
+  { chord: "Ctrl+Shift+d", command: "deleteWord" },
+  // Typora's delete-row chord. A row is a line here, so one command does
+  // both jobs.
+  { chord: "Ctrl+Shift+Backspace", command: "deleteLine" },
+  { chord: "Cmd+Shift+Backspace", command: "deleteLine" },
 ];

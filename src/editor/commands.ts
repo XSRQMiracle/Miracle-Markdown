@@ -45,7 +45,9 @@ export type CommandId =
   | "selectWord"
   | "selectLine"
   | "selectBlock"
-  | "selectStyledScope";
+  | "selectStyledScope"
+  | "deleteWord"
+  | "deleteLine";
 
 export interface Command {
   /** Menu label. */
@@ -95,4 +97,7 @@ export const COMMANDS: Record<CommandId, Command> = {
   selectLine: { label: "选中当前行", run: (e) => e.selectLine() },
   selectBlock: { label: "选择段落或块", run: (e) => e.selectBlock() },
   selectStyledScope: { label: "选中当前格式文本", run: (e) => e.selectStyledScope() },
+
+  deleteWord: { label: "删除当前词", run: (e) => e.deleteWord() },
+  deleteLine: { label: "删除当前行", run: (e) => e.deleteLine() },
 };
