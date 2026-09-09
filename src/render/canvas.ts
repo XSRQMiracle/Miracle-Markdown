@@ -12,7 +12,8 @@
  * millisecond per frame.
  */
 
-import type { LaidBlock, LaidRun, Theme } from "../engine/typeset.js";
+import type { LaidBlock, LaidRun } from "../engine/typeset.js";
+import { DEFAULT_THEME, type Theme } from "../engine/theme.js";
 import { cssFont } from "../engine/measure.js";
 import type { MathDrawCommand } from "../engine/math.js";
 
@@ -57,9 +58,11 @@ export function checkboxRect(
   };
 }
 
-/** The selection's own colour, and the one search matches are marked in. */
-export const SELECTION_COLOR = "#cddcf0";
-export const MATCH_COLOR = "#f6e3a1";
+/** The default palette's selection and search-match bands, kept as named
+ *  exports for callers that need a colour before a theme is in hand. Painted
+ *  values come from the theme; these are only its defaults. */
+export const SELECTION_COLOR = DEFAULT_THEME.selectionColor;
+export const MATCH_COLOR = DEFAULT_THEME.matchColor;
 
 /**
  * The scrollbar, in viewport coordinates.
@@ -82,6 +85,9 @@ export class Renderer {
   private dpr = 1;
   private currentFont = "";
   private currentFill = "";
+  /** Set once per frame. `drawMath`, `drawImage` and the scrollbar are reached
+   *  from deep in the paint and would otherwise each need it threaded down. */
+  private theme: Theme = DEFAULT_THEME;
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d", { alpha: false });
@@ -132,19 +138,22 @@ export class Renderer {
     focusBand: { top: number; bottom: number } | null = null,
   ): void {
     const ctx = this.ctx;
+    this.theme = theme;
     ctx.save();
     ctx.scale(this.dpr, this.dpr);
     ctx.textBaseline = "alphabetic";
 
-    ctx.fillStyle = "#fdfdfb";
-    this.currentFill = "#fdfdfb";
+    // The context is opaque, so this fill is the page: without it the surface
+    // is black rather than transparent.
+    ctx.fillStyle = theme.background;
+    this.currentFill = theme.background;
     ctx.fillRect(0, 0, view.width, view.height);
 
     ctx.translate(view.originX, view.originY - view.scrollTop);
 
     // Selection sits under the text so glyphs stay legible on top of it.
     for (const r of selection) {
-      this.setFill(r.color ?? SELECTION_COLOR);
+      this.setFill(r.color ?? theme.selectionColor);
       ctx.fillRect(r.x, r.y, r.w, r.h);
     }
 
@@ -207,7 +216,7 @@ export class Renderer {
           } else {
             ctx.fillText(run.text, x, baseline);
           }
-          if (run.style.underline || run.style.color === theme.accentColor) {
+          if (run.style.underline) {
             // Underline links and <u> along their own baseline rather than
             // with a CSS-style box, so the rule sits where the type wants it.
             const w = ctx.measureText(run.text).width * run.scaleX;
@@ -218,15 +227,15 @@ export class Renderer {
     }
 
     if (caret && caretVisible) {
-      this.setFill(theme.color);
-      ctx.fillRect(caret.x, caret.y, Math.max(1.5, 1.5), caret.h);
+      this.setFill(theme.caretColor);
+      ctx.fillRect(caret.x, caret.y, 1.5, caret.h);
     }
 
     if (focusBand) {
       // Everything but the current block is veiled rather than redrawn in a
       // paler colour: the type keeps its exact shapes and positions, and the
       // page stays one paint rather than two.
-      ctx.fillStyle = "rgba(253, 253, 251, 0.72)";
+      ctx.fillStyle = theme.veilColor;
       this.currentFill = "";
       const height = view.height + view.scrollTop;
       ctx.fillRect(-view.originX, top - 200, view.width, focusBand.top - top + 200);
@@ -241,7 +250,20 @@ export class Renderer {
       ctx.scale(this.dpr, this.dpr);
       const w = scrollbar.active ? 7 : 5;
       const x = view.width - scrollbar.width + (scrollbar.width - w) / 2;
-      ctx.fillStyle = scrollbar.active ? "rgba(40, 38, 34, 0.42)" : "rgba(40, 38, 34, 0.2)";
+      // The rail says how far there is left to go even where the thumb is not.
+      if (this.theme.scrollbarRailColor !== "transparent") {
+        const inset = 60;
+        const railHeight = view.height - inset * 2;
+        if (railHeight > 0) {
+          ctx.fillStyle = this.theme.scrollbarRailColor;
+          ctx.beginPath();
+          ctx.roundRect(x + (w - 5) / 2, inset, 5, railHeight, 2.5);
+          ctx.fill();
+        }
+      }
+      ctx.fillStyle = scrollbar.active
+        ? this.theme.scrollbarActiveColor
+        : this.theme.scrollbarColor;
       const r = w / 2;
       ctx.beginPath();
       ctx.roundRect(x, scrollbar.y, w, scrollbar.h, r);
@@ -376,7 +398,7 @@ export class Renderer {
     }
 
     if (type === "quote") {
-      this.setFill(theme.ruleColor);
+      this.setFill(theme.quoteRuleColor);
       const h = b.height - b.spaceBefore;
       ctx.fillRect(0, b.y, 3, h);
       return;
@@ -414,7 +436,7 @@ export class Renderer {
       const last = b.lines[b.lines.length - 1];
       const bottom = b.y + last.baseline + last.depth + theme.bodySize * 0.3;
 
-      this.setFill(theme.color);
+      this.setFill(theme.tableRuleColor);
       ctx.fillRect(b.indent, top, width, 1);
       ctx.fillRect(b.indent, bottom, width, 1);
 
@@ -463,7 +485,7 @@ export class Renderer {
       const fallback = image.fallback;
       if (!fallback) return;
       this.setFont(cssFont(fallback.style));
-      this.setFill(image.status === "error" ? "#b3402f" : fallback.style.color);
+      this.setFill(image.status === "error" ? this.theme.errorColor : fallback.style.color);
       ctx.fillText(fallback.text, x, baseline);
       return;
     }

@@ -12,9 +12,6 @@ import {
   byteToCharIndex,
   charToByteIndex,
   cssFont,
-  FALLBACK_MONO,
-  FALLBACK_SANS,
-  FALLBACK_SERIF,
   Measurer,
   type TextStyle,
 } from "./measure.js";
@@ -38,39 +35,10 @@ import {
   type ColumnAlign,
 } from "../markdown/parse.js";
 
-export interface Theme {
-  bodySize: number;
-  /** Width of the text column in pixels. Independent of `bodySize`, so that
-   *  changing the type size changes how much fits on a line rather than where
-   *  the page sits. */
-  columnWidth: number;
-  bodyFamily: string;
-  headingFamily: string;
-  monoFamily: string;
-  lineHeight: number;
-  color: string;
-  mutedColor: string;
-  accentColor: string;
-  codeBackground: string;
-  ruleColor: string;
-  /** Behind ==highlighted== text. */
-  highlightColor: string;
-}
+import { DEFAULT_THEME, type Theme } from "./theme.js";
 
-export const DEFAULT_THEME: Theme = {
-  bodySize: 18,
-  columnWidth: 760,
-  bodyFamily: FALLBACK_SERIF,
-  headingFamily: FALLBACK_SANS,
-  monoFamily: FALLBACK_MONO,
-  lineHeight: 1.75,
-  color: "#1a1a1a",
-  mutedColor: "#8a8a8a",
-  accentColor: "#2f6f4f",
-  codeBackground: "#f5f4f1",
-  ruleColor: "#dcdad4",
-  highlightColor: "#fbeaa8",
-};
+// The palette moved to its own module; keep the old import path working.
+export { DEFAULT_THEME, type Theme };
 
 export interface TypesetOptions {
   justify: boolean;
@@ -483,15 +451,17 @@ function styleForSpan(
     : heading
       ? theme.headingFamily
       : theme.bodyFamily;
-  const weight = heading ? 700 : span?.strong ? 700 : 400;
+  const weight = heading ? theme.headingWeight : span?.strong ? 700 : 400;
   const italic = !!span?.em;
   const color = span?.href
     ? theme.accentColor
     // Front matter is the document's metadata rather than its prose, so it is
     // set back like a quotation instead of competing with the opening line.
-    : block.type === "quote" || block.type === "frontmatter" || block.type === "footnote"
-      ? theme.mutedColor
-      : theme.color;
+    : block.type === "quote"
+      ? theme.quoteColor
+      : block.type === "frontmatter" || block.type === "footnote"
+        ? theme.mutedColor
+        : theme.color;
 
   const style: TextStyle = {
     family,
@@ -502,7 +472,7 @@ function styleForSpan(
     lineHeight: heading ? 1.35 : code ? 1.55 : theme.lineHeight,
   };
   if (span?.highlight) style.background = theme.highlightColor;
-  if (span?.underline) style.underline = true;
+  if (span?.underline || span?.href) style.underline = true;
   // A superscript is set smaller and lifted, a subscript smaller and dropped.
   // The size is taken from the surrounding text rather than from the theme so
   // that one inside a heading stays in proportion to the heading.
@@ -1368,7 +1338,7 @@ export class Typesetter {
     if (geometry.error) {
       const fallbackStyle: TextStyle = {
         ...style, family: this.theme.monoFamily, italic: false,
-        color: geometry.error === "loading" ? this.theme.mutedColor : "#b3402f",
+        color: geometry.error === "loading" ? this.theme.mutedColor : this.theme.errorColor,
       };
       // Canvas paints ASCII whitespace as spaces, even for multi-line TeX.
       // Store exactly that presentation so measuring and drawing cannot drift.

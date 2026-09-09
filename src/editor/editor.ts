@@ -17,7 +17,6 @@
 
 import {
   checkboxRect,
-  MATCH_COLOR,
   Renderer,
   type Scrollbar,
   type SelectionRect,
@@ -274,6 +273,38 @@ export class Editor {
     Object.assign(this.typesetter.options, patch);
     this.typesetter.invalidate();
     this.invalidate();
+  }
+
+  /** How far down the document the window is, in document pixels. */
+  get scrollOffset(): number {
+    return this.scrollTop;
+  }
+
+  /**
+   * The document's headings, in order.
+   *
+   * Read off the laid-out blocks rather than re-parsed, so the `y` each entry
+   * carries is the one the page was actually painted at and the outline can
+   * follow the scroll without a second layout.
+   */
+  outline(): OutlineEntry[] {
+    if (this.dirty) this.relayout();
+    const entries: OutlineEntry[] = [];
+    for (const b of this.blocks) {
+      if (b.block.type !== "heading") continue;
+      entries.push({
+        level: b.block.level,
+        text: b.rendered.text.trim(),
+        start: b.block.start,
+        y: b.y,
+      });
+    }
+    return entries;
+  }
+
+  /** Put the caret at `offset` and bring it into view. */
+  revealOffset(offset: number): void {
+    this.select(offset, offset);
   }
 
   /** Re-typeset after the math engine has loaded or its options changed. */
@@ -1123,7 +1154,8 @@ export class Editor {
     const rects: SelectionRect[] = [];
     for (const m of this.matches) {
       if (m.end < from || m.start > to) continue;
-      for (const r of this.selectionRects(m.start, m.end)) rects.push({ ...r, color: MATCH_COLOR });
+      for (const r of this.selectionRects(m.start, m.end))
+        rects.push({ ...r, color: this.theme.matchColor });
     }
     return rects;
   }
@@ -1940,6 +1972,18 @@ export const DEFAULT_EDITING_OPTIONS: EditingOptions = {
   focusMode: false,
   typewriter: false,
 };
+
+/** One heading, as the outline panel needs it. */
+export interface OutlineEntry {
+  /** 1-6. */
+  level: number;
+  /** The heading's text with its markers stripped. */
+  text: string;
+  /** Where the heading starts in the source. */
+  start: number;
+  /** Top of the heading in document space, for tracking the scroll. */
+  y: number;
+}
 
 export interface StatusInfo {
   chars: number;
