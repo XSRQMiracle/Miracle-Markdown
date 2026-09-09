@@ -407,12 +407,31 @@ export class Renderer {
     if (type === "code" || type === "frontmatter" || type === "html") {
       this.setFill(theme.codeBackground);
       const pad = theme.bodySize * 0.5;
-      ctx.fillRect(
-        -pad,
-        b.y - pad * 0.6,
-        view.width - view.originX * 2 + pad * 2,
-        b.height - b.spaceBefore + pad * 1.2,
-      );
+      // Pad the ink, not the line boxes. A line's interline leading sits
+      // entirely below its baseline, so a panel measured from the block box
+      // gets a leading's worth of extra room under the last line that the
+      // first line never gets — which is exactly the lopsidedness it looked
+      // like. Measuring from the first line's ascent to the last line's
+      // descent makes the two gaps equal for any face.
+      const first = b.lines[0];
+      const last = b.lines[b.lines.length - 1];
+      const top = first ? b.y + first.baseline - first.height : b.y;
+      const bottom = last
+        ? b.y + last.baseline + last.depth
+        : b.y + b.height - b.spaceBefore;
+      const x = -pad;
+      const y = top - pad;
+      const w = view.width - view.originX * 2 + pad * 2;
+      const h = bottom - top + pad * 2;
+      // `roundRect` is in every WebView this ships to, but the test's context
+      // double implements only the calls the text path makes.
+      if (typeof ctx.roundRect === "function") {
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, Math.min(theme.bodySize * 0.35, h / 2));
+        ctx.fill();
+      } else {
+        ctx.fillRect(x, y, w, h);
+      }
       return;
     }
 

@@ -745,7 +745,7 @@ export class Typesetter {
     // Both keep their own line structure: breaking either optimally would be
     // actively wrong.
     if (block.type === "code" || block.type === "frontmatter" || block.type === "html") {
-      return this.buildPreformatted(block, rendered, spaceBefore, indent, raw);
+      return this.buildPreformatted(block, rendered, spaceBefore, indent, raw, measure);
     }
 
     const lines = this.breakParagraph(block, rendered, measure, indent, numbering);
@@ -1051,9 +1051,11 @@ export class Typesetter {
       const isFence = closingFence !== null &&
         (li === 0 || (li === src.length - 1 && closingFence.test(lineText)));
       if (!isFence) {
-        const ends = raw
-          ? sourceLineEnds(lineText, width, (part) => this.measurer.width(part, style, key))
-          : [lineText.length];
+        const ends = sourceLineEnds(
+          lineText,
+          width,
+          (part) => this.measurer.width(part, style, key),
+        );
         let start = 0;
         for (const end of ends) {
           const part = lineText.slice(start, end);
