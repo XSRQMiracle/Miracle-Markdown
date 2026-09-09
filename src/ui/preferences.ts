@@ -97,7 +97,6 @@ function skinCard(skin: Skin, selected: boolean, onPick: (name: SkinName) => voi
   const card = document.createElement("button");
   card.type = "button";
   card.className = "skin-card";
-  card.disabled = !skin.ready;
   card.setAttribute("aria-pressed", String(selected));
 
   const preview = document.createElement("div");
@@ -115,12 +114,14 @@ function skinCard(skin: Skin, selected: boolean, onPick: (name: SkinName) => voi
   const chip = document.createElement("span");
   chip.className = "chip-bar";
   chip.style.background = skin.swatch.accent;
-  chip.style.borderRadius = skin.name === "organic" || skin.name === "nocturne" ? "999px" : "0";
+  chip.style.borderRadius = skin.light?.chrome.radiusPill ?? skin.dark?.chrome.radiusPill ?? "0";
   const rule = document.createElement("span");
   rule.className = "rule-bar";
   rule.style.background = skin.swatch.rule;
   // Modernist's rules are the loud ones; everyone else's are hairlines.
-  rule.style.height = skin.name === "modernist" ? "2px" : "1px";
+  rule.style.height = skin.light?.chrome.ruleWeight ?? skin.dark?.chrome.ruleWeight ?? "1px";
+  // Broadsheet draws no rule at all, and the card should not either.
+  if (skin.name === "broadsheet") rule.style.background = "transparent";
   bars.append(chip, rule);
 
   preview.append(sample, bars);
@@ -134,15 +135,17 @@ function skinCard(skin: Skin, selected: boolean, onPick: (name: SkinName) => voi
   desc.className = "desc";
   desc.textContent = skin.description;
   meta.append(name, desc);
-  if (!skin.ready) {
-    const soon = document.createElement("div");
-    soon.className = "soon";
-    soon.textContent = "尚未实现";
-    meta.appendChild(soon);
+  // Nocturne has no light build, by design; say so rather than letting the
+  // 明暗 control below look broken when it is selected.
+  if (!skin.light) {
+    const only = document.createElement("div");
+    only.className = "soon";
+    only.textContent = "仅深色";
+    meta.appendChild(only);
   }
 
   card.append(preview, meta);
-  if (skin.ready) card.addEventListener("click", () => onPick(skin.name));
+  card.addEventListener("click", () => onPick(skin.name));
   return card;
 }
 
