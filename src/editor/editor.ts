@@ -280,6 +280,14 @@ export class Editor {
     return this.scrollTop;
   }
 
+  /** How far it could scroll, and how tall the window is. Together with
+   *  `scrollOffset` this is enough to tell that the end of the document is on
+   *  screen — which the outline needs, because the last few headings may never
+   *  reach the top of the window. */
+  get scrollExtent(): { max: number; viewport: number } {
+    return { max: this.scrollMax, viewport: this.host.clientHeight };
+  }
+
   /**
    * The document's headings, in order.
    *
