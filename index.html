@@ -5,177 +5,487 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Miracle Markdown</title>
     <style>
+      /* Every colour, face and radius in this stylesheet comes from a custom
+         property written by ui/skin.ts. Nothing here is a literal, so a second
+         skin is a second table of values rather than a second stylesheet.
+
+         The values below are Organic's, and exist only so the window is not
+         unstyled for the frame before the skin is applied. */
       :root {
-        --chrome: #f7f6f3;
-        --chrome-border: #e4e2dc;
-        --ink: #2a2a28;
-        --muted: #8a8880;
-        --accent: #2f6f4f;
+        --mm-paper: #fdfaf4;
+        --mm-chrome: #f0e6d4;
+        --mm-sidebar: #f5ecdc;
+        --mm-rule: #ddd2bd;
+        --mm-rule-soft: #e2d8c6;
+        --mm-rule-faint: #e9e0cd;
+        --mm-fill-active: #e4d5b9;
+        --mm-fill-hover: #ece0ca;
+        --mm-fill-hover-chrome: #e6dac4;
+        --mm-fill-hover-soft: #f6efe2;
+        --mm-tint: #f3ebdb;
+        --mm-thumb: #dcd3c4;
+        --mm-text: #201e1d;
+        --mm-text2: #474238;
+        --mm-text3: #645c50;
+        --mm-text-muted: #82796a;
+        --mm-text-faint: #a19786;
+        --mm-accent: #c67139;
+        --mm-accent-deep: #b2622d;
+        --mm-accent-label: #8c491a;
+        --mm-accent-tint: #fff2eb;
+        --mm-positive: #56633f;
+        --mm-positive-rule: #ccdbb2;
+        --mm-positive-fill: #e1eecc;
+        --mm-icon-border: #d3c7b1;
+        --mm-shadow: 0 12px 32px rgba(46, 43, 37, 0.22);
+        --mm-shadow-strong: 0 14px 34px rgba(46, 43, 37, 0.24);
+
+        /* Figtree and Source Serif 4 are the design's faces. The packaged app
+           runs under a CSP that forbids remote stylesheets and fonts, so they
+           are named first and then fall through to the platform's own — until
+           the two families are bundled, what ships is the fallback. */
+        --mm-font-ui: Figtree, -apple-system, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", system-ui, sans-serif;
+        --mm-font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+        --mm-radius-pill: 999px;
+        --mm-radius-lg: 16px;
+        --mm-radius-md: 12px;
+        --mm-radius-sm: 8px;
       }
+
       * { box-sizing: border-box; }
       html, body {
         margin: 0;
         height: 100%;
         overflow: hidden;
-        font: 13px/1.4 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-        color: var(--ink);
-        background: #fdfdfb;
+        font: 13px/1.4 var(--mm-font-ui);
+        color: var(--mm-text);
+        background: var(--mm-paper);
       }
-      #app { display: flex; flex-direction: column; height: 100%; }
+      /* The window body. Positioned, because the typography popover anchors to
+         it rather than to the status bar it sits above. */
+      #app { position: relative; display: flex; flex-direction: column; height: 100%; }
 
-      header {
+      .spacer { flex: 1; }
+
+      /* ── Toolbar ─────────────────────────────────────────────────────────
+         44px. The macOS traffic lights the design draws here belong to the
+         native title bar in a real window, so the row starts with the sidebar
+         toggle instead. */
+      #toolbar {
         display: flex;
         align-items: center;
-        gap: 14px;
+        gap: 12px;
+        height: 44px;
+        flex: 0 0 44px;
         padding: 0 14px;
-        height: 40px;
-        flex: 0 0 40px;
-        background: var(--chrome);
-        border-bottom: 1px solid var(--chrome-border);
+        background: var(--mm-chrome);
+        border-bottom: 1px solid var(--mm-rule);
         -webkit-user-select: none;
         user-select: none;
       }
-      header .title { font-weight: 600; letter-spacing: 0.01em; white-space: nowrap; }
-      header .spacer { flex: 1; }
+      .tool-group { display: flex; align-items: center; gap: 6px; }
 
-      .toggles { display: flex; gap: 2px; }
-      .toggle {
-        border: 1px solid transparent;
+      .icon-button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 26px;
+        padding: 0;
+        border: 1px solid var(--mm-icon-border);
+        background: var(--mm-paper);
+        border-radius: var(--mm-radius-pill);
+        color: var(--mm-text3);
+        cursor: pointer;
+      }
+      .icon-button:hover { background: var(--mm-fill-hover-soft); color: var(--mm-text); }
+      /* A pressed toggle is a filled pill, an unpressed one an outline. The
+         sidebar button says whether the sidebar is there by being filled. */
+      .icon-button[aria-pressed="false"] { background: transparent; }
+      .icon-button.ghost { border-color: transparent; background: transparent; }
+      .icon-button.ghost:hover { background: var(--mm-fill-hover-chrome); color: var(--mm-text); }
+      .icon-button:disabled { opacity: 0.4; cursor: default; }
+      .icon-button:disabled:hover { background: transparent; color: var(--mm-text3); }
+      .icon-button svg {
+        width: 15px;
+        height: 15px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.75;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      /* Optically centred by the two flex spacers on either side. */
+      .doc-identity {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+      }
+      .doc-identity .dot {
+        width: 6px;
+        height: 6px;
+        flex: none;
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-accent);
+      }
+      .doc-identity .name {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--mm-text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .doc-identity .path {
+        font-size: 11.5px;
+        color: var(--mm-text-faint);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .doc-identity .path:empty { display: none; }
+
+      /* ── The split ───────────────────────────────────────────────────────*/
+      #split { display: flex; flex: 1; min-height: 0; }
+
+      #sidebar {
+        width: 252px;
+        flex: 0 0 252px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        background: var(--mm-sidebar);
+        border-right: 1px solid var(--mm-rule-soft);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      /* Collapsing takes the panel out of the flow entirely, so the paper gets
+         the whole window rather than sliding under a zero-width column. */
+      #app[data-sidebar="hidden"] #sidebar { display: none; }
+
+      .side-tabs { display: flex; gap: 2px; padding: 10px 10px 8px; }
+      .side-tabs button {
+        flex: 1;
+        padding: 5px 0;
+        border: 0;
+        border-radius: var(--mm-radius-pill);
         background: transparent;
-        border-radius: 5px;
-        padding: 4px 9px;
+        color: var(--mm-text-muted);
+        font: 500 11.5px/1.2 var(--mm-font-ui);
+        cursor: pointer;
+      }
+      .side-tabs button:hover:not(:disabled):not([aria-selected="true"]) {
+        background: var(--mm-fill-hover);
+        color: var(--mm-text);
+      }
+      .side-tabs button[aria-selected="true"] {
+        background: var(--mm-fill-active);
+        color: var(--mm-text);
+        font-weight: 600;
+      }
+      .side-tabs button:disabled { opacity: 0.45; cursor: default; }
+
+      .side-body { flex: 1; overflow: auto; padding: 6px 8px; font-size: 12.5px; }
+
+      /* Outline rows. The badge sits on the label's baseline, which is why the
+         row aligns on baselines rather than centres. */
+      .outline-row {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        width: 100%;
+        padding: 6px 10px;
+        border: 0;
+        border-radius: var(--mm-radius-md);
+        background: transparent;
+        color: var(--mm-text2);
         font: inherit;
-        color: var(--muted);
+        text-align: left;
+        cursor: pointer;
+      }
+      .outline-row:hover { background: var(--mm-fill-hover); }
+      .outline-row[aria-current="true"] { background: var(--mm-fill-active); }
+      .outline-row .badge {
+        flex: none;
+        font: 600 9.5px/1.6 var(--mm-font-mono);
+        color: var(--mm-text-faint);
+      }
+      .outline-row .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      /* 10 / 24 / 38 — 14px a level, and each level a step quieter. */
+      .outline-row[data-level="1"] { padding-left: 10px; color: var(--mm-text); font-weight: 600; }
+      .outline-row[data-level="1"] .badge { color: var(--mm-accent-deep); }
+      .outline-row[data-level="2"] { padding-left: 24px; }
+      .outline-row[data-level="3"] { padding-left: 38px; color: var(--mm-text3); }
+      .outline-row[data-level="4"] { padding-left: 52px; color: var(--mm-text3); }
+      .outline-row[data-level="5"] { padding-left: 66px; color: var(--mm-text3); }
+      .outline-row[data-level="6"] { padding-left: 80px; color: var(--mm-text3); }
+
+      .side-divider { height: 1px; background: var(--mm-rule-soft); margin: 12px 10px; }
+      .side-summary {
+        padding: 0 10px 8px;
+        font: 400 11px/1.7 var(--mm-font-ui);
+        color: var(--mm-text-faint);
+      }
+      .side-empty {
+        padding: 18px 12px;
+        font: 400 11.5px/1.6 var(--mm-font-ui);
+        color: var(--mm-text-faint);
+      }
+
+      /* ── The page ────────────────────────────────────────────────────────
+         No card, no edge, no shadow: the text column simply sits on the same
+         ground as the window, and the sidebar's rule is its only boundary. */
+      #stage { position: relative; flex: 1; min-width: 0; overflow: hidden; background: var(--mm-paper); }
+      #surface { display: block; width: 100%; height: 100%; cursor: text; }
+
+      /* ── Status bar ──────────────────────────────────────────────────────*/
+      #status-bar {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        height: 30px;
+        flex: 0 0 30px;
+        padding: 0 12px;
+        background: var(--mm-chrome);
+        border-top: 1px solid var(--mm-rule);
+        color: var(--mm-text-muted);
+        font-size: 11.5px;
+        font-variant-numeric: tabular-nums;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #status-bar b { font-weight: 600; color: var(--mm-text); }
+      /* Modes read as one badge each rather than a run of text. */
+      #mode { display: flex; gap: 6px; }
+      #mode .badge {
+        padding: 1px 8px;
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-positive-fill);
+        color: var(--mm-positive);
+        font-weight: 600;
+      }
+
+      .pill-button {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 2px 9px;
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-paper);
+        color: var(--mm-text3);
+        font: 600 11.5px/1.4 var(--mm-font-ui);
         cursor: pointer;
         white-space: nowrap;
       }
-      .toggle:hover { background: #ecebe6; }
-      .toggle[aria-pressed="true"] {
-        background: #fff;
-        border-color: var(--chrome-border);
-        color: var(--ink);
-        font-weight: 500;
+      .pill-button:hover { border-color: var(--mm-accent); color: var(--mm-accent-label); }
+      .pill-button[aria-expanded="true"] {
+        border-color: var(--mm-accent);
+        background: var(--mm-accent-tint);
+        color: var(--mm-accent-label);
       }
+      .link-button {
+        padding: 2px 8px;
+        border: 0;
+        border-radius: var(--mm-radius-pill);
+        background: transparent;
+        color: var(--mm-text-muted);
+        font: 500 11.5px/1.4 var(--mm-font-ui);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .link-button:hover { background: var(--mm-fill-hover-chrome); color: var(--mm-text); }
 
-      .sep { width: 1px; height: 18px; background: var(--chrome-border); }
-
-      /* The math settings popover. Grouped the way the decisions actually
-         divide: what counts as a formula, what LaTeX is available, and how
-         equations are numbered. */
-      #math-panel {
+      /* ── The typography popover ──────────────────────────────────────────
+         The seven switches and the two sliders live here rather than in the
+         toolbar: they are read rarely and changed rarely, and the toolbar was
+         spending its whole width on them. */
+      #typo-popover {
         position: absolute;
-        top: 42px;
-        z-index: 10;
-        min-width: 330px;
-        padding: 12px 14px 14px;
-        background: #fff;
-        border: 1px solid var(--chrome-border);
-        border-radius: 8px;
-        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.13);
-        font-size: 12.5px;
+        right: 14px;
+        bottom: 38px;
+        z-index: 12;
+        width: 330px;
+        padding: 14px 16px 16px;
+        background: var(--mm-paper);
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-lg);
+        box-shadow: var(--mm-shadow);
       }
-      #math-panel[hidden] { display: none; }
-      #math-panel h4 {
-        margin: 14px 0 7px;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.05em;
+      #typo-popover[hidden] { display: none; }
+      .kicker {
+        margin-bottom: 10px;
+        font: 600 10.5px/1 var(--mm-font-ui);
+        letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--muted);
+        color: var(--mm-text-faint);
       }
-      #math-panel h4:first-child { margin-top: 0; }
-      #math-panel label {
-        display: flex;
-        align-items: baseline;
-        gap: 7px;
-        padding: 3px 0;
+      .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+      .chip {
+        padding: 4px 11px;
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-pill);
+        background: transparent;
+        color: var(--mm-text3);
+        font: 500 12px/1.3 var(--mm-font-ui);
         cursor: pointer;
       }
-      #math-panel label span.hint {
-        color: var(--muted);
-        font-size: 11.5px;
-        line-height: 1.35;
+      .chip:hover { border-color: var(--mm-accent); color: var(--mm-accent-label); }
+      .chip[aria-pressed="true"] {
+        border-color: transparent;
+        background: var(--mm-accent);
+        color: var(--mm-paper);
+        font-weight: 600;
       }
-      #math-panel select { font: inherit; margin-left: auto; }
-      #math-panel .row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
-      #math-panel .note {
-        margin-top: 10px;
-        padding-top: 9px;
-        border-top: 1px solid var(--chrome-border);
-        color: var(--muted);
-        line-height: 1.45;
+      .chip[aria-pressed="true"]:hover { background: var(--mm-accent-deep); color: var(--mm-paper); }
+
+      .slider-row { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+      .slider-row:last-of-type { margin-bottom: 0; }
+      .slider-row .slider-label {
+        width: 34px;
+        font: 500 12px/1.3 var(--mm-font-ui);
+        color: var(--mm-text3);
+      }
+      .slider-row .slider-value {
+        width: 30px;
+        text-align: right;
+        font: 600 12px/1.3 var(--mm-font-ui);
+        font-variant-numeric: tabular-nums;
+        color: var(--mm-text);
+      }
+      /* `--fill` is written from TS on input, so the track can show how far
+         along the value is without a second element to keep in step. */
+      input[type="range"] {
+        -webkit-appearance: none;
+        appearance: none;
+        flex: 1;
+        height: 13px;
+        margin: 0;
+        background: transparent;
+        cursor: pointer;
+      }
+      input[type="range"]::-webkit-slider-runnable-track {
+        height: 4px;
+        border-radius: var(--mm-radius-pill);
+        background: linear-gradient(
+          to right,
+          var(--mm-accent) 0 var(--fill, 0%),
+          var(--mm-fill-active) var(--fill, 0%) 100%
+        );
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 13px;
+        height: 13px;
+        margin-top: -4.5px;
+        border: 2px solid var(--mm-accent);
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-paper);
+      }
+      input[type="range"]::-moz-range-track {
+        height: 4px;
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-fill-active);
+      }
+      input[type="range"]::-moz-range-progress {
+        height: 4px;
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-accent);
+      }
+      input[type="range"]::-moz-range-thumb {
+        width: 13px;
+        height: 13px;
+        border: 2px solid var(--mm-accent);
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-paper);
       }
 
-      /* The find bar. It floats over the top-right of the page rather than
-         pushing the column around: the text under it must not reflow while a
-         search is being typed, or the matches move as they are counted. */
+      .note {
+        margin: 12px 0 0;
+        padding-top: 10px;
+        border-top: 1px solid var(--mm-rule-soft);
+        font: 400 11.5px/1.5 var(--mm-font-ui);
+        color: var(--mm-text-muted);
+      }
+
+      /* ── Find bar ────────────────────────────────────────────────────────
+         Floats over the top-right of the page rather than pushing the column
+         around: the text under it must not reflow while a search is being
+         typed, or the matches move as they are counted. */
       #find-bar {
         position: absolute;
-        top: 10px;
-        right: 18px;
+        top: 12px;
+        right: 20px;
         z-index: 9;
         display: grid;
         grid-template-columns: auto auto;
         gap: 6px;
         align-items: center;
-        padding: 8px 10px;
-        background: #fff;
-        border: 1px solid var(--chrome-border);
-        border-radius: 8px;
-        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.13);
+        padding: 10px 12px;
+        background: var(--mm-paper);
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-lg);
+        box-shadow: var(--mm-shadow);
       }
       #find-bar[hidden] { display: none; }
       #find-bar .field {
         display: flex;
         align-items: center;
         gap: 4px;
-        padding: 2px 4px 2px 8px;
-        border: 1px solid var(--chrome-border);
-        border-radius: 5px;
-        background: #fdfdfb;
+        padding: 3px 5px 3px 10px;
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-paper);
       }
-      #find-bar .field:focus-within { border-color: var(--accent); }
+      #find-bar .field:focus-within { border-color: var(--mm-accent); }
       #find-bar input {
         width: 190px;
         border: 0;
         outline: 0;
         background: transparent;
         font: inherit;
-        color: var(--ink);
+        color: var(--mm-text);
       }
+      #find-bar input::placeholder { color: var(--mm-text-faint); }
       #find-bar .buttons { display: flex; align-items: center; gap: 2px; }
-      #find-bar .toggle { padding: 3px 7px; }
-      #find-bar .flag { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+      #find-bar .flag { font-family: var(--mm-font-mono); font-size: 11px; }
       #find-count {
         min-width: 64px;
         text-align: right;
-        color: var(--muted);
+        color: var(--mm-text-muted);
         font-variant-numeric: tabular-nums;
         font-size: 11.5px;
       }
       #find-bar.invalid .field { border-color: #c0503c; }
 
-      /* The shortcut sheet. Generated from the command table, so it cannot
-         drift out of date. */
+      /* Small text buttons shared by the find bar. */
+      .chip.mini { padding: 3px 9px; font-size: 11.5px; }
+
+      /* ── Shortcut sheet ──────────────────────────────────────────────────*/
       #shortcuts {
         position: absolute;
         inset: 24px;
         z-index: 11;
         overflow: auto;
-        padding: 18px 22px 22px;
-        background: #fff;
-        border: 1px solid var(--chrome-border);
-        border-radius: 10px;
-        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+        padding: 20px 24px 24px;
+        background: var(--mm-paper);
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-lg);
+        box-shadow: var(--mm-shadow-strong);
       }
       #shortcuts[hidden] { display: none; }
-      #shortcuts h3 { margin: 0 0 14px; font-size: 14px; }
+      #shortcuts h3 { margin: 0 0 14px; font-size: 14px; font-weight: 600; }
       #shortcuts h4 {
         margin: 0 0 6px;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.05em;
-        color: var(--muted);
+        font: 600 10.5px/1 var(--mm-font-ui);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--mm-text-faint);
       }
       .sheet-columns {
         display: grid;
@@ -184,40 +494,255 @@
         align-items: start;
       }
       .sheet-columns section { break-inside: avoid; }
-      .sheet-row {
-        display: flex;
-        align-items: baseline;
-        gap: 10px;
-        padding: 2px 0;
-        line-height: 1.5;
-      }
+      .sheet-row { display: flex; align-items: baseline; gap: 10px; padding: 2px 0; line-height: 1.5; }
       .sheet-row kbd {
         flex: 0 0 92px;
-        font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-        color: var(--ink);
+        font: 11.5px/1.4 var(--mm-font-mono);
+        color: var(--mm-text);
         text-align: right;
       }
-      .sheet-row span { color: #55534d; }
+      .sheet-row span { color: var(--mm-text2); }
 
-      footer button.link {
-        border: 0;
-        background: none;
+      /* ── Preferences ─────────────────────────────────────────────────────
+         Left nav, right content. Built in ui/preferences.ts; the rules are
+         here so every surface in the app is themed from one place. */
+      #prefs {
+        width: 880px;
+        max-width: calc(100vw - 48px);
+        height: 620px;
+        max-height: calc(100vh - 48px);
         padding: 0;
-        font: inherit;
-        color: var(--muted);
+        overflow: hidden;
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-lg);
+        background: var(--mm-paper);
+        color: var(--mm-text);
+        font: 13px/1.5 var(--mm-font-ui);
+        box-shadow: var(--mm-shadow-strong);
+      }
+      #prefs::backdrop { background: rgba(32, 30, 29, 0.34); }
+      .prefs-body { display: flex; height: 100%; min-height: 0; }
+      .prefs-nav {
+        width: 190px;
+        flex: 0 0 190px;
+        display: flex;
+        flex-direction: column;
+        padding: 14px 10px;
+        background: var(--mm-sidebar);
+        border-right: 1px solid var(--mm-rule-soft);
+      }
+      .prefs-nav button {
+        padding: 7px 12px;
+        margin-bottom: 2px;
+        border: 0;
+        border-radius: var(--mm-radius-pill);
+        background: transparent;
+        color: var(--mm-text-muted);
+        font: 500 12.5px/1.3 var(--mm-font-ui);
+        text-align: left;
         cursor: pointer;
       }
-      footer button.link:hover { color: var(--ink); }
+      .prefs-nav button:hover:not([aria-selected="true"]) {
+        background: var(--mm-fill-hover);
+        color: var(--mm-text);
+      }
+      .prefs-nav button[aria-selected="true"] {
+        background: var(--mm-fill-active);
+        color: var(--mm-text);
+        font-weight: 600;
+      }
+      .prefs-nav .foot {
+        margin-top: auto;
+        padding: 10px 12px 0;
+        font: 400 11px/1.6 var(--mm-font-ui);
+        color: var(--mm-text-faint);
+      }
+      .prefs-pane { flex: 1; min-width: 0; overflow: auto; padding: 22px 26px 26px; }
+      .prefs-pane[hidden] { display: none; }
+      .prefs-pane h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+      .prefs-pane > p.lead {
+        margin: 0 0 20px;
+        font-size: 12px;
+        color: var(--mm-text-muted);
+      }
+      .prefs-close {
+        position: absolute;
+        top: 14px;
+        right: 16px;
+      }
 
-      label.slider { display: flex; align-items: center; gap: 6px; color: var(--muted); }
-      label.slider input { width: 84px; }
+      /* The appearance pane. Each card is drawn in its own system's colours
+         rather than as a uniform list row — the point of the choice is what it
+         looks like, so the card has to show it. */
+      .skin-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+      .skin-card {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        padding: 0;
+        overflow: hidden;
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-md);
+        background: var(--mm-paper);
+        text-align: left;
+        cursor: pointer;
+      }
+      .skin-card:hover { border-color: var(--mm-accent); }
+      .skin-card[aria-pressed="true"] {
+        border-color: var(--mm-accent);
+        box-shadow: 0 0 0 1px var(--mm-accent);
+      }
+      .skin-card:disabled { cursor: default; opacity: 0.72; }
+      .skin-card:disabled:hover { border-color: var(--mm-rule); }
+      .skin-card .preview {
+        height: 78px;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 8px;
+      }
+      .skin-card .preview .sample { font-size: 15px; line-height: 1; }
+      .skin-card .preview .bars { display: flex; align-items: center; gap: 8px; }
+      .skin-card .preview .chip-bar { width: 34px; height: 8px; }
+      .skin-card .preview .rule-bar { flex: 1; height: 2px; }
+      .skin-card .meta { padding: 9px 12px 11px; border-top: 1px solid var(--mm-rule-soft); }
+      .skin-card .meta .name { font: 600 12.5px/1.3 var(--mm-font-ui); color: var(--mm-text); }
+      .skin-card .meta .desc {
+        margin-top: 2px;
+        font: 400 11px/1.4 var(--mm-font-ui);
+        color: var(--mm-text-muted);
+      }
+      .skin-card .meta .soon {
+        margin-top: 4px;
+        font: 500 10px/1.4 var(--mm-font-ui);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--mm-text-faint);
+      }
 
-      #stage { position: relative; flex: 1; overflow: hidden; }
-      .document-dialog { max-width: 420px; border: 1px solid #d8d8d8; border-radius: 8px; padding: 24px; }
-      .document-dialog::backdrop { background: #0005; }
-      .document-dialog p { margin: 0 0 20px; line-height: 1.6; }
-      .document-dialog div { display: flex; justify-content: end; gap: 12px; }
-      #surface { display: block; width: 100%; height: 100%; cursor: text; }
+      .prefs-field {
+        display: flex;
+        align-items: flex-start;
+        gap: 16px;
+        padding: 12px 0;
+        border-top: 1px solid var(--mm-rule-soft);
+      }
+      .prefs-field .text { flex: 1; min-width: 0; }
+      .prefs-field .text .name { font-size: 12.5px; font-weight: 500; }
+      .prefs-field .text .hint {
+        margin-top: 3px;
+        font-size: 11.5px;
+        line-height: 1.5;
+        color: var(--mm-text-muted);
+      }
+      .prefs-field .control { flex: 0 0 auto; padding-top: 1px; }
+
+      /* Segmented control — one row of pills in a trough. */
+      .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--mm-radius-pill); background: var(--mm-fill-active); }
+      .seg button {
+        padding: 4px 12px;
+        border: 0;
+        border-radius: var(--mm-radius-pill);
+        background: transparent;
+        color: var(--mm-text3);
+        font: 500 11.5px/1.3 var(--mm-font-ui);
+        cursor: pointer;
+      }
+      .seg button[aria-selected="true"] {
+        background: var(--mm-paper);
+        color: var(--mm-text);
+        font-weight: 600;
+      }
+
+      /* The Markdown and formula fields keep the shape math-panel.ts builds:
+         h4 groups, a checkbox with a hint under it, and select rows. */
+      .prefs-pane h4 {
+        margin: 18px 0 8px;
+        font: 600 10.5px/1 var(--mm-font-ui);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--mm-text-faint);
+      }
+      .prefs-pane h4:first-child { margin-top: 0; }
+      .prefs-pane label {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 5px 0;
+        cursor: pointer;
+        font-size: 12.5px;
+      }
+      .prefs-pane label input[type="checkbox"] { accent-color: var(--mm-accent); }
+      .prefs-pane label span.hint {
+        display: block;
+        margin-top: 2px;
+        color: var(--mm-text-muted);
+        font-size: 11.5px;
+        line-height: 1.45;
+      }
+      .prefs-pane .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 5px 0;
+        font-size: 12.5px;
+      }
+      .prefs-pane .row select {
+        margin-left: auto;
+        min-width: 190px;
+        padding: 5px 8px;
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-paper);
+        color: var(--mm-text);
+        font: inherit;
+        font-size: 12px;
+      }
+      .prefs-pane .note { margin-top: 14px; }
+      .prefs-pane [role="alert"] {
+        margin-bottom: 12px;
+        padding: 8px 12px;
+        border: 1px solid var(--mm-accent);
+        border-radius: var(--mm-radius-sm);
+        background: var(--mm-accent-tint);
+        color: var(--mm-accent-label);
+        font-size: 11.5px;
+      }
+
+      /* ── Unsaved-changes dialog ──────────────────────────────────────────*/
+      .document-dialog {
+        max-width: 420px;
+        padding: 22px 24px 20px;
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-lg);
+        background: var(--mm-paper);
+        color: var(--mm-text);
+        font: 13px/1.6 var(--mm-font-ui);
+        box-shadow: var(--mm-shadow);
+      }
+      .document-dialog::backdrop { background: rgba(32, 30, 29, 0.34); }
+      .document-dialog p { margin: 0 0 20px; }
+      .document-dialog div { display: flex; justify-content: end; gap: 10px; }
+      .document-dialog button {
+        padding: 6px 14px;
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-pill);
+        background: transparent;
+        color: var(--mm-text);
+        font: 500 12.5px/1.3 var(--mm-font-ui);
+        cursor: pointer;
+      }
+      .document-dialog button:hover { background: var(--mm-fill-hover); }
+      .document-dialog button[value="save"] {
+        border-color: transparent;
+        background: var(--mm-accent);
+        color: var(--mm-paper);
+        font-weight: 600;
+      }
+      .document-dialog button[value="save"]:hover { background: var(--mm-accent-deep); }
+
+      :focus-visible { outline: 2px solid var(--mm-accent); outline-offset: 2px; }
 
       /* The input that collects keystrokes and hosts IME composition. It has
          to be in the layout and focusable — not display:none — or the
@@ -236,89 +761,123 @@
         color: transparent;
         caret-color: transparent;
       }
-
-      footer {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        padding: 0 14px;
-        height: 26px;
-        flex: 0 0 26px;
-        background: var(--chrome);
-        border-top: 1px solid var(--chrome-border);
-        color: var(--muted);
-        font-variant-numeric: tabular-nums;
-        font-size: 11px;
-        -webkit-user-select: none;
-        user-select: none;
-      }
-      footer .spacer { flex: 1; }
-      footer b { font-weight: 600; color: var(--ink); }
-      footer #mode:not(:empty) {
-        padding: 1px 6px;
-        border-radius: 4px;
-        background: #e7e5df;
-        color: var(--ink);
-      }
     </style>
   </head>
   <body>
-    <div id="app">
-      <header>
-        <span class="title">Miracle Markdown</span>
-        <div class="toggles">
-          <button class="toggle" id="open" title="打开一个 Markdown 文件">打开</button>
-          <button class="toggle" id="save" title="保存（⌘S）">保存</button>
-          <button class="toggle" id="save-as" title="另存为（⌘⇧S）">另存为</button>
-        </div>
-        <span class="sep"></span>
-        <div class="toggles" id="toggles"></div>
-        <span class="sep"></span>
-        <div class="toggles">
-          <button class="toggle" id="math-button" title="Markdown 与公式设置">设置 ▾</button>
+    <div id="app" data-sidebar="shown">
+      <header id="toolbar">
+        <div class="tool-group">
+          <button class="icon-button" id="sidebar-toggle" aria-pressed="true" title="侧边栏（⌘⇧L）">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="3" />
+              <path d="M10 4v16" />
+            </svg>
+          </button>
+          <button class="icon-button ghost" id="open" title="打开一个 Markdown 文件（⌘O）">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
+          </button>
+          <button class="icon-button ghost" id="save" title="保存（⌘S）">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 3h11l3 3v15H5z" />
+              <path d="M8 3v6h7M8 21v-6h8v6" />
+            </svg>
+          </button>
+          <button class="icon-button ghost" id="save-as" title="另存为（⌘⇧S）">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 3h11l3 3v9" />
+              <path d="M5 3v18h7" />
+              <path d="M16 18h6M19 15v6" />
+            </svg>
+          </button>
         </div>
         <span class="spacer"></span>
-        <label class="slider">
-          字号
-          <input id="size" type="range" min="12" max="32" step="1" value="18" />
-        </label>
-        <label class="slider">
-          版心
-          <input id="column" type="range" min="420" max="1100" step="20" value="760" />
-        </label>
+        <div class="doc-identity">
+          <span class="dot" id="doc-dirty" hidden></span>
+          <span class="name" id="doc-name">未命名.md</span>
+          <span class="path" id="doc-path"></span>
+        </div>
+        <span class="spacer"></span>
+        <button class="icon-button ghost" id="find-button" title="查找（⌘F）">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M20 20l-3.5-3.5" />
+          </svg>
+        </button>
+        <button class="icon-button ghost" id="prefs-button" title="偏好设置（⌘,）">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h10M18 7h2M4 17h4M12 17h8" />
+            <circle cx="16" cy="7" r="2" />
+            <circle cx="10" cy="17" r="2" />
+          </svg>
+        </button>
       </header>
-      <div id="stage">
-        <canvas id="surface"></canvas>
-        <div id="math-panel" hidden></div>
-        <div id="shortcuts" hidden></div>
-        <div id="find-bar" hidden>
-          <div class="field">
-            <input id="find-input" type="text" placeholder="查找" spellcheck="false" aria-label="查找" />
-            <button class="toggle flag" id="find-case" title="区分大小写">Aa</button>
-            <button class="toggle flag" id="find-regex" title="正则表达式">.*</button>
+
+      <div id="split">
+        <aside id="sidebar">
+          <div class="side-tabs" role="tablist" id="side-tabs">
+            <button role="tab" data-tab="files" disabled title="文件树需要一个打开的文件夹，还没有做">
+              文件树
+            </button>
+            <button role="tab" data-tab="outline" aria-selected="true">大纲</button>
+            <button role="tab" data-tab="article" disabled title="还没有做">文章</button>
           </div>
-          <div class="buttons">
-            <span id="find-count"></span>
-            <button class="toggle" id="find-prev" title="上一个（⇧⏎）">↑</button>
-            <button class="toggle" id="find-next" title="下一个（⏎）">↓</button>
-            <button class="toggle" id="find-close" title="关闭（Esc）">✕</button>
-          </div>
-          <div class="field">
-            <input id="replace-input" type="text" placeholder="替换为" spellcheck="false" aria-label="替换为" />
-          </div>
-          <div class="buttons">
-            <button class="toggle" id="replace-one" title="替换当前（⏎）">替换</button>
-            <button class="toggle" id="replace-all" title="全部替换">全部</button>
+          <div class="side-body" id="side-body"></div>
+        </aside>
+
+        <div id="stage">
+          <canvas id="surface"></canvas>
+          <div id="shortcuts" hidden></div>
+          <div id="find-bar" hidden>
+            <div class="field">
+              <input id="find-input" type="text" placeholder="查找" spellcheck="false" aria-label="查找" />
+              <button class="chip mini flag" id="find-case" title="区分大小写">Aa</button>
+              <button class="chip mini flag" id="find-regex" title="正则表达式">.*</button>
+            </div>
+            <div class="buttons">
+              <span id="find-count"></span>
+              <button class="chip mini" id="find-prev" title="上一个（⇧⏎）">↑</button>
+              <button class="chip mini" id="find-next" title="下一个（⏎）">↓</button>
+              <button class="chip mini" id="find-close" title="关闭（Esc）">✕</button>
+            </div>
+            <div class="field">
+              <input id="replace-input" type="text" placeholder="替换为" spellcheck="false" aria-label="替换为" />
+            </div>
+            <div class="buttons">
+              <button class="chip mini" id="replace-one" title="替换当前（⏎）">替换</button>
+              <button class="chip mini" id="replace-all" title="全部替换">全部</button>
+            </div>
           </div>
         </div>
       </div>
-      <footer>
+
+      <footer id="status-bar">
         <span id="status">正在加载排版引擎…</span>
         <span id="mode"></span>
         <span class="spacer"></span>
-        <button class="link" id="shortcut-button" title="快捷键一览（F1）">⌨ 快捷键</button>
         <span id="perf"></span>
+        <button class="pill-button" id="typo-button" aria-expanded="false" title="排版开关与版面尺寸">
+          排版 <span id="typo-caret">▾</span>
+        </button>
+        <button class="link-button" id="shortcut-button" title="快捷键一览（F1）">⌨ 快捷键</button>
       </footer>
+
+      <div id="typo-popover" hidden>
+        <div class="kicker">排版</div>
+        <div class="chips" id="toggles"></div>
+        <label class="slider-row">
+          <span class="slider-label">字号</span>
+          <input id="size" type="range" min="12" max="32" step="1" value="18" />
+          <span class="slider-value" id="size-value">18</span>
+        </label>
+        <label class="slider-row">
+          <span class="slider-label">版心</span>
+          <input id="column" type="range" min="420" max="1100" step="20" value="760" />
+          <span class="slider-value" id="column-value">760</span>
+        </label>
+        <p class="note">这些开关改变的是断行的代价函数，不是外观偏好。</p>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

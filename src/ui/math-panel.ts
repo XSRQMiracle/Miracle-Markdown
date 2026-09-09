@@ -29,13 +29,26 @@ interface Choice {
   set(value: string): void;
 }
 
+export interface MathPanel {
+  /** Rebuild the fields from the options they read. */
+  render(): void;
+}
+
+/**
+ * Build the Markdown and formula settings.
+ *
+ * With a `button` the fields live in a popover it toggles; with `null` they are
+ * rendered straight into `panel`, which is how the preferences window hosts
+ * them. Either way the fields are the same ones, so there is only ever one
+ * definition of what a setting is and what it does.
+ */
 export function buildMathPanel(
   panel: HTMLElement,
-  button: HTMLElement,
+  button: HTMLElement | null,
   editor: Editor,
   math: MathOptions,
   reloadMath: () => Promise<void>,
-): void {
+): MathPanel {
   let busy = false;
   let errorMessage = "";
   const writing = () => editor.editing.writing;
@@ -361,12 +374,18 @@ export function buildMathPanel(
     panel.appendChild(note);
   };
 
+  if (!button) {
+    render();
+    return { render };
+  }
+
+  const trigger = button;
   const place = (): void => {
-    const rect = button.getBoundingClientRect();
+    const rect = trigger.getBoundingClientRect();
     panel.style.left = `${Math.max(8, rect.left - 8)}px`;
   };
 
-  button.addEventListener("click", (e) => {
+  trigger.addEventListener("click", (e) => {
     e.stopPropagation();
     if (panel.hidden) {
       render();
@@ -375,14 +394,16 @@ export function buildMathPanel(
     } else {
       panel.hidden = true;
     }
-    button.setAttribute("aria-pressed", String(!panel.hidden));
+    trigger.setAttribute("aria-pressed", String(!panel.hidden));
   });
 
   panel.addEventListener("mousedown", (e) => e.stopPropagation());
   document.addEventListener("mousedown", () => {
     if (!panel.hidden) {
       panel.hidden = true;
-      button.setAttribute("aria-pressed", "false");
+      trigger.setAttribute("aria-pressed", "false");
     }
   });
+
+  return { render };
 }
