@@ -91,9 +91,16 @@ export class DocumentSession {
     return settled;
   }
 
-  open(): Promise<boolean> {
+  /**
+   * Replace the document.
+   *
+   * With no argument the host asks which one; with a reader, that one — the
+   * file tree already knows the path, and a new document is a reader that
+   * returns an empty one. Either way the unsaved-changes guard runs first.
+   */
+  open(picked?: () => Promise<SessionDocument>): Promise<boolean> {
     return this.transition(async () => {
-      const read = await this.ports.open();
+      const read = picked ?? await this.ports.open();
       if (!read) return false;
       // Confirm after the picker/read completes, so edits made while either
       // was pending are included in the decision to replace the document.

@@ -13,8 +13,12 @@ import {
   installDesktopCloseHandler,
   isDesktop,
   openDocument,
+  canBrowseFiles,
+  listFolder,
   newWindow,
   openExternal,
+  openFolder,
+  readDocumentAt,
   saveDocument,
 } from "./platform.js";
 import { DEFAULT_MATH_OPTIONS, initMath, type MathOptions } from "./engine/mathjax.js";
@@ -24,6 +28,7 @@ import { confirmUnsavedDocument, showDocumentError } from "./ui/document-dialog.
 import { buildFindBar } from "./ui/find-bar.js";
 import { buildShortcutSheet } from "./ui/shortcut-sheet.js";
 import { buildSidebar } from "./ui/sidebar.js";
+import { buildFileTree } from "./ui/file-tree.js";
 import { buildTypographyPopover } from "./ui/typography.js";
 import { buildPreferences } from "./ui/preferences.js";
 import { applySkin, watchSystemAppearance } from "./ui/skin.js";
@@ -84,6 +89,7 @@ async function main() {
     docPath.textContent = folder;
     docPath.title = session.path ?? "";
     docDirty.hidden = !session.dirty;
+    tree.setCurrent(session.path, session.dirty);
     openButton.disabled = session.transitioning || session.isClosing;
     saveButton.disabled = saveAsButton.disabled = session.isClosing;
     stage.inert = session.isClosing || !sessionReady;
@@ -107,13 +113,39 @@ async function main() {
   saveAsButton.addEventListener("click", () => void fileAction(() => session.save(true)));
 
   // ── Sidebar ───────────────────────────────────────────────────────────────
+  const tree = buildFileTree({
+    list: listFolder,
+    // Every route into the tree goes through the session, so the tree cannot
+    // replace an unsaved document without the guard having its say.
+    onOpen: (path) => void fileAction(() => session.open(() => readDocumentAt(path))),
+    onChooseFolder: () => void chooseFolder(),
+    onNewDocument: () => void fileAction(() =>
+      session.open(async () => ({ path: null, contents: "", lineEnding: "\n" }))),
+  });
+  const chooseFolder = async () => {
+    const picked = await openFolder();
+    if (!picked) return;
+    update({ folder: picked });
+  };
   const sidebar = buildSidebar({
     tabs: el("side-tabs"),
     body: el("side-body"),
     editor,
+    tree,
     tab: settings.sidebarTab,
     onTabChange: (tab) => update({ sidebarTab: tab }),
   });
+  // The tree tab is only meaningful where there is a filesystem to browse.
+  const filesTab = el<HTMLButtonElement>("side-tabs")
+    .querySelector<HTMLButtonElement>('button[data-tab="files"]');
+  if (filesTab) {
+    filesTab.disabled = !canBrowseFiles();
+    filesTab.title = canBrowseFiles() ? "文件树" : "浏览器预览下没有文件系统";
+  }
+  void tree.setFolder(settings.folder);
+  // A remembered tab this host cannot show would leave the sidebar on a panel
+  // nothing can fill.
+  if (settings.sidebarTab === "files" && !canBrowseFiles()) sidebar.setTab("outline");
   const syncSidebar = () => {
     app.dataset.sidebar = settings.sidebarVisible ? "shown" : "hidden";
     sidebarToggle.setAttribute("aria-pressed", String(settings.sidebarVisible));
@@ -198,6 +230,7 @@ async function main() {
     }
     if ("sidebarVisible" in patch) syncSidebar();
     if ("sidebarTab" in patch) sidebar.refresh();
+    if ("folder" in patch) void tree.setFolder(settings.folder);
   }
 
   // With `跟随系统`, the OS flipping appearance has to reach both halves.
@@ -336,7 +369,7 @@ async function main() {
   // A handle for driving the editor from the console and from tests. Dev
   // builds only; `import.meta.env.DEV` is false in a production bundle.
   if (import.meta.env.DEV) {
-    (window as unknown as { editor: Editor }).editor = editor;
+    Object.assign(window as unknown as Record<string, unknown>, { editor, tree, sidebar });
   }
 
   editor.focus();

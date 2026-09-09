@@ -23,6 +23,8 @@ export interface AppSettings {
   bodyFace: BodyFace;
   sidebarVisible: boolean;
   sidebarTab: SidebarTab;
+  /** The folder the file tree is showing, or none. */
+  folder: string | null;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -31,6 +33,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   bodyFace: "theme",
   sidebarVisible: true,
   sidebarTab: "outline",
+  folder: null,
 };
 
 const KEY = "miracle-markdown.settings";
@@ -57,6 +60,9 @@ function coerce(raw: unknown): AppSettings {
   if (typeof value.sidebarTab === "string" && TABS.has(value.sidebarTab)) {
     settings.sidebarTab = value.sidebarTab as SidebarTab;
   }
+  // The folder may since have been moved or deleted; the tree reports that
+  // itself rather than the settings refusing to load.
+  if (typeof value.folder === "string" && value.folder) settings.folder = value.folder;
   return settings;
 }
 

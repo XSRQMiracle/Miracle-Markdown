@@ -55,6 +55,81 @@ fn write_file(path: String, contents: String) -> Result<(), String> {
         .map_err(|e| format!("无法保存 {path}：{e}"))
 }
 
+/// One entry in a folder the sidebar is showing.
+#[derive(Serialize)]
+pub struct FolderEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    /// Bytes. Zero for a directory.
+    size: u64,
+    /// Milliseconds since the epoch, or zero when the platform will not say.
+    modified: f64,
+}
+
+/// Whether a file is worth showing in a Markdown editor's file tree.
+fn is_document(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".txt")
+}
+
+/// Directories that are never what someone means by "my notes".
+fn is_noise(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(name, "node_modules" | "target" | "dist" | "build" | "__pycache__")
+}
+
+/// List one level of a folder.
+///
+/// One level rather than the whole tree: a notes folder can sit inside a home
+/// directory, and walking it eagerly would cost seconds before the sidebar
+/// could draw anything. The panel asks again when a folder is opened.
+#[tauri::command]
+fn list_folder(path: String) -> Result<Vec<FolderEntry>, String> {
+    let mut entries = Vec::new();
+    let dir = std::fs::read_dir(&path).map_err(|e| format!("无法读取文件夹 {path}：{e}"))?;
+    for entry in dir {
+        let entry = match entry {
+            Ok(entry) => entry,
+            // One unreadable entry must not lose the rest of the folder.
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(kind) = entry.file_type() else { continue };
+        // Symlinks are followed for their kind but not chased for loops: a
+        // link to an ancestor simply shows as a folder that can be opened.
+        let is_dir = kind.is_dir()
+            || (kind.is_symlink() && entry.path().is_dir());
+        if is_dir {
+            if is_noise(&name) {
+                continue;
+            }
+        } else if name.starts_with('.') || !is_document(&name) {
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        let size = if is_dir { 0 } else { meta.as_ref().map_or(0, |m| m.len()) };
+        let modified = meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0.0, |d| d.as_millis() as f64);
+        entries.push(FolderEntry {
+            name,
+            path: entry.path().to_string_lossy().into_owned(),
+            is_dir,
+            size,
+            modified,
+        });
+    }
+    // Folders first, then files, each run sorted the way a person reads them.
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(entries)
+}
+
 /// Fonts the user actually has, so the settings panel can offer real choices
 /// rather than a stack that may silently fall back.
 #[tauri::command]
@@ -85,6 +160,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_file,
             write_file,
+            list_folder,
             suggested_fonts,
             protect_document,
             finish_close

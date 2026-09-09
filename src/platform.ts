@@ -63,6 +63,49 @@ export async function openDocument(): Promise<(() => Promise<OpenResult>) | null
   });
 }
 
+/** One entry in a folder, as the sidebar's tree shows it. */
+export interface FolderEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  /** Bytes; zero for a directory. */
+  size: number;
+  /** Milliseconds since the epoch, or zero when the platform will not say. */
+  modified: number;
+}
+
+/** Whether this host can show a file tree at all. */
+export const canBrowseFiles = (): boolean => tauri() !== null;
+
+/** Ask for a folder to show in the sidebar. */
+export async function openFolder(): Promise<string | null> {
+  if (!tauri()) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const picked = await open({ directory: true, multiple: false });
+  return typeof picked === "string" ? picked : null;
+}
+
+/**
+ * List one level of a folder.
+ *
+ * One level rather than the whole tree, because the tree is drawn lazily: a
+ * notes folder inside a home directory would cost seconds to walk eagerly,
+ * and the panel only needs what it is about to show.
+ */
+export async function listFolder(path: string): Promise<FolderEntry[]> {
+  const api = tauri();
+  if (!api) return [];
+  return api.invoke<FolderEntry[]>("list_folder", { path });
+}
+
+/** Read a document the tree already knows the path of. */
+export async function readDocumentAt(path: string): Promise<OpenResult> {
+  const api = tauri();
+  if (!api) throw new Error("此环境无法读取文件");
+  const decoded = decodeDocumentText(await api.invoke<string>("read_file", { path }));
+  return { path, contents: decoded.text, lineEnding: decoded.lineEnding };
+}
+
 /** Save the document, prompting for a location when there is not one yet. */
 export async function saveDocument(
   path: string | null,

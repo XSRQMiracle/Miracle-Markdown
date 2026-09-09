@@ -228,7 +228,141 @@
       .outline-row[data-level="5"] { padding-left: 66px; color: var(--mm-text3); }
       .outline-row[data-level="6"] { padding-left: 80px; color: var(--mm-text3); }
 
-      .side-divider { height: 1px; background: var(--mm-rule-soft); margin: 12px 10px; }
+      /* ── File tree ───────────────────────────────────────────────────────*/
+      .tree { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+      .tree-search {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0 2px 10px;
+        padding: 5px 10px;
+        background: var(--mm-paper);
+        border: 1px solid var(--mm-rule);
+        border-radius: var(--mm-radius-pill);
+      }
+      .tree-search svg {
+        width: 13px;
+        height: 13px;
+        flex: none;
+        fill: none;
+        stroke: var(--mm-text-faint);
+        stroke-width: 2.75;
+        stroke-linecap: round;
+      }
+      .tree-search input {
+        width: 100%;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        font: inherit;
+        font-size: 12px;
+        color: var(--mm-text);
+      }
+      .tree-search input::placeholder { color: var(--mm-text-faint); }
+      .tree-search input::-webkit-search-cancel-button { -webkit-appearance: none; }
+      .tree-body { flex: 1; min-height: 0; overflow: auto; }
+      /* The folder's own name heads the tree, and is the way back to the
+         picker — otherwise a folder could be opened but never changed. */
+      .tree-header {
+        display: block;
+        width: 100%;
+        padding: 4px 8px 8px;
+        border: 0;
+        background: transparent;
+        color: var(--mm-text-faint);
+        font: 600 10.5px/1.6 var(--mm-font-ui);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        text-align: left;
+        cursor: pointer;
+      }
+      .tree-header:hover { color: var(--mm-accent-label); }
+
+      .tree-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        padding: 5px 8px;
+        border: 0;
+        border-radius: var(--mm-radius-pill);
+        background: transparent;
+        color: var(--mm-text3);
+        font: inherit;
+        font-size: 12.5px;
+        text-align: left;
+        cursor: pointer;
+      }
+      .tree-row:hover { background: var(--mm-fill-hover); }
+      .tree-row.is-folder { font-weight: 600; }
+      .tree-row.is-current {
+        background: var(--mm-fill-active);
+        color: var(--mm-text);
+        font-weight: 600;
+      }
+      .tree-row .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tree-row .chevron {
+        width: 13px;
+        height: 13px;
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.75;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .tree-row .dot {
+        width: 5px;
+        height: 5px;
+        flex: none;
+        border-radius: 999px;
+        background: var(--mm-dirty);
+      }
+      /* 8 / 22 / 40 and on by 16 — the ladder the artboard draws. */
+      .tree-row[data-depth="0"], .tree-meta[data-depth="0"] { padding-left: 8px; }
+      .tree-row[data-depth="1"], .tree-meta[data-depth="1"] { padding-left: 22px; }
+      .tree-row[data-depth="2"], .tree-meta[data-depth="2"] { padding-left: 40px; }
+      .tree-row[data-depth="3"], .tree-meta[data-depth="3"] { padding-left: 56px; }
+      .tree-row[data-depth="4"], .tree-meta[data-depth="4"] { padding-left: 72px; }
+      .tree-row[data-depth="5"], .tree-meta[data-depth="5"] { padding-left: 88px; }
+      .tree-meta {
+        margin: -2px 0 2px;
+        padding: 0 8px 4px;
+        font-size: 11px;
+        color: var(--mm-text-faint);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .tree-footer {
+        padding: 10px 2px 2px;
+        margin-top: 8px;
+        border-top: 1px solid var(--mm-rule-soft);
+      }
+      .tree-primary {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        width: 100%;
+        padding: 7px 0;
+        border: 1px solid transparent;
+        border-radius: var(--mm-radius-pill);
+        background: var(--mm-accent);
+        color: var(--mm-paper);
+        font: 600 12px/1.2 var(--mm-font-ui);
+        cursor: pointer;
+      }
+      .tree-primary:hover { background: var(--mm-accent-deep); }
+      .tree-primary svg {
+        width: 13px;
+        height: 13px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.75;
+        stroke-linecap: round;
+      }
+
+            .side-divider { height: 1px; background: var(--mm-rule-soft); margin: 12px 10px; }
       .side-summary {
         padding: 0 10px 8px;
         font: 400 11px/1.7 var(--mm-font-ui);
@@ -778,6 +912,35 @@
         background: transparent;
         box-shadow: inset 2px 0 0 var(--mm-accent);
       }
+      [data-skin="classical"] .tree-primary,
+      [data-skin="nocturne"] .tree-primary {
+        background: transparent;
+        border-color: var(--mm-accent);
+        color: var(--mm-accent-label);
+      }
+      [data-skin="classical"] .tree-primary:hover,
+      [data-skin="nocturne"] .tree-primary:hover { background: var(--mm-accent-tint); }
+      [data-skin="broadsheet"] .tree-search { border-color: var(--mm-rule); }
+      [data-skin="modernist"] .tree-primary { justify-content: flex-start; padding-left: 12px; }
+      [data-skin="classical"] .tree-row.is-current,
+      [data-skin="broadsheet"] .tree-row.is-current {
+        background: transparent;
+        box-shadow: inset 2px 0 0 var(--mm-accent);
+      }
+      [data-skin="industry"] .tree-row.is-current {
+        background: transparent;
+        border: 1px solid var(--mm-accent);
+      }
+      [data-skin="modernist"] .tree-row.is-current {
+        background: var(--mm-accent);
+        color: var(--mm-paper);
+      }
+      [data-skin="nocturne"] .tree-row { border: 1px solid transparent; }
+      [data-skin="nocturne"] .tree-row.is-current {
+        background: transparent;
+        border-color: var(--mm-positive-rule);
+      }
+
       [data-skin="classical"] .chip[aria-pressed="true"] {
         background: transparent;
         border-color: var(--mm-accent);
@@ -993,9 +1156,7 @@
       <div id="split">
         <aside id="sidebar">
           <div class="side-tabs" role="tablist" id="side-tabs">
-            <button role="tab" data-tab="files" disabled title="文件树需要一个打开的文件夹，还没有做">
-              文件树
-            </button>
+            <button role="tab" data-tab="files" title="文件树">文件树</button>
             <button role="tab" data-tab="outline" aria-selected="true">大纲</button>
             <button role="tab" data-tab="article" disabled title="还没有做">文章</button>
           </div>
