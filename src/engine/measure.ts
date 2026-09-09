@@ -30,9 +30,15 @@ export interface TextStyle {
   underline?: boolean;
 }
 
+// Latin first, CJK second. Canvas resolves each character from the first
+// family that has it, and a CJK serif carries a full Latin repertoire — so a
+// Latin face behind one is never reached, and the Latin in a mixed document
+// gets drawn, unkerned, by the Song face.
 export const FALLBACK_SERIF =
+  '"Iowan Old Style", Charter, Palatino, Cambria, Constantia, Georgia, ' +
   '"Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", SimSun, serif';
 export const FALLBACK_SANS =
+  '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, ' +
   '"PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif';
 export const FALLBACK_MONO =
   '"SF Mono", "Cascadia Code", Menlo, Consolas, monospace';

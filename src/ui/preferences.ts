@@ -13,6 +13,7 @@ import type { MathOptions } from "../engine/mathjax.js";
 import { buildMathPanel } from "./math-panel.js";
 import { SKINS, type Appearance, type BodyFace, type Skin, type SkinName } from "./skin.js";
 import type { AppSettings } from "./settings.js";
+import { installedFaces } from "./fonts.js";
 
 export interface Preferences {
   open(section?: string): void;
@@ -209,20 +210,29 @@ export function buildPreferences(options: PreferencesOptions): Preferences {
     field("明暗", "跟随系统时，主题在它自己的浅色与深色之间切换。", modeControl.element),
   );
 
-  const faceControl = segmented<BodyFace>(
-    [
-      ["theme", "跟随主题"],
-      ["serif", "始终衬线"],
-      ["sans", "始终无衬线"],
-    ],
-    settings.bodyFace,
-    (value) => onChange({ bodyFace: value }),
-  );
+  const faceSelect = document.createElement("select");
+  for (const [value, label] of [["theme", "跟随主题"] as const]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    faceSelect.appendChild(option);
+  }
+  for (const face of installedFaces()) {
+    const option = document.createElement("option");
+    option.value = face.id;
+    option.textContent = face.label;
+    faceSelect.appendChild(option);
+  }
+  faceSelect.value = settings.bodyFace;
+  // A stored face that this machine does not have falls back rather than
+  // showing a blank select.
+  if (!faceSelect.value) faceSelect.value = "theme";
+  faceSelect.addEventListener("change", () => onChange({ bodyFace: faceSelect.value as BodyFace }));
   appearance.appendChild(
     field(
       "正文字族",
-      "衬线更像 TeX 的成品；无衬线与窗口同族。换字族会重新排版，断行因此会变。",
-      faceControl.element,
+      "衬线更像 TeX 的成品；无衬线与窗口同族。只列出本机装了的字体 —— 换字族会重新测量，断行因此会变。",
+      faceSelect,
     ),
   );
 

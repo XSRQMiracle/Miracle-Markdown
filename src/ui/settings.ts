@@ -13,6 +13,7 @@
 
 import type { Appearance, BodyFace, SkinName } from "./skin.js";
 import { SKINS } from "./skin.js";
+import { BODY_FACES } from "./fonts.js";
 
 export type SidebarTab = "files" | "outline" | "article";
 
@@ -36,7 +37,7 @@ const KEY = "miracle-markdown.settings";
 
 const SKIN_NAMES = new Set<string>(SKINS.map((s) => s.name));
 const APPEARANCES = new Set(["light", "dark", "system"]);
-const FACES = new Set(["theme", "serif", "sans"]);
+const FACES = new Set<string>(["theme", ...BODY_FACES.map((f) => f.id)]);
 const TABS = new Set(["files", "outline", "article"]);
 
 function coerce(raw: unknown): AppSettings {

@@ -17,6 +17,7 @@
  */
 
 import type { Theme } from "../engine/theme.js";
+import { faceStack, findFace } from "./fonts.js";
 
 export type SkinName =
   | "organic"
@@ -28,8 +29,9 @@ export type SkinName =
 
 export type Appearance = "light" | "dark" | "system";
 
-/** Which face the page is set in. `theme` follows the skin's own preference. */
-export type BodyFace = "theme" | "serif" | "sans";
+/** Which face the page is set in: `theme` follows the skin's own preference,
+ *  anything else is an id from `fonts.ts`'s catalogue. */
+export type BodyFace = string;
 
 /** The document palette, minus the two values that belong to the document
  *  rather than to the skin. */
@@ -110,18 +112,10 @@ const UI_FIGTREE =
 const MONO = 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace';
 
 /** The page's two faces. The serif is what the design calls "more like a TeX
- *  product"; the sans matches the chrome. */
-export const DOC_SERIF =
-  '"Source Serif 4", "Source Han Serif SC", "Noto Serif SC", "Noto Serif CJK SC", "Songti SC", SimSun, Georgia, serif';
-export const DOC_SANS =
-  'Figtree, "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", system-ui, sans-serif';
-
-/** A serif at 700 is heavier than this page wants; the sans needs it. Line
- *  height differs with the face for the same reason. */
-const FACE_METRICS = {
-  serif: { family: DOC_SERIF, headingWeight: 600, lineHeight: 1.85 },
-  sans: { family: DOC_SANS, headingWeight: 700, lineHeight: 1.8 },
-} as const;
+ *  product"; the sans matches the chrome. Both put their Latin half first —
+ *  see fonts.ts for why that ordering is load-bearing rather than cosmetic. */
+export const DOC_SERIF = faceStack(findFace("serif")!);
+export const DOC_SANS = faceStack(findFace("sans")!);
 
 const ORGANIC_LIGHT: SkinMode = {
   chrome: {
@@ -381,14 +375,14 @@ export function applySkin(
   // Native form controls and scrollbars inside the chrome follow this.
   root.style.colorScheme = mode;
 
-  const metrics = face === "theme" ? null : FACE_METRICS[face];
-  const palette: DocumentPalette = metrics
+  const chosen = face === "theme" ? null : findFace(face);
+  const palette: DocumentPalette = chosen
     ? {
         ...resolved.document,
-        bodyFamily: metrics.family,
-        headingFamily: metrics.family,
-        headingWeight: metrics.headingWeight,
-        lineHeight: metrics.lineHeight,
+        bodyFamily: faceStack(chosen),
+        headingFamily: faceStack(chosen),
+        headingWeight: chosen.headingWeight,
+        lineHeight: chosen.lineHeight,
       }
     : resolved.document;
 
