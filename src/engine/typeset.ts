@@ -622,9 +622,21 @@ export class Typesetter {
     }
     const focusedBlock = blockIndexAtPosition(parsed, focusedPosition);
     const numbering = numberEquations(parsed, this.options.numbering);
+    const theme = this.theme;
     const out: LaidBlock[] = [];
     const usedKeys = new Set<string>();
     let y = 0;
+    // TeX's interline glue does not stop at a paragraph boundary: \prevdepth
+    // survives into the next vertical list, so the last line of one block and
+    // the first line of the next are set to \baselineskip like any other
+    // pair. Stacking blocks by their boxes instead makes the distance track
+    // the next line's ink one-for-one in *both* directions — and a line whose
+    // ink is shorter than the body, a formula-only list item or an image or a
+    // lifted mark, pulls itself up towards its predecessor. A tall line
+    // pushing its neighbour away is correct and is preserved; a short one
+    // pulling it closer is not, and was the uneven leading.
+    let previousDepth: number | null = null;
+    let previousBaseline = 0;
     for (let i = 0; i < parsed.length; i++) {
       const b = parsed[i];
       const laid = this.layoutBlock(
@@ -636,8 +648,31 @@ export class Typesetter {
         numbering,
         usedKeys,
       );
-      laid.y = y + laid.spaceBefore;
-      y = laid.y + laid.height - laid.spaceBefore;
+
+      const firstLine = laid.lines[0];
+      if (firstLine && previousDepth !== null) {
+        const style = firstLine.runs[0]?.style;
+        const skip = (style?.size ?? theme.bodySize) * (style?.lineHeight ?? theme.lineHeight);
+        // The same minimum the core is configured with, so glue within a
+        // block and glue between two of them use one set of constants.
+        const lineSkip = theme.bodySize * 0.08;
+        const gap = Math.max(skip - previousDepth - firstLine.height, lineSkip);
+        // Convert the wanted baseline back into a block top. Every builder
+        // sets `baseline` relative to the block's own origin, so this works
+        // for paragraphs, preformatted blocks, display math and tables alike.
+        laid.y = previousBaseline + previousDepth + gap +
+          firstLine.height - firstLine.baseline + laid.spaceBefore;
+      } else {
+        laid.y = y + laid.spaceBefore;
+      }
+      // A tall first line legitimately reaches up into the previous block's
+      // nominal descent allowance, so the running bottom has to stay monotone.
+      y = Math.max(y, laid.y + laid.height - laid.spaceBefore);
+      const lastLine = laid.lines.at(-1);
+      // No lines — a rule — resets the glue, so the block after it is not
+      // pinned to the line before it.
+      previousDepth = lastLine ? lastLine.depth : null;
+      if (lastLine) previousBaseline = laid.y + lastLine.baseline;
       out.push(laid);
     }
     // Keep the current document's working set even when it exceeds the

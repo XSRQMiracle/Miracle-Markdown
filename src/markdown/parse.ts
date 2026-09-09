@@ -1146,7 +1146,12 @@ export function parseInline(
     if (options.texDelimiters && c === "\\" && (body[i + 1] === "(" || body[i + 1] === "[")) {
       const display = body[i + 1] === "[";
       const close = delimiters.texCloser(i + 2, display);
-      if (close > 0 && close + 2 <= limit) {
+      // An empty or whitespace-only body is not a formula. `\[ \]` and `\(\)`
+      // are how CommonMark writes a literal bracket and parenthesis, and a
+      // document explaining Markdown syntax writes exactly that — so reading
+      // them as math swallows the author's escapes. Same spirit as
+      // `strictDollar`: a delimiter with nothing in it is punctuation.
+      if (close > 0 && close + 2 <= limit && body.slice(i + 2, close).trim() !== "") {
         swaps.push({
           kind: "math",
           from: i,
