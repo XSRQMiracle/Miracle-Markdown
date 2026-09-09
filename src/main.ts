@@ -13,6 +13,7 @@ import {
   installDesktopCloseHandler,
   isDesktop,
   openDocument,
+  newWindow,
   openExternal,
   saveDocument,
 } from "./platform.js";
@@ -45,6 +46,7 @@ const saveAsButton = el<HTMLButtonElement>("save-as");
 const sidebarToggle = el<HTMLButtonElement>("sidebar-toggle");
 const prefsButton = el<HTMLButtonElement>("prefs-button");
 const findButton = el<HTMLButtonElement>("find-button");
+const newWindowButton = el<HTMLButtonElement>("new-window");
 
 async function main() {
   // Editing starts only once both the session and its close guard are ready.
@@ -99,6 +101,7 @@ async function main() {
     catch (error) { await showDocumentError(error); }
     if (!session.isClosing) editor.focus();
   };
+  newWindowButton.addEventListener("click", () => void newWindow());
   openButton.addEventListener("click", () => void fileAction(() => session.open()));
   saveButton.addEventListener("click", () => void fileAction(() => session.save()));
   saveAsButton.addEventListener("click", () => void fileAction(() => session.save(true)));
@@ -237,7 +240,12 @@ async function main() {
     const mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
     const key = e.key.toLowerCase();
-    if (key === ",") {
+    if (key === "n") {
+      // A second editor, which macOS shows as a second tab. The document stays
+      // with the window it was opened in.
+      e.preventDefault();
+      void newWindow();
+    } else if (key === ",") {
       e.preventDefault();
       preferences.open();
     } else if (key === "l" && e.shiftKey) {

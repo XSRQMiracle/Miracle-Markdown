@@ -17,7 +17,8 @@
         "height": 780,
         "minWidth": 480,
         "minHeight": 400,
-        "titleBarStyle": "Visible"
+        "titleBarStyle": "Visible",
+        "tabbingIdentifier": "app.miracle.markdown"
       }
     ],
     "security": {

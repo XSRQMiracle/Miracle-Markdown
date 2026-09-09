@@ -98,6 +98,50 @@ export async function saveDocument(
 }
 
 /**
+ * Open a second editor.
+ *
+ * On macOS the windows share a tabbing identifier, so the new one arrives as a
+ * tab in the same window rather than as a window of its own — which is what
+ * "new tab" means on that platform, and it costs nothing on the others.
+ *
+ * A document lives in its window: two tabs are two sessions, and neither can
+ * take the other's unsaved work with it.
+ */
+export async function newWindow(): Promise<boolean> {
+  const api = tauri();
+  if (!api) return window.open(window.location.href, "_blank") !== null;
+
+  const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+  // Labels must be unique for the life of the app and match [a-zA-Z0-9-/:_].
+  const label = `doc-${windowSerial()}`;
+  const created = new WebviewWindow(label, {
+    url: window.location.pathname,
+    title: "Miracle Markdown",
+    width: 1100,
+    height: 780,
+    minWidth: 480,
+    minHeight: 400,
+    titleBarStyle: "visible",
+    tabbingIdentifier: "app.miracle.markdown",
+  });
+  return new Promise((resolve) => {
+    void created.once("tauri://created", () => resolve(true));
+    void created.once("tauri://error", (event) => {
+      console.error("could not open a new window", event.payload);
+      resolve(false);
+    });
+  });
+}
+
+/** Monotonic within this window, and salted so two windows opening at the same
+ *  moment cannot pick the same label. */
+let serial = 0;
+function windowSerial(): string {
+  serial += 1;
+  return `${Date.now().toString(36)}-${serial}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
+
+/**
  * Open a link somewhere outside the editor.
  *
  * The destination comes from the document, which is not necessarily something
