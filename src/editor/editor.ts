@@ -315,6 +315,25 @@ export class Editor {
     this.select(offset, offset);
   }
 
+  /**
+   * Put the caret at `offset` and bring its block to the *top* of the window.
+   *
+   * `revealOffset` only scrolls far enough to make the caret visible, which is
+   * right for typing and wrong for the outline: picking a heading that already
+   * happens to be on screen — three short sections often are — would not move
+   * the page at all, and nothing would say the request had been honoured.
+   * Returns where it ended up, which is not the requested position once the
+   * document runs out of room to scroll.
+   */
+  revealBlockAtTop(offset: number): number {
+    this.select(offset, offset);
+    if (this.dirty) this.relayout();
+    const block = this.blocks.find((b) => offset >= b.block.start && offset <= b.block.end) ??
+      this.blocks.find((b) => b.block.start >= offset);
+    if (block) this.scrollTo(block.y - this.theme.bodySize * 0.6);
+    return this.scrollTop;
+  }
+
   /** Re-typeset after the math engine has loaded or its options changed. */
   invalidateMath(): void {
     this.typesetter.invalidate();
