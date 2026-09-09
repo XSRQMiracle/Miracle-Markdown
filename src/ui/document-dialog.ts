@@ -12,6 +12,10 @@ function dialog(message: string, choices: Array<[string, string]>): Promise<stri
     for (const [value, label] of choices) {
       const button = document.createElement("button");
       button.textContent = label;
+      // The value is what the stylesheet weights the choices by: losing work
+      // must not be one indistinguishable button among three.
+      button.value = value;
+      if (value === "save" || value === "ok") button.autofocus = true;
       button.addEventListener("click", () => element.close(value));
       buttons.appendChild(button);
     }

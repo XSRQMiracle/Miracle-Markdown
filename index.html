@@ -37,6 +37,7 @@
         --mm-positive-rule: #ccdbb2;
         --mm-positive-fill: #e1eecc;
         --mm-icon-border: #d3c7b1;
+        --mm-danger: #b3402f;
         --mm-shadow: 0 12px 32px rgba(46, 43, 37, 0.22);
         --mm-shadow-strong: 0 14px 34px rgba(46, 43, 37, 0.24);
 
@@ -734,13 +735,26 @@
         cursor: pointer;
       }
       .document-dialog button:hover { background: var(--mm-fill-hover); }
-      .document-dialog button[value="save"] {
+      /* The three answers are not equal. Keeping the work is the primary
+         action and is filled; discarding it is the one that loses something
+         and says so; cancelling is the quiet default. */
+      .document-dialog button[value="save"],
+      .document-dialog button[value="ok"] {
         border-color: transparent;
         background: var(--mm-accent);
         color: var(--mm-paper);
         font-weight: 600;
       }
-      .document-dialog button[value="save"]:hover { background: var(--mm-accent-deep); }
+      .document-dialog button[value="save"]:hover,
+      .document-dialog button[value="ok"]:hover { background: var(--mm-accent-deep); }
+      .document-dialog button[value="discard"] {
+        border-color: var(--mm-danger);
+        color: var(--mm-danger);
+      }
+      .document-dialog button[value="discard"]:hover {
+        background: var(--mm-danger);
+        color: var(--mm-paper);
+      }
 
       :focus-visible { outline: 2px solid var(--mm-accent); outline-offset: 2px; }
 

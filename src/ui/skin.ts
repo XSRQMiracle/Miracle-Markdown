@@ -74,6 +74,9 @@ export interface ChromePalette {
   positiveFill: string;
   /** Border of a chrome icon button at rest. */
   iconBorder: string;
+  /** The one action that loses work. Used sparingly, and never as a fill
+   *  except on hover. */
+  danger: string;
   shadow: string;
   shadowStrong: string;
 }
@@ -147,6 +150,7 @@ const ORGANIC_LIGHT: SkinMode = {
     positiveRule: "#ccdbb2",
     positiveFill: "#e1eecc",
     iconBorder: "#d3c7b1",
+    danger: "#b3402f",
     shadow: "0 12px 32px rgba(46, 43, 37, 0.22)",
     shadowStrong: "0 14px 34px rgba(46, 43, 37, 0.24)",
   },
@@ -218,6 +222,7 @@ const ORGANIC_DARK: SkinMode = {
     positiveRule: "#4a5238",
     positiveFill: "#2b3020",
     iconBorder: "#3f382c",
+    danger: "#d2694f",
     shadow: "0 12px 32px rgba(20, 17, 13, 0.5)",
     shadowStrong: "0 14px 34px rgba(20, 17, 13, 0.55)",
   },
