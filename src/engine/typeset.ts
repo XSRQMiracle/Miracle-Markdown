@@ -650,7 +650,15 @@ export class Typesetter {
       );
 
       const firstLine = laid.lines[0];
-      if (firstLine && previousDepth !== null) {
+      // A displayed formula is the one place TeX does not use \baselineskip:
+      // \abovedisplayskip and \belowdisplayskip replace it, which is why a
+      // formula stands away from its paragraph instead of sitting on the same
+      // grid. `buildDisplayMath` carries that skip inside its single line's
+      // baseline, so running the chain through it subtracts exactly the space
+      // it just added — the formula came to rest one `lineSkip` from the text.
+      // Stack it, and the block after it, by boxes instead.
+      const display = b.type === "math";
+      if (firstLine && previousDepth !== null && !display) {
         const style = firstLine.runs[0]?.style;
         const skip = (style?.size ?? theme.bodySize) * (style?.lineHeight ?? theme.lineHeight);
         // The same minimum the core is configured with, so glue within a
@@ -659,7 +667,7 @@ export class Typesetter {
         const gap = Math.max(skip - previousDepth - firstLine.height, lineSkip);
         // Convert the wanted baseline back into a block top. Every builder
         // sets `baseline` relative to the block's own origin, so this works
-        // for paragraphs, preformatted blocks, display math and tables alike.
+        // for paragraphs, preformatted blocks and tables alike.
         laid.y = previousBaseline + previousDepth + gap +
           firstLine.height - firstLine.baseline + laid.spaceBefore;
       } else {
@@ -670,9 +678,11 @@ export class Typesetter {
       y = Math.max(y, laid.y + laid.height - laid.spaceBefore);
       const lastLine = laid.lines.at(-1);
       // No lines — a rule — resets the glue, so the block after it is not
-      // pinned to the line before it.
-      previousDepth = lastLine ? lastLine.depth : null;
-      if (lastLine) previousBaseline = laid.y + lastLine.baseline;
+      // pinned to the line before it. A formula resets it for the same
+      // reason: \belowdisplayskip is its own space, and it lives in the
+      // running bottom rather than in the chain.
+      previousDepth = lastLine && !display ? lastLine.depth : null;
+      if (lastLine && !display) previousBaseline = laid.y + lastLine.baseline;
       out.push(laid);
     }
     // Keep the current document's working set even when it exceeds the
