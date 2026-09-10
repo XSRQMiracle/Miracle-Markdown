@@ -134,8 +134,15 @@ export function buildTypographyPopover(options: TypographyOptions): TypographyPo
   });
   // Clicking inside must not count as clicking away.
   popover.addEventListener("mousedown", (e) => e.stopPropagation());
-  document.addEventListener("mousedown", () => {
-    if (!popover.hidden) setOpen(false);
+  document.addEventListener("mousedown", (e) => {
+    if (popover.hidden) return;
+    // Nor does clicking the trigger. `mousedown` runs before `click`, and the
+    // trigger sits in the status bar rather than inside the popover — so
+    // dismissing here would close the popover and let the trigger's own
+    // `click` see it already hidden and open it straight back up. Pressing 排版
+    // to put it away did nothing at all.
+    if (e.target instanceof Node && trigger.contains(e.target)) return;
+    setOpen(false);
   });
 
   return {
