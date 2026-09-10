@@ -234,7 +234,7 @@ async function main() {
    */
   function update(patch: Partial<AppSettings>): void {
     Object.assign(settings, patch);
-    saveSettings(settings);
+    saveSettings(patch);
     if ("skin" in patch || "appearance" in patch || "bodyFace" in patch) {
       // A colour is part of a run's measurement key, so a palette change is a
       // re-typeset, not a repaint. `setTheme` already knows that.

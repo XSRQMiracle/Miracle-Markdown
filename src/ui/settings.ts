@@ -77,9 +77,22 @@ export function loadSettings(): AppSettings {
   }
 }
 
-export function saveSettings(settings: AppSettings): void {
+/**
+ * Remember one change.
+ *
+ * The patch, merged onto whatever is stored now — not this window's whole
+ * settings object. Every window keeps the snapshot it read at startup, and the
+ * key is one blob shared by all of them, so writing the whole object means the
+ * second window to change anything puts its startup snapshot back over
+ * everything the first window has chosen since. Writing only what changed
+ * leaves the other window's choices where they are.
+ *
+ * A window still shows its own snapshot until it is restarted; what this
+ * guarantees is that nothing is silently thrown away.
+ */
+export function saveSettings(patch: Partial<AppSettings>): void {
   try {
-    window.localStorage.setItem(KEY, JSON.stringify(settings));
+    window.localStorage.setItem(KEY, JSON.stringify({ ...loadSettings(), ...patch }));
   } catch {
     // Not being able to remember the choice is not a reason to reject it.
   }
