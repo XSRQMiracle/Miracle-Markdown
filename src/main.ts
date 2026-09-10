@@ -241,7 +241,9 @@ async function main() {
       editor.setTheme(dressWindow().document);
     }
     if ("sidebarVisible" in patch) syncSidebar();
-    if ("sidebarTab" in patch) sidebar.refresh();
+    // Not the tab: the sidebar is what changes it, and it has already drawn
+    // the panel and marked the current heading by the time this is called.
+    // Asking again would rebuild the rows and lose the mark.
     if ("folder" in patch) void tree.setFolder(settings.folder);
   }
 
