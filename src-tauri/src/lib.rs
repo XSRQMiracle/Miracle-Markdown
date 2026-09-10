@@ -56,7 +56,13 @@ fn write_file(path: String, contents: String) -> Result<(), String> {
 }
 
 /// One entry in a folder the sidebar is showing.
+///
+/// Named the way the webview reads them: Tauri serialises a command's return
+/// value with plain serde, which renames nothing, so without this the wire
+/// would carry `is_dir` while `platform.ts` asks for `isDir` — and every
+/// directory would arrive as `undefined`, that is, as a file.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FolderEntry {
     name: String,
     path: String,
