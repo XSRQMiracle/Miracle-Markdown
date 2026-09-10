@@ -294,6 +294,13 @@ export class Editor {
    * Read off the laid-out blocks rather than re-parsed, so the `y` each entry
    * carries is the one the page was actually painted at and the outline can
    * follow the scroll without a second layout.
+   *
+   * The text is the exception. A block laid raw — the one under the caret, and
+   * every block once source mode is on — is rendered as its own source, so its
+   * `rendered.text` still carries the `#` that writes the heading. The outline
+   * wants the heading, not the line, and it should not change under the reader
+   * because they turned source mode on, so a raw block is rendered again the
+   * way it would have been drawn.
    */
   outline(): OutlineEntry[] {
     if (this.dirty) this.relayout();
@@ -302,12 +309,27 @@ export class Editor {
       if (b.block.type !== "heading") continue;
       entries.push({
         level: b.block.level,
-        text: b.rendered.text.trim(),
+        text: b.raw ? this.headingText(b.block) : b.rendered.text.trim(),
         start: b.block.start,
         y: b.y,
       });
     }
     return entries;
+  }
+
+  /** Cached because `outline()` is asked again on every painted frame, and in
+   *  source mode every heading takes the slow path. */
+  private headingTexts = new Map<string, string>();
+
+  private headingText(block: Block): string {
+    const cached = this.headingTexts.get(block.source);
+    if (cached !== undefined) return cached;
+    const text = renderBlock(block, false, this.options.inline).text.trim();
+    // A document is a few hundred headings at most, and the key is the source
+    // line itself, so an edit replaces its entry rather than adding one.
+    if (this.headingTexts.size > 4096) this.headingTexts.clear();
+    this.headingTexts.set(block.source, text);
+    return text;
   }
 
   /** Put the caret at `offset` and bring it into view. */
