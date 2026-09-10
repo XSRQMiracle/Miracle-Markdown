@@ -206,12 +206,19 @@ export async function openExternal(url: string): Promise<boolean> {
   return true;
 }
 
-/** Protect both window close and application quit through one native event. */
+/**
+ * Protect both window close and application quit through one native event.
+ *
+ * Listening on this window rather than globally: closing one window asks only
+ * that window, and only a quit asks them all. A plain `listen` would take the
+ * broadcast either way and put this window's dialog on screen because some
+ * other window was being closed.
+ */
 export async function installDesktopCloseHandler(close: () => void): Promise<void> {
   const api = tauri();
   if (!api) return;
-  const { listen } = await import("@tauri-apps/api/event");
-  await listen("document-close-requested", close);
+  const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+  await getCurrentWebviewWindow().listen("document-close-requested", close);
   await api.invoke("protect_document");
 }
 

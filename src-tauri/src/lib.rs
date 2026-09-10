@@ -5,33 +5,77 @@
 //! has to cross the IPC boundary to be laid out. What the shell owns is the
 //! things a webview cannot do: the window, the menu and the filesystem.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, EventTarget, Manager};
+
+/// Which windows are holding a document that has to be asked about before it
+/// can go away, and which of them have already had their say.
+///
+/// Per window, not per application: a document lives in its window, so one
+/// window's answer says nothing about another's. Answering for all of them at
+/// once is how a clean window used to be able to quit the app out from under a
+/// dirty one.
+#[derive(Default)]
+struct CloseGuard(Mutex<GuardState>);
 
 #[derive(Default)]
-struct CloseGuard {
-    protected: AtomicBool,
-    approved: AtomicBool,
+struct GuardState {
+    protected: HashSet<String>,
+    approved: HashSet<String>,
 }
 
 impl CloseGuard {
-    fn should_prompt(&self) -> bool {
-        self.protected.load(Ordering::SeqCst) && !self.approved.load(Ordering::SeqCst)
+    fn should_prompt(&self, label: &str) -> bool {
+        let state = self.0.lock().unwrap();
+        state.protected.contains(label) && !state.approved.contains(label)
+    }
+
+    /// Is any window still waiting to be asked? This is the question a quit
+    /// has to answer, since it takes every window with it.
+    fn any_unanswered(&self) -> bool {
+        let state = self.0.lock().unwrap();
+        state
+            .protected
+            .iter()
+            .any(|label| !state.approved.contains(label))
+    }
+
+    fn forget(&self, label: &str) {
+        let mut state = self.0.lock().unwrap();
+        state.protected.remove(label);
+        state.approved.remove(label);
     }
 }
 
 // Enable interception only after the webview has installed its listener.
 #[tauri::command]
-fn protect_document(state: tauri::State<'_, CloseGuard>) {
-    state.protected.store(true, Ordering::SeqCst);
+fn protect_document(window: tauri::Window, state: tauri::State<'_, CloseGuard>) {
+    state
+        .0
+        .lock()
+        .unwrap()
+        .protected
+        .insert(window.label().to_string());
 }
 
+/// This window has finished asking, and may go.
+///
+/// It closes itself rather than exiting the application: the other windows
+/// hold their own documents and have not been asked. When the last one goes
+/// the runtime raises `ExitRequested` again with nothing left to protect, and
+/// the application ends there.
 #[tauri::command]
-fn finish_close(app: tauri::AppHandle, state: tauri::State<'_, CloseGuard>) {
-    state.approved.store(true, Ordering::SeqCst);
-    app.exit(0);
+fn finish_close(window: tauri::Window, state: tauri::State<'_, CloseGuard>) {
+    state
+        .0
+        .lock()
+        .unwrap()
+        .approved
+        .insert(window.label().to_string());
+    let _ = window.destroy();
 }
 
 mod file_save;
@@ -171,13 +215,28 @@ pub fn run() {
             protect_document,
             finish_close
         ])
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.state::<CloseGuard>().should_prompt() {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                if window.state::<CloseGuard>().should_prompt(window.label()) {
                     api.prevent_close();
-                    let _ = window.emit("document-close-requested", ());
+                    // To this window and no other. `emit` broadcasts, which
+                    // would put the unsaved-changes dialog in front of every
+                    // open document because one of them was being closed.
+                    let _ = window.emit_to(
+                        EventTarget::AnyLabel {
+                            label: window.label().to_string(),
+                        },
+                        "document-close-requested",
+                        (),
+                    );
                 }
             }
+            // A label is only unique for the life of the app, and a closed
+            // window must not go on counting as one that owes an answer.
+            tauri::WindowEvent::Destroyed => {
+                window.state::<CloseGuard>().forget(window.label());
+            }
+            _ => {}
         })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -188,9 +247,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building the application")
         .run(|app, event| {
-            // Application Quit (including Cmd-Q) can bypass window close.
+            // Application Quit (including Cmd-Q) can bypass window close, and
+            // it takes every window with it — so here the broadcast is right:
+            // each document gets asked, and each window that agrees closes
+            // itself. The app ends when the last one has gone.
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if app.state::<CloseGuard>().should_prompt() {
+                if app.state::<CloseGuard>().any_unanswered() {
                     api.prevent_exit();
                     let _ = app.emit("document-close-requested", ());
                 }
