@@ -83,6 +83,23 @@ export function findFace(id: string): BodyFaceOption | null {
 }
 
 /**
+ * The face this machine will actually draw for a stored choice.
+ *
+ * Settings travel — between two machines, or across an uninstall — so a
+ * remembered face is not necessarily one that is here. Answering with it
+ * anyway would put its stack in front of the CJK tail with nothing to match
+ * the Latin, which is the Song-face problem this module exists to avoid; so a
+ * face that is not installed resolves to none, and the page falls back to the
+ * theme's own. The setting is left alone rather than rewritten: plug the font
+ * back in, and the choice is still there.
+ */
+export function resolveFace(id: string): BodyFaceOption | null {
+  const face = findFace(id);
+  if (!face) return null;
+  return face.probe === null || fontAvailable(face.probe) ? face : null;
+}
+
+/**
  * Is this family actually installed?
  *
  * `document.fonts.check` answers "could I paint this string", not "is that

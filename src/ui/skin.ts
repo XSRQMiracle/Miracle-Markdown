@@ -18,7 +18,7 @@
  */
 
 import type { Theme } from "../engine/theme.js";
-import { faceStack, findFace } from "./fonts.js";
+import { faceStack, findFace, resolveFace } from "./fonts.js";
 
 export type SkinName =
   | "organic"
@@ -1016,7 +1016,7 @@ export function applySkin(
   // Native form controls and scrollbars inside the chrome follow this.
   root.style.colorScheme = mode;
 
-  const chosen = face === "theme" ? null : findFace(face);
+  const chosen = face === "theme" ? null : resolveFace(face);
   const palette: DocumentPalette = chosen
     ? {
         ...resolved.document,

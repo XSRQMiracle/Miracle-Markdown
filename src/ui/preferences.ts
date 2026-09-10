@@ -53,11 +53,14 @@ function segmented<T extends string>(
 ): { element: HTMLElement; set(value: T): void } {
   const element = document.createElement("div");
   element.className = "seg";
-  element.setAttribute("role", "tablist");
+  // A choice of one from three, which is a radio group — not a tab strip:
+  // `role="tab"` promises a `tabpanel` these do not have, and `aria-selected`
+  // is not a thing a plain button may carry.
+  element.setAttribute("role", "radiogroup");
   const buttons = new Map<T, HTMLButtonElement>();
   for (const [value, label] of values) {
     const b = button("", label);
-    b.setAttribute("role", "tab");
+    b.setAttribute("role", "radio");
     b.addEventListener("click", () => {
       set(value);
       onPick(value);
@@ -66,7 +69,7 @@ function segmented<T extends string>(
     element.appendChild(b);
   }
   const set = (value: T): void => {
-    for (const [key, b] of buttons) b.setAttribute("aria-selected", String(key === value));
+    for (const [key, b] of buttons) b.setAttribute("aria-checked", String(key === value));
   };
   set(selected);
   return { element, set };
@@ -227,8 +230,12 @@ export function buildPreferences(options: PreferencesOptions): Preferences {
     faceSelect.appendChild(option);
   }
   faceSelect.value = settings.bodyFace;
-  // A stored face that this machine does not have falls back rather than
-  // showing a blank select.
+  // A stored face this machine does not have is not in the list, which leaves
+  // the select blank. It used to be set to 跟随主题 and left at that — but the
+  // page was still being typeset in the missing face, and picking 跟随主题 by
+  // hand fired no `change` because that was already the value shown, so there
+  // was no way out of it. `applySkin` falls back to the theme face now, and
+  // this says the same thing.
   if (!faceSelect.value) faceSelect.value = "theme";
   faceSelect.addEventListener("change", () => onChange({ bodyFace: faceSelect.value as BodyFace }));
   appearance.appendChild(
@@ -268,7 +275,7 @@ export function buildPreferences(options: PreferencesOptions): Preferences {
   const navButtons = new Map<string, HTMLButtonElement>();
   const show = (id: string): void => {
     for (const pane of panes) pane.element.hidden = pane.id !== id;
-    for (const [key, b] of navButtons) b.setAttribute("aria-selected", String(key === id));
+    for (const [key, b] of navButtons) b.setAttribute("aria-current", String(key === id));
     if (id === "markdown") mathPanel.render();
   };
   for (const pane of panes) {

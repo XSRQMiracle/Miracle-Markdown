@@ -689,11 +689,11 @@
         text-align: left;
         cursor: pointer;
       }
-      .prefs-nav button:hover:not([aria-selected="true"]) {
+      .prefs-nav button:hover:not([aria-current="true"]) {
         background: var(--mm-fill-hover);
         color: var(--mm-text);
       }
-      .prefs-nav button[aria-selected="true"] {
+      .prefs-nav button[aria-current="true"] {
         background: var(--mm-fill-active);
         color: var(--mm-text);
         font-weight: 600;
@@ -801,7 +801,7 @@
         font: 500 11.5px/1.3 var(--mm-font-ui);
         cursor: pointer;
       }
-      .seg button[aria-selected="true"] {
+      .seg button[aria-checked="true"] {
         background: var(--mm-paper);
         color: var(--mm-text);
         font-weight: 600;
@@ -917,8 +917,8 @@
          The selected row loses its fill and gains a left rule; tabs become
          underlined text. */
       [data-skin="classical"] .side-tabs button[aria-selected="true"],
-      [data-skin="classical"] .prefs-nav button[aria-selected="true"],
-      [data-skin="classical"] .seg button[aria-selected="true"] {
+      [data-skin="classical"] .prefs-nav button[aria-current="true"],
+      [data-skin="classical"] .seg button[aria-checked="true"] {
         background: transparent;
         box-shadow: inset 0 -1px 0 var(--mm-accent);
       }
