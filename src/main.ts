@@ -272,6 +272,11 @@ async function main() {
     }
     const mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
+    // The editor sees a keystroke first and calls `preventDefault` on the ones
+    // it claims. This handler is the window's last resort, not a second bite:
+    // without the check a chord bound in both places runs both commands, which
+    // is what ⌘⇧L used to do — select the block *and* hide the sidebar.
+    if (e.defaultPrevented) return;
     const key = e.key.toLowerCase();
     if (key === "n") {
       // A second editor, which macOS shows as a second tab. The document stays
@@ -281,7 +286,9 @@ async function main() {
     } else if (key === ",") {
       e.preventDefault();
       preferences.open();
-    } else if (key === "l" && e.shiftKey) {
+    } else if (key === "b" && e.shiftKey) {
+      // Not ⌘⇧L: that is the editor's 选择段落或块, and the chrome does not get
+      // to take a chord the document already answers to.
       e.preventDefault();
       update({ sidebarVisible: !settings.sidebarVisible });
     } else if (key === "o") {

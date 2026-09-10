@@ -13,7 +13,7 @@ import { COMMANDS, type CommandGroup, type CommandId } from "../editor/commands.
 import { BINDINGS } from "../editor/keymap.js";
 
 /** Keys that are not commands — they are handled where the typing is. */
-const TYPING: Array<{ group: CommandGroup; chord: string; label: string }> = [
+export const TYPING: Array<{ group: CommandGroup; chord: string; label: string }> = [
   { group: "编辑", chord: "Enter", label: "换行；在列表中续下一项" },
   { group: "编辑", chord: "Shift+Enter", label: "段内强制换行" },
   { group: "编辑", chord: "Tab", label: "缩进；在表格中移到下一格" },
@@ -29,8 +29,11 @@ const TYPING: Array<{ group: CommandGroup; chord: string; label: string }> = [
   { group: "视图", chord: "Mod+g", label: "查找下一个（⇧ 为上一个）" },
   { group: "视图", chord: "Mod+Alt+f", label: "查找并替换" },
   { group: "视图", chord: "F1", label: "本表" },
+  { group: "视图", chord: "Mod+Shift+b", label: "显示 / 隐藏侧边栏" },
+  { group: "视图", chord: "Mod+,", label: "偏好设置" },
   { group: "文件", chord: "Mod+o", label: "打开" },
   { group: "文件", chord: "Mod+s", label: "保存（⇧ 为另存为）" },
+  { group: "文件", chord: "Mod+n", label: "新建标签页" },
 ];
 
 const ORDER: CommandGroup[] = ["格式", "段落", "选择", "移动", "编辑", "表格", "视图", "文件"];
