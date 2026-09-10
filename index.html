@@ -105,7 +105,16 @@
       }
       .icon-button:hover { background: var(--mm-fill-hover-soft); color: var(--mm-text); }
       /* A pressed toggle is a filled pill, an unpressed one an outline. The
-         sidebar button says whether the sidebar is there by being filled. */
+         sidebar button says whether the sidebar is there by being filled —
+         except that Broadsheet, Industry and Modernist all set `chrome` equal
+         to `paper`, so in six of the eleven skin modes the fill was the same
+         colour as the bar behind it and the button never changed at all. The
+         accent carries it instead: it is at least 2.9:1 against the bar in
+         every mode, which the paper step is not. */
+      .icon-button[aria-pressed="true"] {
+        border-color: var(--mm-accent);
+        color: var(--mm-accent);
+      }
       .icon-button[aria-pressed="false"] { background: transparent; }
       .icon-button.ghost { border-color: transparent; background: transparent; }
       .icon-button.ghost:hover { background: var(--mm-fill-hover-chrome); color: var(--mm-text); }
@@ -777,7 +786,12 @@
       .prefs-field .control { flex: 0 0 auto; padding-top: 1px; }
 
       /* Segmented control — one row of pills in a trough. */
-      .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--mm-radius-pill); background: var(--mm-fill-active); }
+      /* `--mm-tint` and not `--mm-fill-active`: the trough carries the two
+         unselected labels, and `fill-active` is a selection colour — in
+         Modernist it *is* the accent, which put 深色 at 1.81:1 on red. Tint is
+         the quiet fill, and `--mm-text3` clears 4.5:1 on it in all eleven
+         skin modes. `--mm-paper` still lifts the selected pill off it. */
+      .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--mm-radius-pill); background: var(--mm-tint); }
       .seg button {
         padding: 4px 12px;
         border: 0;
@@ -927,9 +941,14 @@
         background: transparent;
         box-shadow: inset 2px 0 0 var(--mm-accent);
       }
+      /* Reserved on every row: added only on selection it would make the
+         current row 2px taller than its neighbours, and the outline moves its
+         mark down the list as the reader scrolls — so every row below the
+         current one would step 2px each time a heading passed the fold. */
+      [data-skin="industry"] .tree-row { border: 1px solid transparent; }
       [data-skin="industry"] .tree-row.is-current {
         background: transparent;
-        border: 1px solid var(--mm-accent);
+        border-color: var(--mm-accent);
       }
       [data-skin="modernist"] .tree-row.is-current {
         background: var(--mm-accent);
@@ -999,10 +1018,11 @@
         color: var(--mm-accent);
         border-bottom: 2px solid var(--mm-accent);
       }
+      [data-skin="industry"] .outline-row { border: 1px solid transparent; }
       [data-skin="industry"] .outline-row[aria-current="true"] {
         position: relative;
         background: transparent;
-        border: 1px solid var(--mm-accent);
+        border-color: var(--mm-accent);
       }
       [data-skin="industry"] .outline-row[aria-current="true"]::before,
       [data-skin="industry"] .outline-row[aria-current="true"]::after {
