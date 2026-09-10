@@ -107,10 +107,22 @@ async function main() {
     catch (error) { await showDocumentError(error); }
     if (!session.isClosing) editor.focus();
   };
+  /**
+   * Save, and then tell the tree what changed on disk.
+   *
+   * The tree lists a folder once and keeps it, so without this a save leaves
+   * it showing the size and date the file had when the folder was opened —
+   * and a 另存为 into that folder writes a file the tree has never heard of.
+   */
+  const saveAction = (as: boolean) => fileAction(async () => {
+    const saved = await session.save(as);
+    if (saved) await tree.refresh();
+    return saved;
+  });
   newWindowButton.addEventListener("click", () => void newWindow());
   openButton.addEventListener("click", () => void fileAction(() => session.open()));
-  saveButton.addEventListener("click", () => void fileAction(() => session.save()));
-  saveAsButton.addEventListener("click", () => void fileAction(() => session.save(true)));
+  saveButton.addEventListener("click", () => void saveAction(false));
+  saveAsButton.addEventListener("click", () => void saveAction(true));
 
   // ── Sidebar ───────────────────────────────────────────────────────────────
   const tree = buildFileTree({
@@ -296,7 +308,7 @@ async function main() {
       void fileAction(() => session.open());
     } else if (key === "s") {
       e.preventDefault();
-      void fileAction(() => session.save(e.shiftKey));
+      void saveAction(e.shiftKey);
     } else if (key === "f") {
       // ⌥⌘F opens the same bar with the replacement field ready, which is
       // where the platform puts "find and replace".
