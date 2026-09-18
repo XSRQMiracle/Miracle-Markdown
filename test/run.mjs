@@ -42,7 +42,8 @@ const TESTS = [
   "shortcut-sheet",
   // The chrome around it.
   "outline-cache",
-  // The engine, which boots WebAssembly and is the slowest of them.
+  // Images, and then the engine, which boots WebAssembly and is the slowest.
+  "image-url",
   "layout",
   "math-lifecycle",
   "math-parse",

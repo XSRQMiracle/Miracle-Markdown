@@ -24,6 +24,7 @@ const BROKEN: LoadedImage = { status: "error", width: 0, height: 0, source: null
 
 const cache = new Map<string, LoadedImage>();
 const listeners = new Set<() => void>();
+const reported = new Set<string>();
 
 /** Called when an image finishes loading, so the document can re-typeset. */
 export function onImageSettled(listener: () => void): () => void {
@@ -33,6 +34,33 @@ export function onImageSettled(listener: () => void): () => void {
 
 function settled(): void {
   for (const listener of listeners) listener();
+}
+
+/**
+ * Undo the percent-encoding of a `file:` URL's path, one escape at a time.
+ *
+ * `decodeURI` is all-or-nothing: a single stray percent anywhere in the string
+ * — `100%.png`, or a truncated `%E4%B8` — makes it throw `URIError` and lose
+ * the whole path, which is how one mistyped address used to take the entire
+ * document's layout with it. A browser handed `file:///tmp/100%.png` does not
+ * refuse the URL; it leaves the percent standing and opens the file of that
+ * name, because a percent that begins no valid escape is simply a percent.
+ *
+ * Decoding each maximal run of well-formed `%XX` on its own reproduces that.
+ * A run rather than a single escape, because one non-ASCII character is
+ * several bytes and only decodes correctly when its escapes are handed over
+ * together.
+ */
+function decodePath(path: string): string {
+  return path.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    try {
+      return decodeURI(run);
+    } catch {
+      // Hex digits that spell no character — an incomplete UTF-8 sequence.
+      // The bytes as written are the best guess at what was meant.
+      return run;
+    }
+  });
 }
 
 /**
@@ -54,7 +82,7 @@ export function resolveSource(src: string): string {
   if (!convert) return trimmed;
 
   const path = /^file:\/\//i.test(trimmed)
-    ? decodeURI(trimmed.replace(/^file:\/\//i, ""))
+    ? decodePath(trimmed.replace(/^file:\/\//i, ""))
     : trimmed;
   // Only an absolute path can be resolved without knowing where the document
   // lives; a relative one is left for the webview to interpret.
@@ -66,7 +94,26 @@ export function resolveSource(src: string): string {
  * reports "loading"; `onImageSettled` fires when there is more to say.
  */
 export function requestImage(src: string): LoadedImage {
-  const url = resolveSource(src);
+  let url: string;
+  try {
+    url = resolveSource(src);
+  } catch (error) {
+    // Layout is one synchronous pass over the whole document, with no frame
+    // between this call and the paragraph after it, so anything thrown here
+    // does not spoil one picture — it abandons the document and leaves the
+    // page showing whatever was last drawn. An address the host cannot make
+    // sense of is exactly what the broken placeholder is for, and treating it
+    // as one is the only outcome that keeps the rest of the prose on screen.
+    //
+    // Saying so is the other half: a guard that quietly returned a placeholder
+    // would let a real defect in `resolveSource` pass for a missing file for
+    // ever. Once per address, because this runs on every keystroke.
+    if (!reported.has(src)) {
+      reported.add(src);
+      console.warn("could not resolve the image address", src, error);
+    }
+    return BROKEN;
+  }
   if (!url) return BROKEN;
 
   const hit = cache.get(url);
@@ -95,6 +142,10 @@ export function requestImage(src: string): LoadedImage {
 /** Forget every image, so a document reload re-fetches rather than reusing. */
 export function invalidateImages(): void {
   cache.clear();
+  // A reload is the reader trying again, so the complaint is worth repeating:
+  // the alternative silences the one message that explains a blank picture for
+  // the rest of the session.
+  reported.clear();
 }
 
 /**
