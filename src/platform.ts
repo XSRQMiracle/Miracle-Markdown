@@ -27,6 +27,8 @@ export interface OpenResult {
   path: string | null;
   contents: string;
   lineEnding: LineEnding;
+  /** Whether the file on disk began with a byte order mark. */
+  bom: boolean;
 }
 
 /** Ask the user for a markdown file and return its contents. */
@@ -42,7 +44,7 @@ export async function openDocument(): Promise<(() => Promise<OpenResult>) | null
     return async () => {
       const source = await api.invoke<string>("read_file", { path: picked });
       const decoded = decodeDocumentText(source);
-      return { path: picked, contents: decoded.text, lineEnding: decoded.lineEnding };
+      return { path: picked, contents: decoded.text, lineEnding: decoded.lineEnding, bom: decoded.bom };
     };
   }
 
@@ -55,7 +57,7 @@ export async function openDocument(): Promise<(() => Promise<OpenResult>) | null
       if (!file) return resolve(null);
       resolve(async () => {
         const decoded = decodeDocumentText(await file.text());
-        return { path: file.name, contents: decoded.text, lineEnding: decoded.lineEnding };
+        return { path: file.name, contents: decoded.text, lineEnding: decoded.lineEnding, bom: decoded.bom };
       });
     });
     input.addEventListener("cancel", () => resolve(null));
@@ -103,7 +105,7 @@ export async function readDocumentAt(path: string): Promise<OpenResult> {
   const api = tauri();
   if (!api) throw new Error("此环境无法读取文件");
   const decoded = decodeDocumentText(await api.invoke<string>("read_file", { path }));
-  return { path, contents: decoded.text, lineEnding: decoded.lineEnding };
+  return { path, contents: decoded.text, lineEnding: decoded.lineEnding, bom: decoded.bom };
 }
 
 /** Save the document, prompting for a location when there is not one yet. */
@@ -111,8 +113,9 @@ export async function saveDocument(
   path: string | null,
   contents: string,
   lineEnding: LineEnding = "\n",
+  bom = false,
 ): Promise<{ path: string | null } | null> {
-  const encoded = encodeDocumentText(contents, lineEnding);
+  const encoded = encodeDocumentText(contents, lineEnding, bom);
   const api = tauri();
   if (api) {
     let target = path;

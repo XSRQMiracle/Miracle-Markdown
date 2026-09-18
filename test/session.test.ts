@@ -16,7 +16,7 @@ function setup(overrides: Partial<SessionPorts> = {}) {
   const writes: unknown[] = [];
   const ports: SessionPorts = {
     open: async () => async () => opened,
-    save: async (path, contents, eol) => { writes.push([path, contents, eol]); return { path: path ?? 'new.md' }; },
+    save: async (path, contents, eol, bom) => { writes.push([path, contents, eol, bom]); return { path: path ?? 'new.md' }; },
     confirmLeave: async () => { assert.ok(decisions.length, 'unexpected unsaved prompt'); return decisions.shift()!; },
     loaded: doc => loaded.push(doc.contents), changed: () => {}, ...overrides,
   };
@@ -39,7 +39,7 @@ function setup(overrides: Partial<SessionPorts> = {}) {
   ports.save = savePort; s.updateText('two'); const second = s.save(); await tick();
   assert.equal(writes.length, 1); gate.resolve({path:'chosen.md'});
   await Promise.all([first, second]);
-  assert.deepEqual(writes, [[null,'one','\r\n'],['chosen.md','two','\r\n']]);
+  assert.deepEqual(writes, [[null,'one','\r\n',false],['chosen.md','two','\r\n',false]]);
   assert.equal(s.path, 'chosen.md'); assert.equal(s.dirty, false);
 }
 {

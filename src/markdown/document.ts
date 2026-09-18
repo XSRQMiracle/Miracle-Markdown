@@ -6,7 +6,20 @@ export interface DecodedDocument {
   text: string;
   /** The predominant convention in the source, retained for saving. */
   lineEnding: LineEnding;
+  /** Whether the file began with a byte order mark, retained for saving. */
+  bom: boolean;
 }
+
+/**
+ * The byte order mark, as it arrives once the bytes have been decoded.
+ *
+ * A UTF-8 file has no byte order to mark, but Windows editors write one anyway
+ * as a note that the file is UTF-8 at all, and a decoder hands it on as an
+ * ordinary U+FEFF at the head of the string. Every block rule in the parser
+ * anchors at the start of a line, so one invisible character in front of a `#`
+ * is the difference between a heading and a paragraph.
+ */
+const BOM = "﻿";
 
 /**
  * Convert external text to the editor's canonical representation.
@@ -55,16 +68,39 @@ export function detectLineEnding(text: string): LineEnding {
   return best;
 }
 
-/** Decode text at an I/O boundary while remembering how to write it back. */
+/**
+ * Decode text at an I/O boundary while remembering how to write it back.
+ *
+ * Only a leading mark is taken off, and it is taken off here rather than in
+ * the parser: U+FEFF is also a legal zero width no-break space, so a copy of
+ * it further into the prose is the author's character and has to survive. One
+ * boundary owning the question is what keeps the desktop and the browser from
+ * disagreeing about what the first line of a file says.
+ */
 export function decodeDocumentText(source: string): DecodedDocument {
+  const bom = source.startsWith(BOM);
+  const body = bom ? source.slice(BOM.length) : source;
   return {
-    text: normalizeLineEndings(source),
-    lineEnding: detectLineEnding(source),
+    text: normalizeLineEndings(body),
+    lineEnding: detectLineEnding(body),
+    bom,
   };
 }
 
-/** Encode canonical editor text using the document's original convention. */
-export function encodeDocumentText(text: string, lineEnding: LineEnding): string {
+/**
+ * Encode canonical editor text using the document's original convention.
+ *
+ * The mark goes back on for the same reason the line endings do: opening a
+ * file and saving it again should not quietly rewrite bytes the author did not
+ * ask about, and on Windows that mark is how some tools recognise the file as
+ * UTF-8 at all.
+ */
+export function encodeDocumentText(
+  text: string,
+  lineEnding: LineEnding,
+  bom = false,
+): string {
   const canonical = normalizeLineEndings(text);
-  return lineEnding === "\n" ? canonical : canonical.replace(/\n/g, lineEnding);
+  const body = lineEnding === "\n" ? canonical : canonical.replace(/\n/g, lineEnding);
+  return bom ? BOM + body : body;
 }

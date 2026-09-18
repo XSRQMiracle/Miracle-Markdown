@@ -4,12 +4,14 @@ export interface SessionDocument {
   path: string | null;
   contents: string;
   lineEnding: LineEnding;
+  /** Whether the file began with a byte order mark, so saving can restore it. */
+  bom?: boolean;
 }
 
 export type LeaveDecision = "save" | "discard" | "cancel";
 export interface SessionPorts {
   open(): Promise<(() => Promise<SessionDocument>) | null>;
-  save(path: string | null, contents: string, lineEnding: LineEnding): Promise<{ path: string | null } | null>;
+  save(path: string | null, contents: string, lineEnding: LineEnding, bom: boolean): Promise<{ path: string | null } | null>;
   confirmLeave(name: string): Promise<LeaveDecision>;
   loaded(document: SessionDocument): void;
   changed(): void;
@@ -22,6 +24,7 @@ interface DocumentState {
   savedRevision: number;
   path: string | null;
   lineEnding: LineEnding;
+  bom: boolean;
 }
 
 /** Own the identity of a document and the exact snapshot last written for it. */
@@ -42,7 +45,7 @@ export class DocumentSession {
     const text = normalizeLineEndings(document.contents);
     return {
       text, savedText: text, revision: 0, savedRevision: 0,
-      path: document.path, lineEnding: document.lineEnding,
+      path: document.path, lineEnding: document.lineEnding, bom: document.bom ?? false,
     };
   }
 
@@ -69,13 +72,13 @@ export class DocumentSession {
     if (this.closing) return Promise.resolve(false);
     this.saveEpoch++;
     const document = this.current;
-    const { text, revision, lineEnding } = document;
+    const { text, revision, lineEnding, bom } = document;
     this.pendingSaves++;
     this.ports.changed();
     const operation = this.saveTail.then(async () => {
       // Resolve the destination when this queued write begins: a preceding
       // Save As may have established a new path for this very document.
-      const saved = await this.ports.save(saveAs ? null : document.path, text, lineEnding);
+      const saved = await this.ports.save(saveAs ? null : document.path, text, lineEnding, bom);
       if (!saved) return false;
       document.path = saved.path;
       document.savedText = text;
