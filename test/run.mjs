@@ -30,6 +30,7 @@ const TESTS = [
   // The editor: selection, input, history, and the caret.
   "editor-transactions",
   "selection",
+  "unicode-delete",
   "search",
   "scroll",
   "links",

@@ -1788,7 +1788,15 @@ export class Editor {
         e.preventDefault();
         if (lo !== hi) this.replace(lo, hi, "");
         // An empty pair was inserted in one keystroke, so it goes in one too.
-        else if (lo > 0 && AUTO_CLOSE[this.text[lo - 1]] === this.text[lo]) {
+        // Both halves have to be characters that are really there for that to
+        // be the question being asked: past the last one `this.text[lo]` reads
+        // undefined, and so does the lookup for anything that opens nothing,
+        // so without the bound every unpaired character at the end of the
+        // document matched itself against the end of the document and was
+        // removed one code unit at a time. For ASCII that happened to look
+        // right; for an emoji it left half a surrogate pair standing.
+        else if (lo > 0 && lo < this.text.length
+          && AUTO_CLOSE[this.text[lo - 1]] === this.text[lo]) {
           this.replace(lo - 1, lo + 1, "", true);
         } else if (lo > 0) this.replace(this.stepBack(lo), lo, "", true);
         return;
@@ -1966,7 +1974,11 @@ export class Editor {
     return this.blockAt(offset)?.type ?? null;
   }
 
-  /** Move by one grapheme, so surrogate pairs are not split. */
+  /** Move by one code point, so a surrogate pair is never split. A cluster
+   *  held together by a joiner still comes apart one code point at a time,
+   *  which is a deliberate difference: half a character is corruption, whereas
+   *  how much of a family emoji one Backspace should take is a question the
+   *  platforms themselves answer differently. */
   private stepBack(at: number): number {
     if (at <= 0) return 0;
     const before = this.text.codePointAt(at - 2);
