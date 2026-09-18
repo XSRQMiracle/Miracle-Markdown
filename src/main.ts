@@ -9,6 +9,7 @@ import { Editor, type StatusInfo } from "./editor/editor.js";
 import { initEngine } from "./engine/typeset.js";
 import { SAMPLE } from "./sample.js";
 import {
+  allowImagesIn,
   finishDesktopClose,
   installDesktopCloseHandler,
   isDesktop,
@@ -22,7 +23,7 @@ import {
   saveDocument,
 } from "./platform.js";
 import { DEFAULT_MATH_OPTIONS, initMath, type MathOptions } from "./engine/mathjax.js";
-import { onImageSettled } from "./engine/images.js";
+import { directoryOf, imageBase, onImageSettled, setImageBase } from "./engine/images.js";
 import { DocumentSession } from "./markdown/session.js";
 import { confirmUnsavedDocument, showDocumentError } from "./ui/document-dialog.js";
 import { buildFindBar } from "./ui/find-bar.js";
@@ -79,6 +80,22 @@ async function main() {
   // at startup so cached placeholder layouts are invalidated immediately.
   onImageSettled(() => editor.invalidateMath());
 
+  /**
+   * Point image resolution at a folder, once the shell will serve from it.
+   *
+   * The order matters. The base moves only after the grant has landed, so no
+   * picture is asked for while the asset protocol would still refuse it: a
+   * refusal is cached against the resolved URL and never retried, so a request
+   * made a moment too early leaves the image broken for the rest of the
+   * session.
+   */
+  const rebaseImages = (folder: string) => {
+    if (folder === imageBase()) return;
+    void allowImagesIn(folder).then(() => {
+      if (setImageBase(folder)) editor.invalidateMath();
+    });
+  };
+
   // ── The document's identity ───────────────────────────────────────────────
   let sessionReady = false;
   const syncSession = () => {
@@ -88,6 +105,10 @@ async function main() {
     const folder = session.path?.replace(/[\\/][^\\/]*$/, "") ?? "";
     docPath.textContent = folder;
     docPath.title = session.path ?? "";
+    // Not the string above: a host that reports a bare filename has no folder
+    // to offer, and measuring images against a filename would be worse than
+    // measuring them against nothing.
+    rebaseImages(directoryOf(session.path));
     docDirty.hidden = !session.dirty;
     tree.setCurrent(session.path, session.dirty);
     openButton.disabled = session.transitioning || session.isClosing;
@@ -155,6 +176,7 @@ async function main() {
     filesTab.title = canBrowseFiles() ? "文件树" : "浏览器预览下没有文件系统";
   }
   void tree.setFolder(settings.folder);
+  if (settings.folder) void allowImagesIn(settings.folder);
   // A remembered tab this host cannot show would leave the sidebar on a panel
   // nothing can fill.
   if (settings.sidebarTab === "files" && !canBrowseFiles()) sidebar.setTab("outline");
@@ -244,7 +266,10 @@ async function main() {
     // Not the tab: the sidebar is what changes it, and it has already drawn
     // the panel and marked the current heading by the time this is called.
     // Asking again would rebuild the rows and lose the mark.
-    if ("folder" in patch) void tree.setFolder(settings.folder);
+    if ("folder" in patch) {
+      void tree.setFolder(settings.folder);
+      if (settings.folder) void allowImagesIn(settings.folder);
+    }
   }
 
   // With `跟随系统`, the OS flipping appearance has to reach both halves.

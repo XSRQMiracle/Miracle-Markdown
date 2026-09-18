@@ -6,6 +6,7 @@
 //! things a webview cannot do: the window, the menu and the filesystem.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -180,6 +181,55 @@ fn list_folder(path: String) -> Result<Vec<FolderEntry>, String> {
     Ok(entries)
 }
 
+/// The folder a `../images/photo.png` is measured against.
+///
+/// Climbing one level out of the document's own folder is what makes the
+/// commonest layout in the wild work, a `posts` and an `images` sitting beside
+/// each other. A document that lives straight in a home directory or at the
+/// top of a disk is not part of a project, though, and climbing out of one of
+/// those would hand the renderer somebody's whole world for the sake of a
+/// markdown convention. Those are the cases this refuses.
+fn project_root<'a>(directory: &'a Path, home: Option<&Path>) -> Option<&'a Path> {
+    let parent = directory.parent()?;
+    let grandparent = parent.parent()?;
+    if grandparent.parent().is_none() {
+        return None;
+    }
+    if home.is_some_and(|home| parent == home) {
+        return None;
+    }
+    Some(parent)
+}
+
+/// Let the asset protocol serve the pictures that belong to a folder.
+///
+/// The scope is deliberately not written in `tauri.conf.json`. A static one
+/// would have to be wide enough for every document the user will ever open,
+/// which means the whole filesystem, and that is a grant nobody can take back.
+/// Extending it as documents arrive means the renderer reaches exactly the
+/// folders the reader has themselves pointed the application at — the one the
+/// open document lives in, the project folder around it, and whatever the
+/// sidebar is showing — and nothing else. Granting the same folder twice costs
+/// nothing; the scope is a set of patterns, not a list.
+#[tauri::command]
+fn allow_images_in(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let directory = Path::new(&path);
+    if !directory.is_dir() {
+        return Err(format!("找不到文件夹 {path}"));
+    }
+    let scope = app.asset_protocol_scope();
+    let home = app.path().home_dir().ok();
+    scope
+        .allow_directory(directory, true)
+        .map_err(|e| format!("无法读取 {path} 中的图片：{e}"))?;
+    if let Some(root) = project_root(directory, home.as_deref()) {
+        scope
+            .allow_directory(root, true)
+            .map_err(|e| format!("无法读取 {} 中的图片：{e}", root.display()))?;
+    }
+    Ok(())
+}
+
 /// Fonts the user actually has, so the settings panel can offer real choices
 /// rather than a stack that may silently fall back.
 #[tauri::command]
@@ -211,6 +261,7 @@ pub fn run() {
             read_file,
             write_file,
             list_folder,
+            allow_images_in,
             suggested_fonts,
             protect_document,
             finish_close

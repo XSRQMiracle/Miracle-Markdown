@@ -64,29 +64,156 @@ function decodePath(path: string): string {
 }
 
 /**
+ * A URL scheme, deliberately requiring two characters before the colon.
+ *
+ * RFC 3986 permits a one-letter scheme, but none has ever been registered and
+ * `C:\photo.png` is not one — reading a drive letter as a scheme is exactly how
+ * an absolute Windows path came to be handed to the webview untouched.
+ */
+const SCHEME = /^[a-z][a-z0-9+.-]+:/i;
+/** A drive-rooted Windows path, captured so the root can be put back. */
+const DRIVE = /^([A-Za-z]:)[\\/]/;
+
+/** Where a relative image destination is measured from; "" when unknown. */
+let base = "";
+
+/**
+ * The folder part of a path, or "" when the path names no folder at all.
+ *
+ * A browser's file input hands back a bare name with no directory in it, and
+ * treating that name as a folder would measure every relative image against a
+ * folder that does not exist. Stripping the last component is only right when
+ * there was a separator to strip.
+ */
+export function directoryOf(path: string | null | undefined): string {
+  if (!path) return "";
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (cut < 0) return "";
+  return cut === 0 ? "/" : path.slice(0, cut);
+}
+
+/**
+ * Tell the resolver which document the relative destinations belong to.
+ *
+ * A markdown image is nearly always written relative to the file it sits in,
+ * so without this the commonest case cannot be resolved at all. Reports
+ * whether the folder actually moved, because the cache is keyed by resolved
+ * URL and a document that changes folder makes every relative entry in it
+ * wrong.
+ */
+export function setImageBase(directory: string): boolean {
+  const next = directory.replace(/[\\/]+$/, "") || (directory.startsWith("/") ? "/" : "");
+  if (next === base) return false;
+  base = next;
+  invalidateImages();
+  return true;
+}
+
+/** The folder relative destinations are currently measured from. */
+export function imageBase(): string {
+  return base;
+}
+
+/**
+ * Collapse "." and ".." and any repeated separators out of a path.
+ *
+ * Not cosmetic: Tauri's asset protocol refuses outright — 403, with nothing in
+ * the webview to say why — any request whose path still holds a parent
+ * component, so `../images/photo.png` has to be resolved here or not at all.
+ */
+function normalise(path: string): string {
+  const drive = DRIVE.exec(path);
+  const rooted = drive !== null || path.startsWith("/") || path.startsWith("\\");
+  const separator = drive ? "\\" : "/";
+  const body = drive ? path.slice(drive[0].length) : path.replace(/^[\\/]/, "");
+  const parts: string[] = [];
+  for (const part of body.split(/[\\/]+/)) {
+    if (!part || part === ".") continue;
+    // Climbing past the root stays at the root, which is what every filesystem
+    // does with "/..", rather than escaping into nonsense.
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  const joined = parts.join(separator);
+  if (drive) return `${drive[1]}${separator}${joined}`;
+  return rooted ? `/${joined}` : joined;
+}
+
+/**
  * Resolve a markdown image destination to something the browser can fetch.
  *
  * A webview cannot read `file://` directly, so a local path has to go through
- * Tauri's asset protocol. Relative paths are left alone: resolving one needs
- * the document's own location, which the editor does not carry yet, and
- * guessing would silently load the wrong file.
+ * Tauri's asset protocol, and that protocol will only serve an absolute path
+ * with no parent components left in it. Everything here is the arithmetic of
+ * getting from what an author writes to that: a relative path measured against
+ * the document's own folder, a drive letter told apart from a scheme, and
+ * percent escapes undone the way a browser undoes them.
+ *
+ * Split out from `resolveSource` so that the document's folder and the host's
+ * converter are arguments rather than module state, which is what makes the
+ * rules above testable without a webview.
  */
-export function resolveSource(src: string): string {
+export function resolveImageSource(
+  src: string,
+  documentBase: string,
+  convert: ((path: string) => string) | null,
+): string {
   const trimmed = src.trim();
   if (!trimmed) return "";
-  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !/^file:/i.test(trimmed)) return trimmed;
 
+  // The drive-letter test comes first because `C:\photo.png` satisfies any
+  // reasonable scheme test as well, and whichever runs first decides.
+  const drive = DRIVE.test(trimmed);
+  const isFile = /^file:/i.test(trimmed);
+  if (!drive && !isFile && SCHEME.test(trimmed)) return trimmed;
+
+  let path = trimmed;
+  if (isFile) {
+    const authority = /^file:\/\/([^/]*)/i.exec(path)?.[1];
+    // A file URL with a host names a share on another machine, which the asset
+    // protocol cannot serve; saying so is better than quietly resolving the
+    // host as though it were a folder.
+    if (authority && authority.toLowerCase() !== "localhost") return "";
+    path = path.replace(/^file:(\/\/[^/]*)?/i, "").replace(/^\/([A-Za-z]:)/, "$1");
+  }
+  // CommonMark calls a destination a URL, so a space arrives as %20 whether or
+  // not the address names a local file. `decodeURI` leaves the reserved
+  // characters alone, so an encoded separator stays encoded and cannot invent
+  // a path component below.
+  path = decodePath(path);
+
+  const absolute = DRIVE.test(path) || path.startsWith("/") || path.startsWith("\\");
+  if (!absolute) {
+    // Without a folder to measure from, guessing would silently load the wrong
+    // file; handing the destination back lets a plain browser serve it.
+    if (!documentBase) return trimmed;
+    path = `${documentBase}/${path}`;
+  }
+
+  const resolved = normalise(path);
+  return convert ? convert(resolved) : resolved;
+}
+
+/**
+ * Resolve a destination using the document's folder and the running host.
+ *
+ * Remote images are deliberately left to fail. The destination comes out of a
+ * document the reader may not have written, and an `img` pointed at https is
+ * an unauthenticated request fired the moment the file is opened: it reports
+ * the reader's address and the time they opened it, and a URL made unique per
+ * recipient reports which of them it was. A tracking pixel is not something a
+ * markdown editor should fetch on the author's behalf, so the content policy
+ * grants no remote image source and such a picture shows its placeholder.
+ * Following the link still opens it in a browser, which is a decision the
+ * reader makes rather than one the document makes for them.
+ */
+export function resolveSource(src: string): string {
   const internals = (window as unknown as { __TAURI_INTERNALS__?: { convertFileSrc?: (p: string) => string } })
     .__TAURI_INTERNALS__;
-  const convert = internals?.convertFileSrc;
-  if (!convert) return trimmed;
-
-  const path = /^file:\/\//i.test(trimmed)
-    ? decodePath(trimmed.replace(/^file:\/\//i, ""))
-    : trimmed;
-  // Only an absolute path can be resolved without knowing where the document
-  // lives; a relative one is left for the webview to interpret.
-  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) ? convert(path) : trimmed;
+  return resolveImageSource(src, base, internals?.convertFileSrc ?? null);
 }
 
 /**

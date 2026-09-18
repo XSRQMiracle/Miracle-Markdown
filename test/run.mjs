@@ -43,6 +43,7 @@ const TESTS = [
   // The chrome around it.
   "outline-cache",
   // Images, and then the engine, which boots WebAssembly and is the slowest.
+  "image-source",
   "image-url",
   "layout",
   "math-lifecycle",

@@ -108,6 +108,27 @@ export async function readDocumentAt(path: string): Promise<OpenResult> {
   return { path, contents: decoded.text, lineEnding: decoded.lineEnding, bom: decoded.bom };
 }
 
+/**
+ * Let the shell serve the pictures in a folder to the renderer.
+ *
+ * The asset protocol starts with an empty scope, so this is what makes a local
+ * image loadable at all. It is called for the folder the open document lives
+ * in and for the folder the sidebar is showing, which are the two places the
+ * reader has actually pointed the application at. A host with no asset
+ * protocol — a plain browser — has nothing to grant.
+ */
+export async function allowImagesIn(folder: string): Promise<void> {
+  const api = tauri();
+  if (!api || !folder) return;
+  try {
+    await api.invoke("allow_images_in", { path: folder });
+  } catch (error) {
+    // A folder that has since moved is not worth a dialog: the pictures in it
+    // will show their placeholders, which says the same thing in place.
+    console.warn("could not open the image folder", error);
+  }
+}
+
 /** Save the document, prompting for a location when there is not one yet. */
 export async function saveDocument(
   path: string | null,
