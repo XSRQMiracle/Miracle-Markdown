@@ -32,6 +32,7 @@ const TESTS = [
   "selection",
   "unicode-delete",
   "caret-collapse",
+  "document-switch",
   "search",
   "scroll",
   "links",

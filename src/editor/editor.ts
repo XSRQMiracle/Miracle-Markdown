@@ -374,6 +374,13 @@ export class Editor {
     this.invalidate();
   }
 
+  /**
+   * Show a different document.
+   *
+   * Everything that belonged to the document being replaced leaves with it:
+   * the selection, the history, the sticky column for vertical movement, and
+   * the window's own position over the page.
+   */
   setText(text: string): void {
     const wasComposing = this.composing !== null;
     this.composing = null;
@@ -382,6 +389,20 @@ export class Editor {
     this.text = normalizeLineEndings(text);
     this.selStart = this.selEnd = 0;
     this.caretAffinity = "downstream";
+    this.preferredX = null;
+    // A document is read from its first line, so the window goes back to the
+    // top along with the caret. Assigned rather than scrolled: `scrollTo`
+    // would clamp against the height of the document that is leaving, which
+    // has nothing to say about the one arriving. Leaving it to the clamp at
+    // the end of the next layout is what failed here, because that clamp only
+    // ever lowers an offset — a shorter document corrected itself and a second
+    // long one did not, so the reader was left looking at the middle of a page
+    // whose top every keystroke was editing.
+    this.scrollTop = 0;
+    // Nobody has placed a caret in a document that has only just been opened,
+    // whatever they were doing in the one before it. Left set, this is what
+    // greets a newly opened document's first paragraph by showing it as markup.
+    this.interacted = false;
     this.undoStack = [];
     this.redoStack = [];
     this.lastEditAt = -Infinity;
