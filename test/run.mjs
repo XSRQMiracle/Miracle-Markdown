@@ -40,6 +40,8 @@ const TESTS = [
   "punctuation",
   "coalesce",
   "shortcut-sheet",
+  // The chrome around it.
+  "outline-cache",
   // The engine, which boots WebAssembly and is the slowest of them.
   "layout",
   "math-lifecycle",

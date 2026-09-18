@@ -320,8 +320,19 @@ export class Editor {
   /** Cached because `outline()` is asked again on every painted frame, and in
    *  source mode every heading takes the slow path. */
   private headingTexts = new Map<string, string>();
+  private headingGeneration = -1;
 
   private headingText(block: Block): string {
+    // The answer depends on the inline options as much as on the line: with
+    // `highlight` off `# ==key==` is four equals signs and a word, and with it
+    // on it is the word alone. Folding the options into the key would mean
+    // serialising them on every painted frame, so the generation the
+    // typesetter already keeps is compared instead — it moves when the options
+    // do, and the blocks this cache shadows are rebuilt at the same moment.
+    if (this.headingGeneration !== this.typesetter.generation) {
+      this.headingTexts.clear();
+      this.headingGeneration = this.typesetter.generation;
+    }
     const cached = this.headingTexts.get(block.source);
     if (cached !== undefined) return cached;
     const text = renderBlock(block, false, this.options.inline).text.trim();

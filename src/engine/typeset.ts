@@ -571,6 +571,19 @@ export class Typesetter {
     return this.measurer.ready;
   }
 
+  /**
+   * Which round of options and theme everything cached here belongs to.
+   *
+   * Caches kept outside this class derive from a block and from the options
+   * that were in force when it was built, and go stale at exactly the moment
+   * these do. Reading a counter lets them say so in a comparison rather than
+   * by being told, which is the difference between a fix that holds and one
+   * that lasts until somebody adds a third caller of `invalidate`.
+   */
+  get generation(): number {
+    return this.version;
+  }
+
   /** Invalidate everything. Called when the theme or options change. */
   invalidate(): void {
     this.measurer.invalidate();
