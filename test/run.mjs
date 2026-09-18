@@ -31,6 +31,7 @@ const TESTS = [
   "editor-transactions",
   "selection",
   "unicode-delete",
+  "caret-collapse",
   "search",
   "scroll",
   "links",

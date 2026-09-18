@@ -1746,16 +1746,24 @@ export class Editor {
         const forward = e.key === "ArrowRight";
         // An unextended move out of a selection starts from the edge it is
         // heading towards, so ⌥→ passes the word after the selection rather
-        // than the one it already covers.
-        const from = lo !== hi && !e.shiftKey ? (forward ? hi : lo) : this.selEnd;
+        // than the one it already covers. Whether the move is a collapse is a
+        // separate question and has to be asked separately: reading it back
+        // out of `from` as `from !== this.selEnd` answered no whenever the
+        // edge being collapsed to was the one the caret already sat on, which
+        // is two of the four selection-direction by arrow-key combinations.
+        const collapsing = lo !== hi && !e.shiftKey;
+        const from = collapsing ? (forward ? hi : lo) : this.selEnd;
         if (byLine) {
           const bounds = this.lineBounds(from);
           this.moveTo(forward ? bounds.end : bounds.start, e.shiftKey,
             forward ? "upstream" : "downstream");
         } else if (byWord) {
           this.moveTo(wordBoundary(this.text, from, forward ? 1 : -1), e.shiftKey);
-        } else if (from !== this.selEnd) {
-          this.moveTo(from, false);
+        } else if (collapsing) {
+          // The caret inherits the visual line the highlight ended on, which
+          // at a soft wrap is the line above the one that offset reads into by
+          // default — the same upstream reading End and ⌘→ take.
+          this.moveTo(from, false, forward ? "upstream" : "downstream");
         } else {
           this.moveTo(forward ? this.stepForward(from) : this.stepBack(from), e.shiftKey);
         }
