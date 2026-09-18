@@ -6,6 +6,7 @@
 // business, and a destination the document supplies is not to be trusted.
 import assert from "node:assert/strict";
 import { Editor } from "../src/editor/editor.js";
+import capability from "../src-tauri/capabilities/default.json";
 import { openExternal } from "../src/platform.js";
 
 const opened: string[] = [];
@@ -74,22 +75,85 @@ function clicking() {
 }
 
 // --- what may be opened ---------------------------------------------------
-assert.equal(await openExternal("https://example.com"), true);
-assert.equal(await openExternal("http://example.com"), true);
-assert.equal(await openExternal("mailto:a@b.c"), true);
-assert.deepEqual(opened, ["https://example.com", "http://example.com", "mailto:a@b.c"]);
-for (const refused of [
-  "javascript:alert(1)",
-  " javascript:alert(1)",
-  "JavaScript:alert(1)",
-  "file:///etc/passwd",
-  "vscode://x",
-  "./relative.md",
-  "#anchor",
-  "",
-]) {
-  assert.equal(await openExternal(refused), false, `${JSON.stringify(refused)} is declined`);
+//
+// Two gates stand between a document and the system browser: this guard, and
+// the `opener:allow-open-url` scope in src-tauri/capabilities/default.json,
+// which is the one that still holds if the webview is ever subverted. They
+// have to admit exactly the same set, so every case below is put through both
+// rather than each side being pinned separately and trusted to keep in step.
+// An empty allow list is not "no restriction" — the plugin reads it as a
+// whitelist, so before it was written out every external link was dead.
+
+const allowEntries = (capability.permissions as unknown[])
+  .filter((p): p is { identifier: string; allow?: { url: string }[] } =>
+    typeof p === "object" && p !== null &&
+    (p as { identifier?: unknown }).identifier === "opener:allow-open-url")
+  .flatMap((p) => p.allow ?? []);
+
+assert.ok(allowEntries.length > 0,
+  "opener:allow-open-url carries a url scope, since the plugin reads an empty allow list " +
+  "as allowing nothing at all");
+
+// Each pattern is a literal prefix closed by one trailing wildcard, and the
+// glob the plugin matches with lets that wildcard run over slashes too.
+// Holding the patterns to that shape is what lets a plain prefix test stand in
+// for the real matcher without a glob implementation in the test.
+const prefixes = allowEntries.map(({ url }) => {
+  assert.match(url, /^[a-z]+:[^*?[\]]*\*$/,
+    `the scope pattern ${JSON.stringify(url)} is a literal prefix and one trailing wildcard`);
+  return url.slice(0, -1);
+});
+assert.deepEqual([...prefixes].sort(), ["http://", "https://", "mailto:"],
+  "the capability allows exactly the schemes the product supports, and nothing else");
+const inScope = (url: string) => prefixes.some((p) => url.startsWith(p));
+
+const cases: [string, boolean][] = [
+  ["https://example.com", true],
+  ["http://example.com", true],
+  ["mailto:a@b.c", true],
+  ["https://example.com/a/b?q=1#f", true],
+  ["  https://example.com/a  ", true],
+  // A scheme is case-insensitive in the URL grammar, so `<HTTPS://EXAMPLE.COM>`
+  // is an ordinary autolink and arrives with the author's capitals intact.
+  ["HTTPS://Example.com/Path", true],
+  ["MailTo:A@b.c", true],
+  ["javascript:alert(1)", false],
+  [" javascript:alert(1)", false],
+  ["JavaScript:alert(1)", false],
+  // Splitting the scheme defeats a filter looking for the word rather than for
+  // the shape. An allow list never sees the word, so it does not care.
+  ["java\nscript:alert(1)", false],
+  ["java\tscript:alert(1)", false],
+  // `trim` stops at whitespace, so a control character is still standing in
+  // front of the scheme by the time the test runs.
+  ["\u0001javascript:alert(1)", false],
+  ["file:///etc/passwd", false],
+  ["data:text/html,<script>1</script>", false],
+  ["vbscript:msgbox(1)", false],
+  // In the opener plugin's own default scope, but not in this product's.
+  ["tel:+1", false],
+  ["vscode://x", false],
+  // No scheme at all: the webview would resolve this against its own origin.
+  ["//evil.com", false],
+  // Legal in the grammar, names nothing the shell could open, and matches no
+  // pattern in the capability.
+  ["https:evil.com", false],
+  ["./relative.md", false],
+  ["#anchor", false],
+  ["", false],
+];
+for (const [url, admitted] of cases) {
+  assert.equal(await openExternal(url), admitted,
+    `${JSON.stringify(url)} is ${admitted ? "followed" : "declined"}`);
+  if (!admitted) continue;
+  const handed = opened[opened.length - 1] as string;
+  assert.ok(inScope(handed),
+    `${JSON.stringify(url)} reaches the host as ${JSON.stringify(handed)}, which the capability ` +
+    "admits as well, so the frontend never hands over a url the shell will refuse");
 }
-assert.equal(opened.length, 3, "and nothing else was opened");
+assert.equal(opened.length, cases.filter(([, ok]) => ok).length,
+  "and nothing that was declined was opened anyway");
+assert.ok(opened.includes("https://Example.com/Path") && opened.includes("mailto:A@b.c"),
+  "only the scheme is lowered on the way out, because a path or a mailbox can be case significant");
 
 console.log("all passing");

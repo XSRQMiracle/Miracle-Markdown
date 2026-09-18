@@ -11,6 +11,13 @@
     "core:webview:allow-create-webview-window",
     "dialog:allow-open",
     "dialog:allow-save",
-    "opener:allow-open-url"
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "http://*" },
+        { "url": "https://*" },
+        { "url": "mailto:*" }
+      ]
+    }
   ]
 }

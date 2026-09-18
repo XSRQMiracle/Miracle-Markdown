@@ -218,8 +218,20 @@ function windowSerial(): string {
  * declined, and the caller is told so.
  */
 export async function openExternal(url: string): Promise<boolean> {
-  const target = url.trim();
-  if (!/^(https?|mailto):/i.test(target)) return false;
+  const trimmed = url.trim();
+  // The authority is required, not merely the scheme: `https:example.com` is
+  // legal in the grammar and names nothing the shell could open, and the
+  // capability's own pattern is `https://*`, so admitting it here would hand
+  // the native side something it is bound to refuse.
+  const scheme = /^(https?:\/\/|mailto:)/i.exec(trimmed);
+  if (!scheme) return false;
+  // The shell keeps its own copy of this policy, as a glob in the window's
+  // capability, and a glob is matched case sensitively: `HTTPS://` would clear
+  // the test above and then be turned away by the shell, leaving the link dead
+  // with nothing on screen to say why. Lowering the scheme, and only the
+  // scheme, keeps the two readings of one rule in step without rewriting a
+  // path or a mailbox name whose case may well matter.
+  const target = scheme[0].toLowerCase() + trimmed.slice(scheme[0].length);
   const api = tauri();
   if (api) {
     const { openUrl } = await import("@tauri-apps/plugin-opener");
