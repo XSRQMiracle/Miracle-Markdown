@@ -110,6 +110,15 @@ export function buildFileTree(options: FileTreeOptions): FileTree {
    *  typing in the search box does not re-hit the filesystem. */
   const open = new Set<string>();
   const listing = new Map<string, FolderEntry[]>();
+  /**
+   * Which round of reading the cache belongs to.
+   *
+   * Emptying the cache is not enough on its own, because a read that was
+   * already in flight when it was emptied still holds the old answer and will
+   * write it back on its way out. The counter is what lets such a reply tell
+   * that the question it answers is no longer being asked.
+   */
+  let generation = 0;
 
   const message = (text: string, action?: { label: string; run(): void }): void => {
     body.textContent = "";
@@ -132,13 +141,21 @@ export function buildFileTree(options: FileTreeOptions): FileTree {
   const load = async (path: string): Promise<FolderEntry[]> => {
     const cached = listing.get(path);
     if (cached) return cached;
+    const era = generation;
     let entries: FolderEntry[] = [];
     try {
       entries = await options.list(path);
     } catch (error) {
       console.error("could not list", path, error);
     }
-    listing.set(path, entries);
+    // A refresh that began while this read was outstanding has already emptied
+    // the cache, and this answer predates the change it was asked about.
+    // Filing it now would hand the redraw queued behind the refresh exactly
+    // the listing the refresh existed to replace — so the save that prompted
+    // it would show the file's old size, and a file created since would not
+    // appear at all. The caller still gets the answer; only the cache refuses
+    // it, which is what makes the next read go back to the disk.
+    if (era === generation) listing.set(path, entries);
     return entries;
   };
 
@@ -263,6 +280,7 @@ export function buildFileTree(options: FileTreeOptions): FileTree {
     async setFolder(path) {
       if (path === folder) return;
       folder = path;
+      generation++;
       open.clear();
       listing.clear();
       await draw();
@@ -274,6 +292,7 @@ export function buildFileTree(options: FileTreeOptions): FileTree {
       void draw();
     },
     async refresh() {
+      generation++;
       listing.clear();
       await draw();
     },
