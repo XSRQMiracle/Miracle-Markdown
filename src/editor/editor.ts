@@ -424,6 +424,13 @@ export class Editor {
     return this.text;
   }
 
+  /** Whether `node` is this editor's own input surface, so that a host
+   *  command can tell an editing surface it should drive from one it should
+   *  leave to the platform. */
+  owns(node: unknown): boolean {
+    return node === this.input;
+  }
+
   /**
    * Apply a source transformation, and put the selection where it asks.
    *
@@ -1702,6 +1709,25 @@ export class Editor {
       if (!value) return;
       if (value.length === 1 && (this.autoPair(value) || this.smarten(value))) return;
       this.insert(value);
+    });
+
+    // A native Edit → Undo, and anything else that drives the platform's own
+    // editing history, arrives here rather than as a keystroke. The textarea
+    // it lands on is a keystroke collector whose value is emptied after every
+    // input, so the history the platform keeps for it is a record of typing
+    // and clearing — undoing into it put fragments of old keystrokes back and
+    // left the document exactly as it was, which is why the native menu item
+    // appeared to do nothing and its Redo produced two stray letters.
+    //
+    // The document has a history of its own, and this is the one place the
+    // native route and the keyboard's meet.
+    this.input.addEventListener("beforeinput", (event) => {
+      const e = event as InputEvent;
+      if (e.inputType !== "historyUndo" && e.inputType !== "historyRedo") return;
+      e.preventDefault();
+      this.finishComposition();
+      if (e.inputType === "historyUndo") this.undo();
+      else this.redo();
     });
 
     this.input.addEventListener("paste", (e) => {

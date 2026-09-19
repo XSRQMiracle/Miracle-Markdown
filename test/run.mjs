@@ -33,6 +33,7 @@ const TESTS = [
   "unicode-delete",
   "caret-collapse",
   "document-switch",
+  "history-routing",
   "search",
   "scroll",
   "links",

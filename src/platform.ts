@@ -258,6 +258,23 @@ export async function installDesktopCloseHandler(close: () => void): Promise<voi
   await api.invoke("protect_document");
 }
 
+/**
+ * Listen for the Edit-menu commands the shell routes to this window.
+ *
+ * Only the ones the shell cannot perform itself: the clipboard items are
+ * predefined and go through the responder chain to the focused element, but
+ * the history items cannot, because the document's history does not live in
+ * the DOM. See src/ui/native-edit.ts for what is done with them.
+ */
+export async function onEditCommand(handler: (command: string) => void): Promise<void> {
+  const api = tauri();
+  if (!api) return;
+  const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+  await getCurrentWebviewWindow().listen<string>("menu-edit-command", (event) => {
+    handler(event.payload);
+  });
+}
+
 export async function finishDesktopClose(): Promise<void> {
   await tauri()!.invoke("finish_close");
 }

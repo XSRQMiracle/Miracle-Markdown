@@ -11,6 +11,7 @@ import { SAMPLE } from "./sample.js";
 import {
   allowImagesIn,
   finishDesktopClose,
+  onEditCommand,
   installDesktopCloseHandler,
   isDesktop,
   openDocument,
@@ -33,6 +34,7 @@ import { buildFileTree } from "./ui/file-tree.js";
 import { buildTypographyPopover } from "./ui/typography.js";
 import { buildPreferences } from "./ui/preferences.js";
 import { applySkin, watchSystemAppearance } from "./ui/skin.js";
+import { historyTargetFor } from "./ui/native-edit.js";
 import { loadSettings, saveSettings, type AppSettings } from "./ui/settings.js";
 
 const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -364,6 +366,21 @@ async function main() {
   };
   syncSession();
   syncSidebar();
+
+  // The Edit menu's Undo and Redo carry ⌘Z and ⇧⌘Z, and on macOS a menu item
+  // takes its key equivalent before the keystroke reaches the page — so this
+  // is what those two chords do, in the editor and in every field around it.
+  await onEditCommand((command) => {
+    const target = historyTargetFor(document.activeElement, editor.owns(document.activeElement));
+    if (target === "field") {
+      // The platform's own history, for the platform's own text fields.
+      document.execCommand(command === "redo" ? "redo" : "undo");
+      return;
+    }
+    editor.focus();
+    if (command === "redo") editor.redo();
+    else editor.undo();
+  });
 
   if (isDesktop()) {
     let closePending = false;

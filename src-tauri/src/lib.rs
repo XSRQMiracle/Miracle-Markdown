@@ -22,6 +22,17 @@ use tauri::{Emitter, EventTarget, Manager};
 #[cfg(target_os = "macos")]
 const QUIT_MENU_ID: &str = "quit";
 
+/// The Edit menu's history items, which are ours for the same kind of reason
+/// Quit is: the predefined ones drive the *webview's* editing history, and the
+/// only thing focused when the reader is writing is a hidden textarea that
+/// exists to collect keystrokes and is emptied after every one. Undoing into
+/// it puts keystrokes back and leaves the document alone. These carry an id,
+/// and the window decides which history the reader meant.
+#[cfg(target_os = "macos")]
+const UNDO_MENU_ID: &str = "undo";
+#[cfg(target_os = "macos")]
+const REDO_MENU_ID: &str = "redo";
+
 /// Which windows are holding a document that has to be asked about before it
 /// can go away, and which of them have already had their say.
 ///
@@ -396,17 +407,19 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tau
         &[&PredefinedMenuItem::close_window(app, None)?],
     )?;
 
-    // The clipboard items stay predefined so that they keep going through the
-    // responder chain to the focused webview. A custom item here would take
-    // its accelerator away from the page, which is a thing to want
-    // deliberately and not by accident.
+    // Cut, Copy, Paste and Select All stay predefined, so that they keep going
+    // through the responder chain to whatever is focused — which is right for
+    // them, because the clipboard is the platform's and the hidden textarea
+    // carries the selection at the moment either is asked for. Undo and Redo
+    // cannot stay predefined, because the history they would reach is that
+    // same textarea's, and the document's history is not in the DOM at all.
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
         true,
         &[
-            &PredefinedMenuItem::undo(app, None)?,
-            &PredefinedMenuItem::redo(app, None)?,
+            &MenuItem::with_id(app, UNDO_MENU_ID, "Undo", true, Some("CmdOrCtrl+Z"))?,
+            &MenuItem::with_id(app, REDO_MENU_ID, "Redo", true, Some("CmdOrCtrl+Shift+Z"))?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
@@ -465,14 +478,36 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tau
 fn with_app_menu(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     builder
         .menu(build_menu)
-        .on_menu_event(|app, event| {
+        .on_menu_event(|app, event| match event.id().as_ref() {
             // Not an exit: a request for one. `AppHandle::exit` posts through
             // the event loop proxy, so what comes back a turn later is
             // `ExitRequested` — which is where every document gets its say.
-            if event.id().as_ref() == QUIT_MENU_ID {
-                app.exit(0);
-            }
+            QUIT_MENU_ID => app.exit(0),
+            UNDO_MENU_ID => send_edit_command(app, "undo"),
+            REDO_MENU_ID => send_edit_command(app, "redo"),
+            _ => {}
         })
+}
+
+/// Hand an Edit-menu command to the window the reader is actually in.
+///
+/// To that window and no other. A menu belongs to the application and every
+/// window has its own document and its own history, so a broadcast would undo
+/// an edit in a document nobody was looking at.
+#[cfg(target_os = "macos")]
+fn send_edit_command(app: &tauri::AppHandle, command: &str) {
+    let focused = app
+        .webview_windows()
+        .into_values()
+        .find(|window| window.is_focused().unwrap_or(false));
+    let Some(window) = focused else { return };
+    let _ = app.emit_to(
+        EventTarget::AnyLabel {
+            label: window.label().to_string(),
+        },
+        "menu-edit-command",
+        command,
+    );
 }
 
 #[cfg(not(target_os = "macos"))]
