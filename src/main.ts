@@ -119,7 +119,13 @@ async function main() {
     open: openDocument,
     save: saveDocument,
     confirmLeave: confirmUnsavedDocument,
-    loaded: (document) => editor.setText(document.contents),
+    loaded: (document) => {
+      editor.setText(document.contents);
+      // The outline's hand-picked heading is an offset into the document that
+      // has just been replaced, and the same offset in the new one is a
+      // different heading entirely.
+      sidebar.forget();
+    },
     changed: syncSession,
   });
   const fileAction = async (action: () => Promise<unknown>) => {

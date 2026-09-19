@@ -19,6 +19,8 @@ export interface Sidebar {
   /** Mark the heading the reader is inside. Called every frame, so it touches
    *  the DOM only when the answer changes. */
   track(): void;
+  /** Forget the hand-picked heading, because a different document is open. */
+  forget(): void;
   readonly tab: SidebarTab;
 }
 
@@ -40,7 +42,13 @@ export function buildSidebar(options: SidebarOptions): Sidebar {
   /** A heading picked by hand, and the scroll position it was picked at.
    *  Held until the reader scrolls away from it — otherwise the tracking rule
    *  below would immediately answer with something else whenever the chosen
-   *  heading cannot reach the top of the window. */
+   *  heading cannot reach the top of the window.
+   *
+   *  Held by where the heading starts in the source rather than by its place
+   *  in the list. The reader chose a heading, not a third row, so renaming it
+   *  or inserting one above it must not quietly move the mark to a different
+   *  heading — and an offset that no longer starts one is how `track` below
+   *  notices that the heading has been edited away. */
   let pinned = -1;
   let pinnedAt = -1;
   /** What the last rebuild was drawn from, so an unchanged document does not
@@ -71,7 +79,6 @@ export function buildSidebar(options: SidebarOptions): Sidebar {
     body.textContent = "";
     rows = [];
     current = -1;
-    pinned = -1;
     const note = document.createElement("p");
     note.className = "side-empty";
     note.textContent = message;
@@ -85,7 +92,6 @@ export function buildSidebar(options: SidebarOptions): Sidebar {
       body.textContent = "";
       rows = [];
       current = -1;
-      pinned = -1;
       body.appendChild(tree.element);
       return;
     }
@@ -101,7 +107,6 @@ export function buildSidebar(options: SidebarOptions): Sidebar {
     body.textContent = "";
     rows = [];
     current = -1;
-    pinned = -1;
     for (const [index, entry] of entries.entries()) {
       const row = document.createElement("button");
       row.type = "button";
@@ -125,7 +130,7 @@ export function buildSidebar(options: SidebarOptions): Sidebar {
         // Remember which one was chosen rather than re-deriving it from a
         // scroll position that cannot express the answer.
         pinnedAt = editor.revealBlockAtTop(entries[index].start);
-        pinned = index;
+        pinned = entries[index].start;
         select(index);
         editor.focus();
       });
@@ -183,9 +188,11 @@ export function buildSidebar(options: SidebarOptions): Sidebar {
     // keep pointing at whatever did. Once the end of the document is on
     // screen, the heading being read is simply the last one visible.
     if (pinned >= 0) {
-      // Still where the click left it: the reader has not disagreed yet.
-      if (Math.abs(editor.scrollOffset - pinnedAt) < 1) {
-        select(pinned);
+      // Still where the click left it, and still a heading: the reader has
+      // not disagreed yet, and nothing has edited the chosen one away.
+      const chosen = entries.findIndex((entry) => entry.start === pinned);
+      if (chosen >= 0 && Math.abs(editor.scrollOffset - pinnedAt) < 1) {
+        select(chosen);
         return;
       }
       pinned = -1;
@@ -215,6 +222,12 @@ export function buildSidebar(options: SidebarOptions): Sidebar {
     },
     refresh,
     track,
+    forget() {
+      // The mark is an offset into a document, and a different document gives
+      // the same offsets to different headings.
+      pinned = -1;
+      pinnedAt = -1;
+    },
     get tab() {
       return tab;
     },
