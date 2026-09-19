@@ -14,6 +14,14 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{Emitter, EventTarget, Manager};
 
+/// The id the custom Quit item carries, and the one `on_menu_event` matches.
+///
+/// It exists because the predefined Quit item does not send a menu event at
+/// all: muda gives it the `terminate:` selector and a nil target, so AppKit
+/// tears the process down without the event loop ever hearing about it.
+#[cfg(target_os = "macos")]
+const QUIT_MENU_ID: &str = "quit";
+
 /// Which windows are holding a document that has to be asked about before it
 /// can go away, and which of them have already had their say.
 ///
@@ -46,6 +54,21 @@ impl CloseGuard {
             .any(|label| !state.approved.contains(label))
     }
 
+    fn protect(&self, label: &str) {
+        self.0.lock().unwrap().protected.insert(label.to_string());
+    }
+
+    /// This window has agreed to go. Recording it is only honest while the
+    /// window is actually on its way out, so the caller undoes it when the
+    /// destroy it asked for did not happen.
+    fn approve(&self, label: &str) {
+        self.0.lock().unwrap().approved.insert(label.to_string());
+    }
+
+    fn withdraw(&self, label: &str) {
+        self.0.lock().unwrap().approved.remove(label);
+    }
+
     fn forget(&self, label: &str) {
         let mut state = self.0.lock().unwrap();
         state.protected.remove(label);
@@ -56,12 +79,7 @@ impl CloseGuard {
 // Enable interception only after the webview has installed its listener.
 #[tauri::command]
 fn protect_document(window: tauri::Window, state: tauri::State<'_, CloseGuard>) {
-    state
-        .0
-        .lock()
-        .unwrap()
-        .protected
-        .insert(window.label().to_string());
+    state.protect(window.label());
 }
 
 /// This window has finished asking, and may go.
@@ -72,13 +90,15 @@ fn protect_document(window: tauri::Window, state: tauri::State<'_, CloseGuard>) 
 /// the application ends there.
 #[tauri::command]
 fn finish_close(window: tauri::Window, state: tauri::State<'_, CloseGuard>) {
-    state
-        .0
-        .lock()
-        .unwrap()
-        .approved
-        .insert(window.label().to_string());
-    let _ = window.destroy();
+    let guard = state.inner();
+    guard.approve(window.label());
+    // An approval that does not end in a destroyed window would outlive the
+    // answer it stands for: the label would go on counting as answered, and
+    // the next quit would step over this document without asking. Better to be
+    // back where we started and ask again than to remember a lie.
+    if window.destroy().is_err() {
+        guard.withdraw(window.label());
+    }
 }
 
 mod file_save;
@@ -314,9 +334,155 @@ fn suggested_fonts() -> Vec<String> {
     candidates.iter().map(|s| s.to_string()).collect()
 }
 
+/// The application menu.
+///
+/// Built by hand rather than taken from `Menu::default`, because the quit item
+/// default gives us is a predefined one, and on macOS muda wires those
+/// straight to `terminate:` with no target — AppKit ends the process without
+/// the event loop ever seeing an exit request, and the unsaved-changes guard
+/// below never gets to run. Everything else here is deliberately the same set
+/// of predefined items Tauri would have built, so nothing native is lost by
+/// taking the menu over: only the one item that has to be ours is ours.
+///
+/// macOS only. On the other platforms Tauri builds no menu at all, and growing
+/// one here would put a menu bar over chrome that was drawn without room for it.
+#[cfg(target_os = "macos")]
+fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let package = app.package_info();
+    let config = app.config();
+    let about = AboutMetadata {
+        name: Some(package.name.clone()),
+        version: Some(package.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+
+    // English, against the house rule for user-facing strings, because the
+    // items around it are English: muda hard-codes the wording of every
+    // predefined item, so a Chinese 退出 would sit alone under About and
+    // Services looking like a mistake rather than like a translation.
+    let quit = MenuItem::with_id(
+        app,
+        QUIT_MENU_ID,
+        format!("Quit {}", package.name),
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
+
+    let app_menu = Submenu::with_items(
+        app,
+        package.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+
+    let file_menu = Submenu::with_items(
+        app,
+        "File",
+        true,
+        &[&PredefinedMenuItem::close_window(app, None)?],
+    )?;
+
+    // The clipboard items stay predefined so that they keep going through the
+    // responder chain to the focused webview. A custom item here would take
+    // its accelerator away from the page, which is a thing to want
+    // deliberately and not by accident.
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
+    let view_menu = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[&PredefinedMenuItem::fullscreen(app, None)?],
+    )?;
+
+    // The two ids are not decoration: Tauri looks them up once the menu is
+    // installed and hands the submenus to AppKit, which is what puts the list
+    // of open windows under Window and the search field under Help.
+    let window_menu = Submenu::with_id_and_items(
+        app,
+        tauri::menu::WINDOW_SUBMENU_ID,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::bring_all_to_front(app, None)?,
+        ],
+    )?;
+
+    let help_menu =
+        Submenu::with_id_and_items(app, tauri::menu::HELP_SUBMENU_ID, "Help", true, &[])?;
+
+    Menu::with_items(
+        app,
+        &[
+            &app_menu,
+            &file_menu,
+            &edit_menu,
+            &view_menu,
+            &window_menu,
+            &help_menu,
+        ],
+    )
+}
+
+/// Give the application its menu, and route the items that are ours.
+///
+/// Separated from the builder chain so the whole arrangement can be absent on
+/// the platforms that have no application menu, and so that a new custom item
+/// is one arm of one match rather than another `cfg` somewhere else.
+#[cfg(target_os = "macos")]
+fn with_app_menu(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    builder
+        .menu(build_menu)
+        .on_menu_event(|app, event| {
+            // Not an exit: a request for one. `AppHandle::exit` posts through
+            // the event loop proxy, so what comes back a turn later is
+            // `ExitRequested` — which is where every document gets its say.
+            if event.id().as_ref() == QUIT_MENU_ID {
+                app.exit(0);
+            }
+        })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_app_menu(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    builder
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(CloseGuard::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -328,7 +494,9 @@ pub fn run() {
             suggested_fonts,
             protect_document,
             finish_close
-        ])
+        ]);
+
+    with_app_menu(builder)
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if window.state::<CloseGuard>().should_prompt(window.label()) {
@@ -361,10 +529,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building the application")
         .run(|app, event| {
-            // Application Quit (including Cmd-Q) can bypass window close, and
-            // it takes every window with it — so here the broadcast is right:
-            // each document gets asked, and each window that agrees closes
-            // itself. The app ends when the last one has gone.
+            // Reached two ways: the Quit item above asking for an exit, and
+            // the runtime noticing the last window has gone. Quitting takes
+            // every window with it, so here the broadcast is right — each
+            // document gets asked, and each window that agrees closes itself.
+            // When the last one has gone this fires again with nothing left to
+            // protect, and that is where the application ends.
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 if app.state::<CloseGuard>().any_unanswered() {
                     api.prevent_exit();
@@ -377,6 +547,82 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The close guard's state machine.
+    //
+    // Quitting asks every window that is holding a document, one at a time,
+    // and ends only when none of them is still owed an answer. Whether that
+    // question is asked at all is the menu's business and cannot be tested
+    // without a running event loop; whether the right windows are asked is
+    // arithmetic, and is tested here.
+
+    #[test]
+    fn a_protected_window_is_asked_until_it_answers() {
+        let guard = CloseGuard::default();
+        guard.protect("main");
+        assert!(guard.should_prompt("main"));
+        assert!(guard.any_unanswered(), "a quit has to stop for it");
+
+        guard.approve("main");
+        assert!(!guard.should_prompt("main"), "and stop asking once it has answered");
+        assert!(!guard.any_unanswered(), "so a quit may go ahead");
+    }
+
+    #[test]
+    fn an_unprotected_window_is_never_asked() {
+        let guard = CloseGuard::default();
+        assert!(!guard.should_prompt("main"));
+        assert!(!guard.any_unanswered(), "and holds nothing up");
+    }
+
+    #[test]
+    fn one_windows_answer_does_not_speak_for_another() {
+        let guard = CloseGuard::default();
+        guard.protect("main");
+        guard.protect("doc-2");
+        guard.approve("main");
+        assert!(!guard.should_prompt("main"));
+        assert!(guard.should_prompt("doc-2"), "the other document has not been asked");
+        assert!(guard.any_unanswered(), "so the quit is still waiting on it");
+    }
+
+    #[test]
+    fn a_cancelled_quit_leaves_every_window_ready_to_be_asked_again() {
+        let guard = CloseGuard::default();
+        guard.protect("main");
+        guard.protect("doc-2");
+        // Cancelling is the absence of an answer, not an answer of its own:
+        // nothing is recorded, so the next quit starts the same conversation.
+        assert!(guard.any_unanswered());
+        assert!(guard.should_prompt("main") && guard.should_prompt("doc-2"));
+    }
+
+    #[test]
+    fn withdrawing_an_approval_puts_the_window_back_in_the_queue() {
+        let guard = CloseGuard::default();
+        guard.protect("main");
+        guard.approve("main");
+        assert!(!guard.any_unanswered());
+        // The window agreed to go and then did not go. An approval that
+        // outlived its window would let the next quit step over the document
+        // without asking.
+        guard.withdraw("main");
+        assert!(guard.should_prompt("main"));
+        assert!(guard.any_unanswered());
+    }
+
+    #[test]
+    fn a_reused_label_starts_over_rather_than_inheriting_an_answer() {
+        let guard = CloseGuard::default();
+        guard.protect("doc-2");
+        guard.approve("doc-2");
+        guard.forget("doc-2");
+        // A label is only unique for the life of the application, so a second
+        // window wearing it must not inherit the first one's consent.
+        guard.protect("doc-2");
+        assert!(guard.should_prompt("doc-2"));
+        assert!(guard.any_unanswered());
+    }
 
     /// Run `body` on its own thread and insist it finishes.
     ///
