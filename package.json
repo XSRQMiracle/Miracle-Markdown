@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "wasm": "cd crates/typeset-wasm && wasm-pack build --target web --out-dir pkg --release",
     "tauri": "tauri",
-    "test": "cargo test -p typeset-core && npm run test:ts",
+    "test": "cargo test -p typeset-core && cargo test -p miracle-markdown && npm run test:ts",
     "pretest:ts": "npm run wasm",
     "test:ts": "node test/run.mjs"
   },

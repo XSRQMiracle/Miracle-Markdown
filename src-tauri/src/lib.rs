@@ -6,6 +6,8 @@
 //! things a webview cannot do: the window, the menu and the filesystem.
 
 use std::collections::HashSet;
+use std::fs::OpenOptions;
+use std::io::{self, Read};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -90,7 +92,48 @@ pub struct OpenedFile {
 /// Read a markdown file the user picked.
 #[tauri::command]
 fn read_file(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| format!("无法读取 {path}：{e}"))
+    read_regular_file(Path::new(&path)).map_err(|e| format!("无法读取 {path}：{e}"))
+}
+
+/// Read a path, having first established that it is an ordinary file.
+///
+/// Judged through the descriptor the read will use rather than through the
+/// path. A check on the path answers a question about whatever that name
+/// pointed at a moment ago, and a name can be repointed in between; a
+/// descriptor cannot, so opening first and asking afterwards is the only order
+/// that cannot be raced.
+///
+/// On Unix the open carries `O_NONBLOCK`, because the file we most need to
+/// turn down is the one kind whose `open` never returns: a FIFO with no writer
+/// holds the calling thread for as long as it stays that way, and a FIFO named
+/// `notes.md` is an ordinary-looking entry in a folder. Opening one
+/// non-blocking returns at once and lets the check below refuse it. The flag
+/// is a no-op for the regular files that get past that check.
+///
+/// `O_NOFOLLOW` guards the resolved path against being replaced by a link
+/// between the two calls. The link that named the file has already been
+/// followed, by `canonicalize` — which is the same bargain `file_save` strikes
+/// on the way out, so both halves of the file boundary agree about which file
+/// a link means.
+fn read_regular_file(path: &Path) -> io::Result<String> {
+    let target = std::fs::canonicalize(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(&target)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "只能打开普通文件",
+        ));
+    }
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
 }
 
 /// Write the document back to disk.
@@ -122,6 +165,19 @@ pub struct FolderEntry {
 fn is_document(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".txt")
+}
+
+/// Whether a listed entry is an ordinary file, following a link to ask.
+///
+/// `file_type` reports the link itself, so a symlink has to be followed to
+/// find out what it stands for. Following it costs a `stat`, which reads the
+/// inode and does not open anything — so unlike `read_file`'s problem, asking
+/// this question cannot itself block on a FIFO.
+fn is_regular(entry: &std::fs::DirEntry, kind: std::fs::FileType) -> bool {
+    if kind.is_file() {
+        return true;
+    }
+    kind.is_symlink() && entry.path().metadata().is_ok_and(|meta| meta.is_file())
 }
 
 /// Directories that are never what someone means by "my notes".
@@ -156,6 +212,13 @@ fn list_folder(path: String) -> Result<Vec<FolderEntry>, String> {
                 continue;
             }
         } else if name.starts_with('.') || !is_document(&name) {
+            continue;
+        } else if !is_regular(&entry, kind) {
+            // A FIFO, a socket or a device can be called notes.md as easily as
+            // anything else, and offering one as a document invites the reader
+            // to open something that cannot be read as text — and, for a FIFO
+            // with no writer, something that would never finish being read.
+            // `read_file` refuses these too; this is so they are not offered.
             continue;
         }
         let meta = entry.metadata().ok();
@@ -309,4 +372,109 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run `body` on its own thread and insist it finishes.
+    ///
+    /// The defect under test is an operation that never returns, so a test that
+    /// simply called it would not fail — it would hang, and a hung suite says
+    /// nothing about which case broke. Giving the work a thread and the test a
+    /// deadline turns "waits for ever" into an ordinary failure.
+    fn within<T: Send + 'static>(seconds: u64, body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(body());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(seconds))
+            .expect("the read should finish rather than wait for a writer that is not coming")
+    }
+
+    #[test]
+    fn an_ordinary_file_reads_back_what_was_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        std::fs::write(&path, "# 标题\n正文\n").unwrap();
+        assert_eq!(read_regular_file(&path).unwrap(), "# 标题\n正文\n");
+    }
+
+    #[test]
+    fn invalid_utf8_is_refused_rather_than_mangled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.md");
+        std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        let error = read_regular_file(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_directory_is_not_a_document() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_regular_file(dir.path()).is_err());
+    }
+
+    #[test]
+    fn a_missing_file_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_regular_file(&dir.path().join("absent.md")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_with_no_writer_is_refused_instead_of_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0);
+
+        // Nothing will ever open the other end. Before this was guarded, the
+        // open itself blocked here and the application simply stopped.
+        let error = within(5, move || read_regular_file(&path).unwrap_err());
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_read_as_the_file_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.md");
+        std::fs::write(&real, "through the link\n").unwrap();
+        let link = dir.path().join("link.md");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // The same bargain `file_save` strikes on the way out: a link is
+        // followed once, so reading and saving agree about which file it means.
+        assert_eq!(read_regular_file(&link).unwrap(), "through the link\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_fifo_is_refused_like_the_fifo_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0);
+        let link = dir.path().join("notes.md");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+
+        let error = within(5, move || read_regular_file(&link).unwrap_err());
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_offers_the_real_document_and_not_the_pipe_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("real.md"), "x").unwrap();
+        let fifo = dir.path().join("notes.md");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0);
+
+        let path = dir.path().to_string_lossy().into_owned();
+        let listed = within(5, move || list_folder(path).unwrap());
+        let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["real.md"]);
+    }
 }
