@@ -35,6 +35,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../LICENSE": "licenses/LICENSE.txt",
+      "../licenses/MathJax-Apache-2.0.txt": "licenses/MathJax-Apache-2.0.txt",
+      "../licenses/README.md": "licenses/README.md"
+    },
     "macOS": {
       "signingIdentity": "-"
     },

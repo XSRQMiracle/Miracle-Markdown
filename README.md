@@ -254,3 +254,13 @@ MathJax 与 KaTeX 都不解析 `\ref`——它们一次只排一条公式，不�
   输入法候选窗在 WebView2 上的定位、系统字体的差异都还没有结论。
 - **视口虚拟化**。目前每次重排都处理整篇文档；1.6 ms 对中等长度文档足够，但打开
   10 MB 文件需要只排可见部分。
+
+## 许可证
+
+Miracle Markdown 以 **GPL-3.0-or-later** 分发，全文见 [LICENSE](LICENSE)。
+
+排版引擎依赖 MathJax 3.2.1（Apache-2.0），它的代码会随构建产物一起分发，因此它的
+许可证原文也随包附上：[licenses/](licenses/)，在打包后的 App 里位于
+`Miracle Markdown.app/Contents/Resources/licenses/`。两者方向上相容——Apache-2.0
+的代码可以并入 GPLv3 作品，所以聚合产物整体按 GPLv3 分发，而 MathJax 那部分保留它
+自己的条款。
