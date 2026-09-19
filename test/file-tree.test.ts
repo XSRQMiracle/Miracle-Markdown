@@ -104,10 +104,14 @@ function port() {
       calls.push(path);
       return new Promise<FolderEntry[]>((resolve) => pending.push(resolve));
     },
-    /** Answer the nth outstanding read. */
+    /** Answer the nth outstanding read, and let everything it unblocks run. */
     settle(index: number, entries: FolderEntry[]): Promise<void> {
       pending[index](entries);
       return tick();
+    },
+    /** Answer one, without draining what it unblocks — so the steps show. */
+    resolve(index: number, entries: FolderEntry[]): void {
+      pending[index](entries);
     },
   };
 }
@@ -174,6 +178,71 @@ function tree(p: ReturnType<typeof port>, opened: string[] = []) {
   assert.ok(body.textContent.includes("4.0 KB"),
     "and the new size of one that has grown");
   assert.equal(p.calls.length, 2, "having gone back to the disk exactly once to find out");
+}
+
+// --- 14: rows for a folder the reader has left -----------------------------
+{
+  const p = port();
+  const opened: string[] = [];
+  const t = tree(p, opened);
+  const body = (t.element as unknown as Node);
+
+  void t.setFolder("/dir");
+  await tick();
+  // Before the first folder answers, the reader picks a different one. Redraws
+  // are serialised, so the second folder is not even read until the first
+  // reply unblocks the queue — which is what gives the late reply its chance
+  // to reach the panel.
+  void t.setFolder("/other");
+  await tick();
+  assert.deepEqual(p.calls, ["/dir"], "the queued redraw is still waiting on the first read");
+
+  // The first folder answers late, and the second is now outstanding. The
+  // panel is watched at every step in between, not merely once it has settled:
+  // the queued redraw of the folder the reader actually asked for will clear
+  // whatever is there, so a snapshot taken at the end would be satisfied by
+  // rows that had been on screen, and clickable, a moment earlier.
+  const frames: string[][] = [];
+  p.resolve(0, [file("from-a.md")]);
+  for (let i = 0; i < 60; i++) {
+    await Promise.resolve();
+    frames.push(body.labels());
+  }
+  assert.deepEqual(p.calls, ["/dir", "/other"], "which sets the second folder being read");
+  const stale = frames.find((labels) => labels.includes("from-a.md"));
+  assert.equal(stale, undefined,
+    "at no point does a listing of the folder the reader has left reach the panel");
+  assert.equal(opened.length, 0, "so there was never a stale row there to open");
+
+  await p.settle(1, [{ name: "from-b.md", path: "/other/from-b.md", isDir: false, size: 1, modified: 0 }]);
+  assert.deepEqual(body.labels(), ["from-b.md"], "the folder that was asked for arrives and is drawn");
+  body.rows()[0].click();
+  assert.deepEqual(opened, ["/other/from-b.md"], "and its rows open the file they name");
+}
+
+// --- 14: while a folder is being read, it says so --------------------------
+{
+  const p = port();
+  const t = tree(p);
+  const body = (t.element as unknown as Node);
+
+  void t.setFolder("/dir");
+  await tick();
+  assert.ok(body.textContent.includes("正在读取"),
+    "a folder that has been asked for but not answered says it is being read");
+
+  await p.settle(0, [file("a.md")]);
+  assert.deepEqual(body.labels(), ["a.md"], "and is replaced by the folder itself");
+
+  // A refresh of the folder already on screen must not blink: the rows stay
+  // until the new ones are ready to take their place.
+  const refreshed = t.refresh();
+  await tick();
+  assert.deepEqual(body.labels(), ["a.md"],
+    "a refresh of the folder already shown leaves it standing while it re-reads");
+  await p.settle(1, [file("a.md")]);
+  await refreshed;
+  assert.deepEqual(body.labels(), ["a.md"], "and puts it back when the answer comes");
 }
 
 console.log("all passing");

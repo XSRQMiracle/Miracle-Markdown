@@ -232,11 +232,28 @@ export function buildFileTree(options: FileTreeOptions): FileTree {
 
   /** Serialised, so two overlapping redraws cannot interleave their rows. */
   let drawing: Promise<void> = Promise.resolve();
+  /** The folder whose rows are on screen, so a switch can be told from a
+   *  re-read of what is already there. */
+  let painted: string | null = null;
   const draw = (): Promise<void> => {
     drawing = drawing.then(async () => {
       if (!folder) {
+        painted = null;
         message("还没有打开文件夹。", { label: "打开文件夹…", run: options.onChooseFolder });
         return;
+      }
+      const era = generation;
+      const wanted = folder;
+      // Reading a folder can take a moment, and until it answers the panel has
+      // nothing true to show about it. Saying so beats both alternatives: an
+      // empty panel looks like an empty folder, and the folder the reader has
+      // just left looks like the one they asked for — and its rows would open
+      // its files. Only on a switch, though; re-reading the folder already on
+      // screen leaves it standing, because a note that flashed on every save
+      // would be worse than the fault it guards against.
+      if (painted !== wanted) {
+        painted = wanted;
+        message("正在读取这个文件夹…");
       }
       const next = document.createElement("div");
       const header = document.createElement("button");
@@ -256,6 +273,11 @@ export function buildFileTree(options: FileTreeOptions): FileTree {
         rows.appendChild(note);
       }
       next.appendChild(rows);
+      // The reader may have moved on while the folder was being read. These
+      // rows name files in a folder that is no longer open, and committing
+      // them would not merely be out of date: every one of them is a button
+      // that opens the file it names.
+      if (era !== generation || wanted !== folder) return;
       body.textContent = "";
       body.appendChild(next);
     });
