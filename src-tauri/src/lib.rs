@@ -33,6 +33,13 @@ const UNDO_MENU_ID: &str = "undo";
 #[cfg(target_os = "macos")]
 const REDO_MENU_ID: &str = "redo";
 
+/// Select All is ours for a related reason, not the same one. Cut, Copy and
+/// Paste each raise a DOM event that the editor intercepts, so they can stay
+/// with the platform; `selectAll:` raises none, and selects whatever is in the
+/// focused field — which is the hidden collector, empty between keystrokes.
+#[cfg(target_os = "macos")]
+const SELECT_ALL_MENU_ID: &str = "select-all";
+
 /// Which windows are holding a document that has to be asked about before it
 /// can go away, and which of them have already had their say.
 ///
@@ -407,12 +414,12 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tau
         &[&PredefinedMenuItem::close_window(app, None)?],
     )?;
 
-    // Cut, Copy, Paste and Select All stay predefined, so that they keep going
-    // through the responder chain to whatever is focused — which is right for
-    // them, because the clipboard is the platform's and the hidden textarea
-    // carries the selection at the moment either is asked for. Undo and Redo
-    // cannot stay predefined, because the history they would reach is that
-    // same textarea's, and the document's history is not in the DOM at all.
+    // Cut, Copy and Paste stay predefined, so that they keep going through the
+    // responder chain to whatever is focused: each of them raises a DOM event,
+    // and the editor answers it with the document's own range. Undo, Redo and
+    // Select All raise nothing the editor can answer — the first two would
+    // reach the hidden collector's history and the third its empty contents —
+    // so those three carry an id and are routed by the window instead.
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
@@ -424,7 +431,7 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tau
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,
-            &PredefinedMenuItem::select_all(app, None)?,
+            &MenuItem::with_id(app, SELECT_ALL_MENU_ID, "Select All", true, Some("CmdOrCtrl+A"))?,
         ],
     )?;
 
@@ -485,6 +492,7 @@ fn with_app_menu(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::W
             QUIT_MENU_ID => app.exit(0),
             UNDO_MENU_ID => send_edit_command(app, "undo"),
             REDO_MENU_ID => send_edit_command(app, "redo"),
+            SELECT_ALL_MENU_ID => send_edit_command(app, "selectAll"),
             _ => {}
         })
 }

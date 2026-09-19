@@ -373,12 +373,15 @@ async function main() {
   await onEditCommand((command) => {
     const target = historyTargetFor(document.activeElement, editor.owns(document.activeElement));
     if (target === "field") {
-      // The platform's own history, for the platform's own text fields.
-      document.execCommand(command === "redo" ? "redo" : "undo");
+      // The platform's own behaviour, for the platform's own text fields.
+      const field = document.activeElement as HTMLInputElement | HTMLTextAreaElement;
+      if (command === "selectAll") field.select();
+      else document.execCommand(command === "redo" ? "redo" : "undo");
       return;
     }
     editor.focus();
-    if (command === "redo") editor.redo();
+    if (command === "selectAll") editor.selectAll();
+    else if (command === "redo") editor.redo();
     else editor.undo();
   });
 

@@ -113,4 +113,31 @@ function editing(text: string) {
   assert.equal(s.editor.text, "abc", "so nothing is undone by it");
 }
 
+// --- Select All is routed for the same reason, by a different mechanism -----
+//
+// Cut, Copy and Paste can stay with the platform because each raises a DOM
+// event the editor answers with the document's own range. `selectAll:` raises
+// nothing: it selects the focused field, and that field is the collector,
+// which is empty. Verified natively — the menu item selected nothing and the
+// next character was appended rather than replacing the document.
+{
+  const s = editing("alpha beta gamma");
+  assert.equal(s.editor.selStart, s.editor.selEnd, "typing leaves a caret, not a selection");
+
+  s.editor.selectAll();
+  assert.deepEqual([s.editor.selStart, s.editor.selEnd], [0, "alpha beta gamma".length],
+    "the document's own selectAll covers the whole document, which is what the menu must reach");
+
+  // The collector the native command would have acted on instead.
+  assert.equal(s.input.value, "",
+    "while the hidden field it would have selected is empty, which is why nothing happened");
+}
+{
+  // Routing: the menu has one Select All and two possible meanings.
+  assert.equal(historyTargetFor({ tagName: "TEXTAREA" }, true), "document",
+    "in the editor it means the document");
+  assert.equal(historyTargetFor({ tagName: "INPUT" }, false), "field",
+    "in the find box it means that box, which is where the platform already had it right");
+}
+
 console.log("all passing");

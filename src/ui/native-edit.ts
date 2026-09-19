@@ -12,9 +12,17 @@
  * and every ordinary field in the chrome — the search box, the replacement
  * box, a dialog — keeps the platform's, which is the behaviour anyone typing
  * in a text field expects and which it would be rude to take away.
+ *
+ * Select All is here for a related reason and not the same one. Cut, Copy and
+ * Paste can stay with the platform because each of them raises a DOM event
+ * that the editor intercepts, substituting the document's own range for the
+ * hidden textarea's. `selectAll:` raises no event at all — it simply selects
+ * what is in the focused field, and that field is a keystroke collector which
+ * is empty between keystrokes. So the menu item selected nothing, and the
+ * next character typed was appended instead of replacing the document.
  */
 
-export type EditCommand = "undo" | "redo";
+export type EditCommand = "undo" | "redo" | "selectAll";
 /** Whose history a command should drive. */
 export type HistoryTarget = "document" | "field";
 
