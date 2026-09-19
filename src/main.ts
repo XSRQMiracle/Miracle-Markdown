@@ -28,7 +28,7 @@ import { directoryOf, imageBase, onImageSettled, setImageBase } from "./engine/i
 import { DocumentSession } from "./markdown/session.js";
 import { confirmUnsavedDocument, showDocumentError } from "./ui/document-dialog.js";
 import { buildFindBar } from "./ui/find-bar.js";
-import { buildShortcutSheet } from "./ui/shortcut-sheet.js";
+import { buildShortcutSheet, formatChord } from "./ui/shortcut-sheet.js";
 import { buildSidebar } from "./ui/sidebar.js";
 import { buildFileTree } from "./ui/file-tree.js";
 import { buildTypographyPopover } from "./ui/typography.js";
@@ -216,6 +216,24 @@ async function main() {
   const findBar = buildFindBar(el("find-bar"), editor);
   const apple = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   const sheet = buildShortcutSheet(el("shortcuts"), apple);
+  // Each toolbar button says which chord it answers to, and the two platforms
+  // write a chord differently — there is no Command key outside macOS, so a ⌘
+  // written into the markup is wrong on two of the three platforms this runs
+  // on. The markup carries the description; the chord is put on the end of it
+  // here, formatted by the same function the shortcut sheet uses, so the two
+  // can never disagree about how a chord is spelt.
+  const HINTS: [HTMLElement, string][] = [
+    [sidebarToggle, "Mod+Shift+b"],
+    [newWindowButton, "Mod+n"],
+    [openButton, "Mod+o"],
+    [saveButton, "Mod+s"],
+    [saveAsButton, "Mod+Shift+s"],
+    [findButton, "Mod+f"],
+    [prefsButton, "Mod+,"],
+  ];
+  for (const [element, chord] of HINTS) {
+    element.title = `${element.title}（${formatChord(chord, apple)}）`;
+  }
   const toggleSheet = () => {
     sheet.toggle();
     if (!sheet.isOpen) editor.focus();
@@ -411,7 +429,7 @@ async function main() {
   const syncMode = () => {
     mode.textContent = "";
     const badges = [
-      editor.editing.sourceMode ? "源代码模式 ⌘/" : "",
+      editor.editing.sourceMode ? `源代码模式 ${formatChord("Mod+/", apple)}` : "",
       editor.editing.focusMode ? "专注模式 F8" : "",
       editor.editing.typewriter ? "打字机 F9" : "",
     ].filter(Boolean);

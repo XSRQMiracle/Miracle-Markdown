@@ -1,7 +1,7 @@
 # Miracle Markdown
 
 一个用 TeX 的方式排版 Markdown 的编辑器。Tauri 2 + Rust。macOS 上开发与实测，
-Windows 尚未验证——代码是跨平台的，但没有在上面构建或运行过。
+Linux 已能构建并运行，Windows 尚未验证——代码是跨平台的，但没有在上面构建或运行过。
 
 浏览器的断行是贪心的：逐行填字，填不下就换行，从不回头。这里不是。整段文字交给
 Knuth–Plass 优化器，为每个合法断点计算代价，用动态规划找出总代价最小的一组断点。
@@ -252,8 +252,48 @@ MathJax 与 KaTeX 都不解析 `\ref`——它们一次只排一条公式，不�
 - **无障碍**。Canvas 上的文字对屏幕阅读器不可见，需要隐藏 DOM 镜像或 AccessKit。
 - **Windows**。没有构建过，也没有运行过：跨平台是代码的写法，不是已经验证的事实。
   输入法候选窗在 WebView2 上的定位、系统字体的差异都还没有结论。
+- **Linux 上的深入验证**。能构建、能跑起来（见下），但只到"窗口出来了"为止：
+  本地图片、中文输入法候选窗、关窗保存确认都还没有逐项走过。
 - **视口虚拟化**。目前每次重排都处理整篇文档；1.6 ms 对中等长度文档足够，但打开
   10 MB 文件需要只排可见部分。
+
+## 在 Linux 上构建
+
+系统依赖要的是 **webkit2gtk-4.1**，不是 4.0——那是 Tauri 1 的。Arch 系：
+
+```bash
+sudo pacman -S --needed webkit2gtk-4.1 base-devel curl wget file openssl \
+  appmenu-gtk-module libappindicator-gtk3 librsvg xdotool
+```
+
+Debian 系对应 `libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
+libssl-dev libayatana-appindicator3-dev librsvg2-dev`。
+
+然后是 Rust（用 rustup，因为要加 wasm 目标）、Node 18+ 和 wasm-pack：
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack
+npm ci && npm run tauri dev
+```
+
+**Wayland 上多半需要这一行**：
+
+```bash
+WEBKIT_DISABLE_DMABUF_RENDERER=1 npm run tauri dev
+```
+
+不加的话 WebKitGTK 2.52 的 DMA-BUF 渲染器会在部分合成器上抛
+`Gdk-Message: Error 71 (协议错误)`，窗口起不来。这是 WebKitGTK 与 Wayland
+之间的老问题，与编辑器无关；`WEBKIT_DISABLE_COMPOSITING_MODE=1` 和
+`GDK_BACKEND=x11` 是退而求其次的两个选项。已在 CachyOS + Wayland 上实测，
+第一行即可。
+
+打包时建议只出 AppImage——deb 和 rpm 在 Arch 上装不了：
+
+```bash
+npm run tauri build -- --bundles appimage
+```
 
 ## 许可证
 
