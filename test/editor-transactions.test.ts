@@ -5,6 +5,15 @@ import { DEFAULT_INLINE_OPTIONS, parseBlocks } from '../src/markdown/parse.js';
 
 (globalThis as any).window = Object.assign(new EventTarget(), { setInterval: () => 0 });
 (globalThis as any).ResizeObserver = class { observe() {} };
+// Which keyboard this file means. The bindings read the platform per keystroke
+// so that a test can say; left unsaid, it inherits the host's, and the ⌘⇧Z
+// below is a redo on a Mac and nothing at all anywhere else. Node reports
+// `MacIntel` on macOS, so that assertion passed there and failed on Linux
+// without either outcome having anything to do with the editor.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { platform: "MacIntel" },
+});
 function fixture(text='aOLDz', start=4, end=1) {
   const input = Object.assign(new EventTarget(), {value:'', blur() { this.dispatchEvent(new Event('blur')); }});
   const editor = Object.create(Editor.prototype) as any;
